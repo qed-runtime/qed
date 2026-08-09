@@ -1,0 +1,210 @@
+# Architecture
+
+QED keeps the provider-neutral execution loop small and composes optional
+capabilities around it. Coding is a Profile built above Runtime Core, not a
+special case inside it
+
+```text
+CLI / TUI / embedded host
+          |
+          +--------- configuration -------- Provider profiles
+          |                                      |
+          v                                      v
+    orchestration registry ---------------- Agent Runtime
+          |                              Run + streaming Events
+          |                                      |
+          |                           Session Event Log
+          |                                      |
+          +-------------------------- ComponentSource
+                                                 |
+                                  atomic generation-set lease
+                                                 |
+                                  Tools + Hooks + Commands
+                                                 |
+                                  Host Policy + approval
+                                      + Evidence recording
+                                                 |
+                                  framed JSON RPC over stdio
+                                                 |
+                             +-------------------+-------------------+
+                             |                                       |
+                      external executable                     self-exec child
+```
+
+## Package boundaries
+
+`agent` owns provider-neutral Messages, model streams, Runs, budgets, ordered
+Events, Tool calls, waits, Hooks, Session contracts, cancellation, and local
+execution limits. It has no filesystem, Git, CLI, TUI, or Provider wire-format
+behavior
+
+`provider/openai`, `provider/openaicodex`, and `provider/anthropic` translate
+the common model to streaming HTTP APIs. The Codex package is deliberately a
+separate dialect because it uses ChatGPT OAuth, a fixed backend, and additional
+account-routing headers rather than an OpenAI API key. Provider-private
+continuation state remains opaque and can be persisted by a Session Store
+without being emitted in public JSON
+
+`internal/chatauth` owns browser and device-code OAuth, named credential
+profiles, refresh, and the private user-level credential file. It exposes a
+credential source to `provider/openaicodex`; the Provider never owns persistent
+tokens and retries only once after an authorization rejection
+
+`orchestration` composes named Runtimes above `agent`. Each Runtime remains
+bound to one Provider, so a parent and its subagents may use different endpoint,
+credential, model, and protocol combinations without converting private state
+
+`session` implements the `agent.SessionStore` contract in memory and as an
+append-only JSONL Event Log. Runtime serializes concurrent Runs for one Session
+inside a process and Store revisions provide optimistic conflict detection
+
+`profile/coding` assembles bounded project context, one capability Policy, an
+Evidence recorder, and one or more process-isolated Extensions. The reusable
+`qed.workspace`, `qed.process`, and `qed.git` Extensions contribute its six
+standard Tools while keeping them outside Runtime Core
+
+`extension.ToolProxy` and `extension.CommandProxy` are host enforcement points.
+They combine static and invocation-specific capabilities, evaluate Policy,
+request approval when required, and invoke the remote component only after
+authorization. Tool Evidence is recorded in the Host
+
+`extension/protocol` defines Protocol v1 as 4-byte big-endian length-prefixed
+strict JSON over stdio. `extension/server` adapts Go Tools, Hooks, Commands, and
+lifecycle callbacks to that contract. `extension/host` supervises processes and
+generation leases
+
+`extension/manifest` validates the transport-independent declaration shared by
+external and embedded Extensions, resolves distributable manifests, and
+performs bounded recursive discovery. `internal/extensionlock` validates
+`extensions.lock` and generates the self-exec catalog consumed by
+`internal/extensionregistry`. `extension/reload` builds candidates, watches
+development source, and exposes an authenticated local reload control endpoint
+
+`evidence` builds versioned Bundles from a terminal Run, public Events, and
+host-owned Tool traces. Tool trace fields use payload digests, while public
+Events retain their observable payload for audit and replay. Evidence storage
+must therefore be treated as content-bearing and potentially sensitive
+
+`workspace` provides a canonical filesystem boundary and process-local locks
+for official workspace-scoped Tools. Traversal-resistant `os.Root` operations and edit
+preconditions protect file APIs from stale or escaping paths. They do not turn
+child processes into an operating-system sandbox
+
+`cmd/qed` and `internal/tuiapp` are adapters. Nagi remains inside these frontend
+packages and no Nagi type crosses into Runtime, Provider, or Extension APIs
+
+## Run and Event ordering
+
+A Run acquires one immutable Component generation set before execution and
+releases it after terminal completion or cancellation. Tool definitions and
+Hooks therefore cannot change midway through a Run, even while another
+generation reloads
+
+For each candidate Event, Runtime performs this order
+
+```text
+assign Run identity and candidate sequence
+  -> invoke matching synchronous Hooks
+  -> append to the Session Store when configured
+  -> publish to RunHandle.Events
+```
+
+A Hook error rejects that Event and fails the Run. In particular, rejection of
+`run.completed` produces one `run.failed` terminal Event rather than persisting
+two terminal states. Session revision is assigned by the Store after Hooks
+succeed
+
+`run.waiting` records the external input request. `RunHandle.Resume` emits
+`run.resumed` and continues the in-memory Run. A later process can load a
+persisted pending wait and resume its associated Tool call without repeating
+the completed Provider request
+
+## Configuration ownership
+
+A Provider profile owns protocol, endpoint, model, output limit, and credential
+source. An Extension definition owns its process startup. An execution Profile
+references one or more Extensions and owns capability rules plus the selected
+Tool-process environment. An Agent independently references a Provider and an
+optional execution Profile
+
+This split permits mixed-Provider Agent graphs and prevents Provider
+credentials from becoming Extension environment by default. API-key values
+and workspace absolute paths are supplied by the invoking host rather than
+stored in portable JSON. ChatGPT tokens live in a separate permission-restricted
+user credential file; portable configuration contains only its profile name
+
+Session, Evidence, and Extension state are separate stores because their
+lifetimes and disclosure risks differ. Extension state is namespaced by
+Extension ID and a host-selected workspace/Profile scope
+
+## Extension lifecycle
+
+Initial startup must complete the following sequence before components become
+available
+
+```text
+start process
+  -> Handshake exact protocol and identity
+  -> Initialize host-selected resources and verbose state
+  -> Describe Tools, Hooks, Commands, and capabilities
+  -> validate the locked or external manifest declaration when present
+  -> HealthCheck
+  -> publish generation
+```
+
+Reload builds or selects a separate executable, starts and validates it, takes
+an opaque Snapshot from the old generation, persists it when configured,
+Restores the candidate, and performs another HealthCheck. Only then does the
+Host atomically publish the candidate for new Runs. Existing leases retain the
+old process until it can Drain and Shutdown. Any pre-swap failure leaves the
+old generation active
+
+`GenerationSet` takes a read lock while acquiring one generation from every
+configured Extension. Reload takes the corresponding write lock, so a Run sees
+the complete set before or after a swap, never a partially acquired set
+
+External manifests declare identity, implementation version, protocol version,
+entrypoint, capabilities, Hooks, and Commands. Tool definitions remain dynamic
+and are validated during Describe. The production loader requires a real
+non-symlink entrypoint; development loading permits the build output to be
+absent before the first build
+
+`extensions.lock` selects Go packages for static linking and records the same
+declaration without an external entrypoint. Generated self-exec entries and
+external manifests both become `ProcessOptions.ExpectedManifest`, so the Host
+does not branch on who supplied an Extension. The launcher differs, but
+Handshake, Describe validation, lifecycle, Policy, and generation semantics do
+not. Go dependency versions and checksums remain in `go.mod` and `go.sum`
+
+## Diagnostics boundary
+
+Verbose mode is a host-owned boolean carried through configuration,
+`agent.Options`, `host.ProcessOptions`, and `InitializeRequest`. The Extension
+Server activates stderr diagnostics only after it receives verbose Initialize
+
+Host logs are structured and omit content-bearing fields. Child stderr is
+bounded. Only records carrying QED's safe-debug marker and an allowlisted
+message shape are forwarded as structured Host diagnostics; arbitrary child
+stderr is never copied into verbose output
+
+## Trade-offs
+
+- Tool calls are sequential within one Run, preserving deterministic mutation
+  and Evidence order; independent Agent Runs can execute concurrently
+- Candidate and judge Runs share orchestration budgets, while token and cost
+  limits depend on Provider-reported usage that may arrive only at response end
+- Old and new Extension processes may overlap during retirement and do not
+  share process-local Workspace locks, so edit digests remain the cross-process
+  stale-write defense
+- `run_command` is deliberately broad and must be governed as a host permission
+  or wrapped in an external sandbox
+- Tool Trace records hash raw payloads, but Bundle Events preserve public Run
+  content for audit; an Evidence Store is not a secret-free telemetry sink or a
+  complete workspace archive
+- Multi-file patches are prevalidated and rolled back on ordinary failures but
+  are not crash-atomic filesystem transactions
+- JSONL and JSON stores are local implementations; multi-worker deployments
+  need externally coordinated Store adapters
+- ChatGPT OAuth follows an evolving Codex backend contract rather than the
+  public OpenAI API contract; QED isolates that risk in `provider/openaicodex`
+  and currently implements only the full SSE dialect

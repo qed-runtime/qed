@@ -1,0 +1,452 @@
+# QED Runtime
+
+QED RuntimeはGoで実装された組み込み可能なエージェントランタイムです
+
+> Proof by execution
+
+このプロジェクトは初期プロトタイプですが、主要なアーキテクチャ境界は現在の実装で動作します
+
+- 非同期Runと順序付きストリーミングEvent
+- OpenAI Responses、OpenAI Chat Completions、Anthropic Messages、ChatGPT認証のCodex Responses Provider
+- 1つのAgent graphで利用できる複数Provider profile
+- collect、select、consensusに対応する並行サブエージェント
+- 永続Session、永続的な承認待ち、resume
+- process分離Extension内のcapability制御されたCoding Tool
+- 複数のRun固定Extension generation、Hook、Command、host所有state
+- manifest discoveryと開発時のatomic reload
+- `extensions.lock`から生成するself-exec catalogとlive manifest validation
+- host所有Evidence Bundle
+- NagiベースのCLIと単一turn TUI
+- 末端のExtension processまで伝搬する安全な構造化diagnostics
+
+## 要件
+
+- Go 1.25以降
+- 実験的TUIにはLinuxまたはmacOS
+
+Provider非依存のRuntimeはGo標準ライブラリを使用します
+NagiはCLIとTUI Adapter内に限定され、その型はRuntime API境界を越えません
+開発ツールは独立した`tools` moduleに固定されています
+
+## Smoke test
+
+```sh
+go run ./cmd/qed run --prompt "hello"
+```
+
+期待する出力
+
+```text
+hello
+```
+
+すべてのRun EventをJSON Linesで確認できます
+
+```sh
+go run ./cmd/qed run --prompt "hello" --output jsonl
+```
+
+echo Providerは`run.started`、userとmodelのEvent、text delta、`run.completed`を含む完全なlifecycleを出力します
+
+root flagでstderrへの安全な構造化diagnosticsを有効にできます
+
+```sh
+go run ./cmd/qed --verbose run --prompt "hello"
+```
+
+verbose modeはRuntime、Extension Host、Initialize RPC、Extension Serverへ伝搬します
+QEDのdiagnosticsは識別子、操作名、件数、処理時間、error typeを含みます
+prompt、message本文、Tool引数と出力、metadata value、credential、environment value、Extension configuration valueは意図的に含みません
+
+## Model APIへの接続
+
+QEDはmodel SDKへ依存せず、4つのストリーミングHTTP API dialectを実装しています
+
+- `openai-responses`
+- `openai-chat`
+- `openai-codex`
+- `anthropic`
+
+model IDは常に明示します
+
+```sh
+export OPENAI_API_KEY="<token>"
+go run ./cmd/qed run \
+  --provider openai-responses \
+  --model "<model-id>" \
+  --prompt "Reply with a short greeting"
+```
+
+```sh
+export ANTHROPIC_API_KEY="<token>"
+go run ./cmd/qed run \
+  --provider anthropic \
+  --model "<model-id>" \
+  --max-output-tokens 1024 \
+  --prompt "Reply with a short greeting"
+```
+
+信頼できるOpenAI互換endpointでは、operation URLではなくAPI base URLを渡します
+
+```sh
+go run ./cmd/qed run \
+  --provider openai-chat \
+  --base-url "http://127.0.0.1:8080/v1" \
+  --model "local-model" \
+  --prompt "hello"
+```
+
+custom base URLへ既定のOpenAIまたはAnthropic credentialを送りません
+信頼でき、認証が必要なcustom endpointに限り`QED_API_KEY`を設定します
+
+### ChatGPT subscriptionの利用
+
+`openai-codex`はOpenAI API keyではなく、名前付きChatGPT OAuth profileを利用します
+
+```sh
+go run ./cmd/qed auth login --auth-profile personal
+go run ./cmd/qed run \
+  --provider openai-codex \
+  --auth-profile personal \
+  --model "<codex-model-id>" \
+  --prompt "Reply with a short greeting"
+```
+
+headless環境では`qed auth login --device-code`を利用します
+`qed auth status`はcredentialを表示せずprofile metadataだけを表示し、`qed auth logout`はprofileを削除します
+access tokenとrefresh tokenはproject設定とは別にOS user configuration directoryへ保存されます
+
+ChatGPT subscriptionとOpenAI API課金は別の認証経路です
+Providerは固定のChatGPT Codex backendを使い、`--base-url`と`--max-output-tokens`を受け取りません
+securityと現在のprotocol制限は[ChatGPT subscription認証](docs/chatgpt-auth_ja.md)を参照してください
+
+## 複数ProviderとAgentの設定
+
+Provider endpoint、protocol、model、credential参照を1つのprofileとして対応付けます
+各AgentはProviderを独立に選択できるため、OpenAI互換のcoordinatorからAnthropicのsubagentを利用できます
+
+```json
+{
+  "version": 1,
+  "default_agent": "coordinator",
+  "providers": {
+    "primary": {
+      "protocol": "openai-responses",
+      "model": "<openai-model-id>",
+      "token_env": "PRIMARY_API_TOKEN"
+    },
+    "review": {
+      "protocol": "anthropic",
+      "model": "<anthropic-model-id>",
+      "token_env": "REVIEW_API_TOKEN"
+    }
+  },
+  "agents": {
+    "reviewer": {
+      "provider": "review",
+      "instructions": "Review the delegated task independently"
+    },
+    "coordinator": {
+      "provider": "primary",
+      "delegations": [
+        {
+          "name": "consult_reviewer",
+          "strategy": "delegate",
+          "agents": ["reviewer"]
+        }
+      ]
+    }
+  }
+}
+```
+
+```sh
+export PRIMARY_API_TOKEN="<token>"
+export REVIEW_API_TOKEN="<token>"
+go run ./cmd/qed run --config ./qed.json --prompt "Review this plan"
+```
+
+`--agent <id>`で`default_agent`を1回の実行だけ上書きできます
+設定にはtoken valueではなくcredential environment名またはauth profile名を記載します
+完全なschemaは[Agent設定](docs/configuration_ja.md)を参照してください
+
+## Coding Profileの実行
+
+標準Coding Profileは6つのmodel-facing Toolを公開します
+
+- `search_text`
+- `read_file`
+- `apply_patch`
+- `run_command`
+- `git_status`
+- `git_diff`
+
+checked-in `extensions.lock`はこのbinary向けに再利用可能な`qed.workspace`、`qed.process`、`qed.git` Extensionを選択します
+各Extensionはsingle binaryのself-exec modeを含め、常にExtension Protocol v1境界で実行されます
+
+```json
+{
+  "version": 1,
+  "default_agent": "coding",
+  "providers": {
+    "model": {
+      "protocol": "openai-responses",
+      "model": "<model-id>",
+      "token_env": "MODEL_API_TOKEN"
+    }
+  },
+  "extensions": {
+    "qed.workspace": {"mode": "self-exec"},
+    "qed.process": {"mode": "self-exec"},
+    "qed.git": {"mode": "self-exec"}
+  },
+  "profiles": {
+    "workspace": {
+      "kind": "coding",
+      "extensions": ["qed.workspace", "qed.process", "qed.git"],
+      "capabilities": {
+        "allow": [
+          "filesystem.read",
+          "filesystem.write",
+          "process.execute",
+          "git.read"
+        ],
+        "deny": ["filesystem.delete"]
+      },
+      "environment": ["PATH", "HOME"]
+    }
+  },
+  "agents": {
+    "coding": {"provider": "model", "profile": "workspace"}
+  },
+  "session": {"store": "jsonl", "path": ".qed/sessions"},
+  "evidence": {"store": "json", "path": ".qed/evidence"},
+  "extension_state": {"store": "json", "path": ".qed/extension-state"}
+}
+```
+
+```sh
+export MODEL_API_TOKEN="<token>"
+go run ./cmd/qed run \
+  --config ./qed.json \
+  --workspace . \
+  --session-id work-1 \
+  --prompt "Find the failing test, fix it, and run the relevant checks"
+```
+
+Profileはworkspace相対pathを受け取り、編集時にdigestまたはabsence preconditionを必須とし、capability decisionとTool digestをhost所有Evidenceへ記録します
+`run_command`はargvを直接実行して上限を適用しますが、OS sandboxではありません
+
+詳細な境界は[Coding Profile](docs/coding-profile_ja.md)と[Extension process](docs/extensions_ja.md)を参照してください
+
+## 承認、Session resume、Evidence
+
+Profileの`ask` listへcapabilityを置き、対話承認を有効にできます
+
+```sh
+go run ./cmd/qed run \
+  --config ./qed.json \
+  --approval prompt \
+  --session-id work-1 \
+  --prompt "Run the relevant checks"
+```
+
+承認は`run.waiting`と`run.resumed` Eventを生成します
+JSONL Sessionの待機中にprocessが終了した場合、直前のProvider requestを繰り返さず、保留中のTool callだけをresumeできます
+
+```sh
+go run ./cmd/qed session resume work-1 --config ./qed.json
+```
+
+Evidence Storeが設定されている場合、設定Run、設定TUI Run、resume RunはEvidence Bundleを保存します
+
+```sh
+go run ./cmd/qed run inspect <run-id> --store .qed/evidence
+go run ./cmd/qed run export <run-id> --store .qed/evidence
+```
+
+同じ機能を`qed evidence inspect`と`qed evidence export`でも利用できます
+
+## 実験的TUI
+
+```sh
+go run ./cmd/qed tui --prompt "hello"
+```
+
+TUIは`--config`、`--agent`、`--workspace`、`--session-id`にも対応し、同じ設定Agent graphを利用します
+Runが承認待ちになった場合は`Y`で許可、`N`で拒否します
+`Q`またはEscapeで終了し、Ctrl-Cはstatus 130のcancelとして扱います
+
+## 外部Extensionの開発
+
+外部Extension directoryには`qed-extension.json`を配置します
+sourceから直接development hostを開始できます
+
+```sh
+go run ./cmd/qed extension dev ./extensions/my-extension
+```
+
+既定build commandは`go build -o {output} .`です
+QEDはsource metadataを監視し、candidateごとに異なる一時実行ファイルをbuildし、検証とrestoreの後に新規Runを新generationへatomicに切り替えます
+buildまたはcandidateが失敗した場合はactive generationを維持します
+
+別processから操作できます
+
+```sh
+go run ./cmd/qed extension inspect my-extension
+go run ./cmd/qed extension reload my-extension
+```
+
+local control endpointはprivate descriptor、random bearer token、loopback TCPを使用します
+manifestとcustom buildの詳細は[Extension process](docs/extensions_ja.md)を参照してください
+
+## self-exec Extension catalogのbuild
+
+`extensions.lock`はstatic linkするGo Extension packageを選択し、各child processが一致すべきmanifest declarationを記録します
+変更後はchecked-in catalogを生成し、CIでは`--check`で確認します
+
+```sh
+go run ./cmd/qed extension generate
+go run ./cmd/qed extension generate --check
+```
+
+lockはfirst-partyとthird-party packageを区別しません
+dependencyのversionとchecksumは`go.mod`と`go.sum`を正とし、生成処理は変更しません
+Go以外のExtensionは外部executableから同じprotocolを引き続き利用できます
+lock schemaと検証順序は[Extension process](docs/extensions_ja.md)を参照してください
+
+## Runtimeの組み込み
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	"github.com/qed-runtime/qed/agent"
+	"github.com/qed-runtime/qed/provider/echo"
+)
+
+func main() {
+	runtime, err := agent.NewRuntime(agent.Options{Provider: echo.New()})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		AgentID: "example",
+		Input: []agent.Message{
+			{Role: agent.RoleUser, Text: "hello"},
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for event := range handle.Events() {
+		log.Printf("event: %s", event.Type)
+	}
+	result, err := handle.Wait()
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("status: %s", result.Status)
+}
+```
+
+`agent.ComponentSource`を使うと、ToolsとHooksをRun単位でatomicに固定できます
+標準Session実装は`session` packageで提供され、orchestrationはRuntime Coreより上位の独立packageです
+
+### 複数Providerの合成
+
+各Runtimeは1つのProviderに固定されます
+`orchestration.AgentRegistry`はprovider-privateなcontinuation stateを変換せず、名前付きRuntimeを合成します
+
+```go
+registry, err := orchestration.NewAgentRegistry(orchestration.AgentRegistryOptions{
+	Agents: []orchestration.AgentDefinition{
+		{
+			ID:           "anthropic-specialist",
+			Runtime:      anthropicRuntime,
+			Instructions: "Review the delegated task",
+		},
+	},
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+delegateTool, err := orchestration.NewSubagentTool(orchestration.SubagentToolOptions{
+	Name:     "consult_specialist",
+	Registry: registry,
+	Strategy: orchestration.TeamStrategyDelegate,
+	AgentIDs: []string{"anthropic-specialist"},
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+openAIRuntime, err := agent.NewRuntime(agent.Options{
+	Provider: openAIProvider,
+	Tools:    []agent.Tool{delegateTool},
+})
+if err != nil {
+	log.Fatal(err)
+}
+if err := registry.Register(orchestration.AgentDefinition{
+	ID: "openai-coordinator", Runtime: openAIRuntime,
+}); err != nil {
+	log.Fatal(err)
+}
+```
+
+`delegate`は1つのcandidateを実行し、`collect`は全outcomeを返し、`select`はjudgeにcandidateを選択させ、`consensus`はjudgeに結果を統合させます
+candidateは並行実行され、異なるProvider protocolを利用できます
+共有既定上限はAgent Run 16、depth 4、Provider call 64です
+
+## 主なimport path
+
+- `github.com/qed-runtime/qed/agent`
+- `github.com/qed-runtime/qed/orchestration`
+- `github.com/qed-runtime/qed/session`
+- `github.com/qed-runtime/qed/provider/openai`
+- `github.com/qed-runtime/qed/provider/openaicodex`
+- `github.com/qed-runtime/qed/provider/anthropic`
+- `github.com/qed-runtime/qed/capability`
+- `github.com/qed-runtime/qed/evidence`
+- `github.com/qed-runtime/qed/extension`
+- `github.com/qed-runtime/qed/extension/host`
+- `github.com/qed-runtime/qed/extension/manifest`
+- `github.com/qed-runtime/qed/extension/protocol`
+- `github.com/qed-runtime/qed/extension/reload`
+- `github.com/qed-runtime/qed/extension/server`
+- `github.com/qed-runtime/qed/profile/coding`
+
+## 開発
+
+```sh
+go -C tools tool goimports -w ../agent ../capability ../evidence ../extension ../extensions ../orchestration ../profile ../provider ../session ../workspace ../cmd ../internal
+go run ./cmd/qed extension generate --check
+go test ./...
+go vet ./...
+go build ./...
+```
+
+## 現在の制限
+
+- Extension processはcrash隔離されますが自動restartされません
+- `run_command`とExtension child processはhost account権限で動作し、OS sandboxではありません
+- Tool Trace recordはhashを使いますが、Bundleのpublic Eventはprompt、message、Tool引数、Tool output、errorを含む場合があるためEvidence Storeを機密データとして保護する必要があります
+- Evidenceは完全なworkspace archiveではありません
+- 公式Toolはstrictな具象argument decoderで検証し、汎用JSON Schema validation engineはありません
+- `git_diff`はuntracked fileの内容を含みません
+- 共有tokenとcost上限はProviderがusageを遅れて返す場合や返さない場合に完全には強制できません
+- TUIは単一turn interfaceであり、永続chat clientではありません
+- HTTP server、GitHub Actions Adapter、SQLite Session Store、WebAssembly backendは未実装です
+- すべてのthird-party OpenAI互換APIとの互換性は保証しません
+- `openai-codex`はexperimentalなChatGPT backend contractに追従し、現在はmodel discovery、Responses Lite、WebSocket transportを持たないfull ResponsesのSSE経路だけを利用します
+
+## License
+
+[MIT](LICENSE)

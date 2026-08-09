@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "extensions": [
+    {
+      "go_package": "github.com/qed-runtime/qed/extensions/git",
+      "factory": "ServerOptions",
+      "manifest": {
+        "id": "qed.git",
+        "version": "0.1.0",
+        "protocol_version": 1,
+        "capabilities": ["git.read"]
+      }
+    },
+    {
+      "go_package": "github.com/qed-runtime/qed/extensions/process",
+      "factory": "ServerOptions",
+      "manifest": {
+        "id": "qed.process",
+        "version": "0.1.0",
+        "protocol_version": 1,
+        "capabilities": ["process.execute"]
+      }
+    },
+    {
+      "go_package": "github.com/qed-runtime/qed/extensions/workspace",
+      "factory": "ServerOptions",
+      "manifest": {
+        "id": "qed.workspace",
+        "version": "0.1.0",
+        "protocol_version": 1,
+        "capabilities": ["filesystem.read", "filesystem.write"]
+      }
+    }
+  ]
+}
