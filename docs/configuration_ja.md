@@ -193,8 +193,9 @@ credential保存、refresh、protocol制限は[ChatGPT subscription認証](chatg
 }
 ```
 
-Self-execはcurrent QED binaryをhidden Extension entrypointで起動します
-利用可能なIDは`extensions.lock`から生成したcatalogで決まり、QED repositoryは現在`qed.workspace`、`qed.process`、`qed.git`を選択します
+Self-execはcurrent Host executableをhidden Extension entrypointで起動します
+利用可能なIDはHost側の`extensions.lock`から生成したcatalogで決まり、公式QED executableは現在`qed.workspace`、`qed.process`、`qed.git`を選択します
+組み込みapplicationは独自Catalogを`qed.HostLoadOptions`へ渡します
 Hostは外部manifestと同じ方法でlock済みdeclarationをlive processと照合します
 このmodeは`command`と`manifest`を拒否します
 
@@ -405,4 +406,7 @@ diagnosticsはstderrへ構造化出力され、content-bearing valueとsecret va
 - graphを返す前にすべての参照Extensionを起動してlifecycleを検証
 - version 1はexperimentalであり、最初のstable release前はmigrationなしで変更される可能性あり
 
-embedding hostは`Configuration.Close`または`CloseContext`を呼び、設定済みExtension processをdrainして停止する必要があります
+embedding applicationは`qed.LoadHost`でこのschemaを読み込みます
+self-exec entryにはapplicationの生成Catalogとabsoluteな現在のexecutableを`qed.HostLoadOptions`へ渡す必要があります
+applicationは`Host.Close`または`CloseContext`を呼び、設定済みExtension processをdrainして停止します
+詳細は[QEDの組み込み](embedding_ja.md)を参照してください

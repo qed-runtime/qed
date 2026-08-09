@@ -15,7 +15,7 @@ import (
 	"github.com/qed-runtime/qed/agent"
 	"github.com/qed-runtime/qed/capability"
 	"github.com/qed-runtime/qed/extension/host"
-	"github.com/qed-runtime/qed/extension/server"
+	"github.com/qed-runtime/qed/extension/selfexec"
 	gitextension "github.com/qed-runtime/qed/extensions/git"
 	processextension "github.com/qed-runtime/qed/extensions/process"
 	workspaceextension "github.com/qed-runtime/qed/extensions/workspace"
@@ -24,18 +24,13 @@ import (
 )
 
 func TestMain(testingMain *testing.M) {
-	if len(os.Args) == 3 && os.Args[1] == "__extension" {
-		definition, registered := extensionregistry.Lookup(os.Args[2])
-		if !registered {
-			_, _ = fmt.Fprintln(os.Stderr, "unknown test Extension")
-			os.Exit(1)
-		}
-		options, err := definition.NewServerOptions()
-		if err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		if err := server.Serve(context.Background(), os.Stdin, os.Stdout, options); err != nil {
+	if len(os.Args) >= 2 && os.Args[1] == selfexec.ChildArgument {
+		handled, err := extensionregistry.Catalog.Dispatch(context.Background(), selfexec.DispatchOptions{
+			Arguments: os.Args[1:],
+			Input:     os.Stdin,
+			Output:    os.Stdout,
+		})
+		if !handled || err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -87,21 +82,21 @@ func TestCodingProfileRunsCompleteSixToolLoop(t *testing.T) {
 				ID: workspaceextension.ID,
 				Command: host.Command{
 					Path: testExecutable,
-					Args: []string{"__extension", workspaceextension.ID},
+					Args: []string{selfexec.ChildArgument, workspaceextension.ID},
 				},
 			},
 			{
 				ID: processextension.ID,
 				Command: host.Command{
 					Path: testExecutable,
-					Args: []string{"__extension", processextension.ID},
+					Args: []string{selfexec.ChildArgument, processextension.ID},
 				},
 			},
 			{
 				ID: gitextension.ID,
 				Command: host.Command{
 					Path: testExecutable,
-					Args: []string{"__extension", gitextension.ID},
+					Args: []string{selfexec.ChildArgument, gitextension.ID},
 				},
 			},
 		},

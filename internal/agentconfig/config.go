@@ -25,8 +25,8 @@ import (
 	"github.com/qed-runtime/qed/extension/host"
 	extensionmanifest "github.com/qed-runtime/qed/extension/manifest"
 	"github.com/qed-runtime/qed/extension/protocol"
+	"github.com/qed-runtime/qed/extension/selfexec"
 	"github.com/qed-runtime/qed/internal/chatauth"
-	"github.com/qed-runtime/qed/internal/extensionregistry"
 	"github.com/qed-runtime/qed/internal/jsonstrict"
 	"github.com/qed-runtime/qed/orchestration"
 	"github.com/qed-runtime/qed/profile/coding"
@@ -62,8 +62,10 @@ type LoadOptions struct {
 	// AuthStorePath overrides the OS-default QED credential file for
 	// openai-codex profiles when non-empty
 	AuthStorePath string
-	// SelfExecutable is the absolute QED executable used by self-exec Extensions
+	// SelfExecutable is the absolute host executable used by self-exec Extensions
 	SelfExecutable string
+	// SelfExecCatalog contains the linked Extensions available from SelfExecutable
+	SelfExecCatalog *selfexec.Catalog
 	// Context bounds Extension startup and defaults to context.Background
 	Context  context.Context
 	Approver capability.Approver
@@ -623,12 +625,18 @@ func buildExtensionCommands(
 			if options.SelfExecutable == "" || !filepath.IsAbs(options.SelfExecutable) {
 				return nil, fmt.Errorf("Extension %q requires an absolute self executable", extensionID)
 			}
-			command.Path = filepath.Clean(options.SelfExecutable)
-			definition, registered := extensionregistry.Lookup(extensionID)
+			if options.SelfExecCatalog == nil {
+				return nil, fmt.Errorf("Extension %q requires a self-exec Catalog", extensionID)
+			}
+			definition, registered := options.SelfExecCatalog.Lookup(extensionID)
 			if !registered {
 				return nil, fmt.Errorf("Extension %q is not registered for self-exec", extensionID)
 			}
-			command.Args = []string{"__extension", extensionID}
+			command, err = definition.Command(options.SelfExecutable)
+			if err != nil {
+				return nil, fmt.Errorf("Extension %q self-exec command: %w", extensionID, err)
+			}
+			command.Environment = environment
 			expected := definition.Manifest.ProtocolManifest()
 			configuredValue.expectedVersion = definition.Manifest.Version
 			configuredValue.expectedManifest = &expected

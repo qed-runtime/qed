@@ -201,11 +201,13 @@ three startup modes
 }
 ```
 
-Self-exec starts the current QED binary with its hidden Extension entrypoint.
-Available IDs come from the catalog generated from `extensions.lock`; the QED
-repository currently selects `qed.workspace`, `qed.process`, and `qed.git`.
-The Host validates the locked declaration against the live process in the same
-way as an external manifest. This mode rejects `command` and `manifest`
+Self-exec starts the current Host executable with its hidden Extension
+entrypoint. Available IDs come from the catalog generated from the Host's
+`extensions.lock`; the official QED executable currently selects
+`qed.workspace`, `qed.process`, and `qed.git`. An embedding application supplies
+its own Catalog through `qed.HostLoadOptions`. The Host validates the locked
+declaration against the live process in the same way as an external manifest.
+This mode rejects `command` and `manifest`
 
 Regenerate the catalog after changing `extensions.lock`, or check that the
 checked-in source is current
@@ -425,5 +427,7 @@ secret values
 - every referenced Extension starts and passes lifecycle validation before the graph is returned
 - version 1 is experimental and may change without migration before the first stable release
 
-Embedding hosts must call `Configuration.Close` or `CloseContext` to drain and
-stop configured Extension processes
+Embedding applications load this schema with `qed.LoadHost`. A self-exec entry
+requires the application's generated Catalog and absolute current executable in
+`qed.HostLoadOptions`. Applications must call `Host.Close` or `CloseContext` to
+drain and stop configured Extension processes. See [Embedding QED](embedding.md)

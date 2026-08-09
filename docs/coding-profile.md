@@ -103,7 +103,11 @@ and accepts `Y` or `N`. Both paths resume through `RunHandle.Resume` and produce
 
 ## Go API
 
-An embedding host supplies explicit Extension commands and owns their lifetime
+For a declarative server integration, prefer `qed.LoadHost` with an
+application-owned self-exec Catalog as described in [Embedding QED](embedding.md)
+
+A lower-level embedding host may instead supply explicit Extension commands
+and own their lifetime directly
 
 ```go
 policy, err := capability.NewStaticPolicy(capability.StaticPolicyOptions{
@@ -126,21 +130,21 @@ codingProfile, err := coding.New(ctx, coding.Options{
 			ID: workspaceextension.ID,
 			Command: host.Command{
 				Path: qedExecutable,
-				Args: []string{"__extension", workspaceextension.ID},
+				Args: []string{selfexec.ChildArgument, workspaceextension.ID},
 			},
 		},
 		{
 			ID: processextension.ID,
 			Command: host.Command{
 				Path: qedExecutable,
-				Args: []string{"__extension", processextension.ID},
+				Args: []string{selfexec.ChildArgument, processextension.ID},
 			},
 		},
 		{
 			ID: gitextension.ID,
 			Command: host.Command{
 				Path: qedExecutable,
-				Args: []string{"__extension", gitextension.ID},
+				Args: []string{selfexec.ChildArgument, gitextension.ID},
 			},
 		},
 	},
@@ -189,7 +193,7 @@ generation, err := codingProfile.Reload(
 	workspaceextension.ID,
 	host.Command{
 		Path: replacementExecutable,
-		Args: []string{"__extension", workspaceextension.ID},
+		Args: []string{selfexec.ChildArgument, workspaceextension.ID},
 	},
 )
 ```

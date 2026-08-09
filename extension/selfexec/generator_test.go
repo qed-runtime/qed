@@ -1,18 +1,21 @@
-package extensionlock_test
+package selfexec_test
 
 import (
+	"context"
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/qed-runtime/qed/internal/extensionlock"
+	"github.com/qed-runtime/qed/extension/selfexec"
 )
 
-func TestGenerateProducesDeterministicCatalog(t *testing.T) {
+func TestGenerateProducesStandaloneDeterministicCatalog(t *testing.T) {
 	t.Parallel()
 
 	lockPath := writeLock(t, `{
@@ -40,7 +43,10 @@ func TestGenerateProducesDeterministicCatalog(t *testing.T) {
 			}
 		]
 	}`)
-	source, err := extensionlock.Generate(lockPath)
+	source, err := selfexec.Generate(lockPath, selfexec.GenerateOptions{
+		PackageName:  "customregistry",
+		VariableName: "Linked",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,12 +54,15 @@ func TestGenerateProducesDeterministicCatalog(t *testing.T) {
 		t.Fatalf("generated source is invalid: %v\n%s", err, source)
 	}
 	text := string(source)
-	if first, second := strings.Index(text, `"first":`), strings.Index(text, `"second":`); first < 0 || second < 0 || first >= second {
+	if first, second := strings.Index(text, `"first",`), strings.Index(text, `"second",`); first < 0 || second < 0 || first >= second {
 		t.Fatalf("generated catalog is not sorted by Extension ID:\n%s", text)
 	}
 	for _, fragment := range []string{
-		`serverOptions: extension0.ServerOptions`,
-		`serverOptions: extension0.NewServerOptions`,
+		`package customregistry`,
+		`// Linked contains the self-exec Extensions selected by extensions.lock`,
+		`var Linked = selfexec.MustNewCatalog`,
+		`ServerOptions: extension0.ServerOptions`,
+		`ServerOptions: extension0.NewServerOptions`,
 		`json.RawMessage("{\"type\":\"object\"}")`,
 	} {
 		if !strings.Contains(text, fragment) {
@@ -65,28 +74,29 @@ func TestGenerateProducesDeterministicCatalog(t *testing.T) {
 	}
 
 	outputPath := filepath.Join(t.TempDir(), "registry_gen.go")
-	if err := extensionlock.WriteGenerated(outputPath, source); err != nil {
+	if err := selfexec.WriteGenerated(outputPath, source); err != nil {
 		t.Fatal(err)
 	}
-	current, err := extensionlock.CheckGenerated(outputPath, source)
+	current, err := selfexec.CheckGenerated(outputPath, source)
 	if err != nil || !current {
 		t.Fatalf("CheckGenerated() = %t, %v", current, err)
 	}
 	if err := os.WriteFile(outputPath, append(source, '\n'), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	current, err = extensionlock.CheckGenerated(outputPath, source)
+	current, err = selfexec.CheckGenerated(outputPath, source)
 	if err != nil || current {
 		t.Fatalf("CheckGenerated(stale) = %t, %v", current, err)
 	}
 }
 
-func TestGenerateRejectsInvalidLocks(t *testing.T) {
+func TestGenerateRejectsInvalidLocksAndIdentifiers(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name     string
 		document string
+		options  selfexec.GenerateOptions
 		want     string
 	}{
 		{
@@ -133,12 +143,30 @@ func TestGenerateRejectsInvalidLocks(t *testing.T) {
 			}]}`,
 			want: `capability "test.read" is absent from manifest capabilities`,
 		},
+		{
+			name: "invalid generated package",
+			document: `{"version":1,"extensions":[{
+				"go_package":"example.com/extension",
+				"manifest":{"id":"one","version":"v1","protocol_version":1}
+			}]}`,
+			options: selfexec.GenerateOptions{PackageName: "package"},
+			want:    "package must be a valid",
+		},
+		{
+			name: "private generated variable",
+			document: `{"version":1,"extensions":[{
+				"go_package":"example.com/extension",
+				"manifest":{"id":"one","version":"v1","protocol_version":1}
+			}]}`,
+			options: selfexec.GenerateOptions{VariableName: "catalog"},
+			want:    "variable must be an exported",
+		},
 	}
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := extensionlock.Generate(writeLock(t, test.document))
+			_, err := selfexec.Generate(writeLock(t, test.document), test.options)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Generate() error = %v, want containing %q", err, test.want)
 			}
@@ -154,11 +182,14 @@ func TestCheckedInCatalogIsCurrent(t *testing.T) {
 		t.Fatal("resolve test source path")
 	}
 	root := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", ".."))
-	source, err := extensionlock.Generate(filepath.Join(root, extensionlock.Filename))
+	source, err := selfexec.Generate(
+		filepath.Join(root, selfexec.LockFilename),
+		selfexec.GenerateOptions{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := extensionlock.CheckGenerated(
+	current, err := selfexec.CheckGenerated(
 		filepath.Join(root, "internal", "extensionregistry", "registry_gen.go"),
 		source,
 	)
@@ -167,9 +198,37 @@ func TestCheckedInCatalogIsCurrent(t *testing.T) {
 	}
 }
 
+func TestDownstreamModuleBuildsAndRunsWithoutForkingQED(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test source path")
+	}
+	directory := filepath.Join(filepath.Dir(sourceFile), "testdata", "downstream")
+	source, err := selfexec.Generate(
+		filepath.Join(directory, selfexec.LockFilename),
+		selfexec.GenerateOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := selfexec.CheckGenerated(filepath.Join(directory, "extensionregistry", "registry_gen.go"), source)
+	if err != nil || !current {
+		t.Fatalf("downstream generated catalog is stale: current=%t error=%v", current, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, "go", "test", "-count=1", "./...")
+	command.Dir = directory
+	command.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=-mod=readonly", "GOTOOLCHAIN=local")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("downstream go test failed: %v\n%s", err, output)
+	}
+}
+
 func writeLock(t *testing.T, document string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), extensionlock.Filename)
+	path := filepath.Join(t.TempDir(), selfexec.LockFilename)
 	if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
 		t.Fatal(err)
 	}

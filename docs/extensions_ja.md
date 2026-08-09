@@ -159,7 +159,7 @@ Hostは外部identity、version、capability、Hook、Commandをlive processと�
 
 ## 組み込みself-exec catalog
 
-`extensions.lock`は1つのQED binaryへlinkするGo Extensionを選択します
+`extensions.lock`は1つのHost binaryへlinkするGo Extensionを選択します
 上限1 MiBのstrict JSONで、最大1024の一意なExtension IDと外部manifestと同じdeclaration validationを持ちます
 
 ```json
@@ -191,6 +191,34 @@ qed extension generate
 qed extension generate --check
 ```
 
+外部Hostはstandalone generatorを使い、出力packageを自分のrepositoryで所有します
+
+```sh
+go run github.com/qed-runtime/qed/cmd/qed-extension-gen \
+  --lock extensions.lock \
+  --output extensionregistry/registry_gen.go \
+  --package extensionregistry \
+  --variable Catalog
+```
+
+生成sourceは公開`*selfexec.Catalog`を構築し、QEDのinternal packageへ依存しません
+application本来のargumentを解析する前にchild modeをdispatchします
+
+```go
+handled, err := extensionregistry.Catalog.Dispatch(ctx, selfexec.DispatchOptions{
+    Arguments:   os.Args[1:],
+    Input:       os.Stdin,
+    Output:      os.Stdout,
+    DebugWriter: os.Stderr,
+})
+if handled {
+    return err
+}
+```
+
+同じCatalogと現在のabsolute executableを`qed.LoadHost`へ渡します
+外部repository全体の流れは[QEDの組み込み](embedding_ja.md)を参照してください
+
 生成catalogは外部manifest検証と同じexpected identity、version、capability、Hook、Commandを提供します
 startupではlink済みServer optionsがlockのidentityとversionに一致し、HandshakeとDescribeがlock済みdeclaration全体に一致した後だけgenerationをpublishします
 
@@ -207,7 +235,7 @@ QED repositoryは現在次の3つの再利用可能なExtensionを選択して�
 | `qed.process` | `run_command` |
 | `qed.git` | `git_status`、`git_diff` |
 
-Coding Profileは3つを合成し、別のHost buildは必要なpackageだけを選択できます
+Coding Profileは3つを合成し、別Host repositoryは自身のlockで必要なpackageだけを選択できます
 self-execでも各Extensionは独立したprocess、identity、generation、reload、state namespaceを持ちます
 
 ## Host enforcementとlifecycle

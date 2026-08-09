@@ -171,7 +171,7 @@ symlinks, sorts by ID, and rejects duplicate IDs
 
 ## Embedded self-exec catalog
 
-`extensions.lock` selects the Go Extensions linked into one QED binary. It is
+`extensions.lock` selects the Go Extensions linked into one Host binary. It is
 strict JSON with a 1 MiB limit, a maximum of 1024 unique Extension IDs, and the
 same declaration validation as an external manifest
 
@@ -206,6 +206,35 @@ qed extension generate
 qed extension generate --check
 ```
 
+A downstream Host uses the standalone generator and owns the output package
+
+```sh
+go run github.com/qed-runtime/qed/cmd/qed-extension-gen \
+  --lock extensions.lock \
+  --output extensionregistry/registry_gen.go \
+  --package extensionregistry \
+  --variable Catalog
+```
+
+Generated source constructs a public `*selfexec.Catalog` and does not depend on
+QED internal packages. The application dispatches child mode before parsing
+its ordinary arguments
+
+```go
+handled, err := extensionregistry.Catalog.Dispatch(ctx, selfexec.DispatchOptions{
+    Arguments:   os.Args[1:],
+    Input:       os.Stdin,
+    Output:      os.Stdout,
+    DebugWriter: os.Stderr,
+})
+if handled {
+    return err
+}
+```
+
+The same Catalog is passed to `qed.LoadHost` with the absolute current
+executable. See [Embedding QED](embedding.md) for the complete downstream flow
+
 The generated catalog supplies the same expected identity, version,
 capabilities, Hooks, and Commands used for external manifest validation. At
 startup, the linked Server options must match the locked identity and version,
@@ -226,9 +255,9 @@ The QED repository currently selects these three reusable Extensions
 | `qed.process` | `run_command` |
 | `qed.git` | `git_status`, `git_diff` |
 
-The Coding Profile composes all three, while another host build may select only
-the packages it needs. Each self-exec Extension still has an independent
-process, identity, generation, reload, and state namespace
+The Coding Profile composes all three, while another Host repository selects
+only the packages it needs in its own lock. Each self-exec Extension still has
+an independent process, identity, generation, reload, and state namespace
 
 ## Host enforcement and lifecycle
 

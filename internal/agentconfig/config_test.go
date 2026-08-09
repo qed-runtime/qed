@@ -9,25 +9,20 @@ import (
 	"testing"
 
 	"github.com/qed-runtime/qed/agent"
-	"github.com/qed-runtime/qed/extension/server"
+	"github.com/qed-runtime/qed/extension/selfexec"
 	workspaceextension "github.com/qed-runtime/qed/extensions/workspace"
 	"github.com/qed-runtime/qed/internal/agentconfig"
 	"github.com/qed-runtime/qed/internal/extensionregistry"
 )
 
 func TestMain(testingMain *testing.M) {
-	if len(os.Args) == 3 && os.Args[1] == "__extension" {
-		definition, registered := extensionregistry.Lookup(os.Args[2])
-		if !registered {
-			_, _ = fmt.Fprintln(os.Stderr, "unknown test Extension")
-			os.Exit(1)
-		}
-		options, err := definition.NewServerOptions()
-		if err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		if err := server.Serve(context.Background(), os.Stdin, os.Stdout, options); err != nil {
+	if len(os.Args) >= 2 && os.Args[1] == selfexec.ChildArgument {
+		handled, err := extensionregistry.Catalog.Dispatch(context.Background(), selfexec.DispatchOptions{
+			Arguments: os.Args[1:],
+			Input:     os.Stdin,
+			Output:    os.Stdout,
+		})
+		if !handled || err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -354,9 +349,10 @@ func TestLoadBuildsWorkspaceBoundCodingProfile(t *testing.T) {
 		}
 	}`)
 	configuration, err := agentconfig.Load(path, agentconfig.LoadOptions{
-		LookupEnv:      lookup(map[string]string{"PATH": "/test/bin"}),
-		WorkspaceRoot:  workspaceRoot,
-		SelfExecutable: testExecutable(t),
+		LookupEnv:       lookup(map[string]string{"PATH": "/test/bin"}),
+		WorkspaceRoot:   workspaceRoot,
+		SelfExecutable:  testExecutable(t),
+		SelfExecCatalog: extensionregistry.Catalog,
 	})
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -393,14 +389,14 @@ func TestLoadBuildsExternalWorkspaceExtension(t *testing.T) {
 		"version":1,
 		"default_agent":"main",
 		"providers":{"local":{"protocol":"echo"}},
-		"extensions":{"qed.workspace":{"mode":"external","command":[%q,"__extension",%q]}},
+		"extensions":{"qed.workspace":{"mode":"external","command":[%q,%q,%q]}},
 		"profiles":{"workspace":{
 			"kind":"coding",
 			"extensions":["qed.workspace"],
 			"capabilities":{"allow":["filesystem.read"]}
 		}},
 		"agents":{"main":{"provider":"local","profile":"workspace"}}
-	}`, executable, workspaceextension.ID)
+	}`, executable, selfexec.ChildArgument, workspaceextension.ID)
 	path := writeConfig(t, document)
 	configuration, err := agentconfig.Load(path, agentconfig.LoadOptions{WorkspaceRoot: workspaceRoot})
 	if err != nil {
@@ -472,8 +468,9 @@ func TestLoadRejectsInvalidCodingProfile(t *testing.T) {
 			}`, test.profile, test.agent)
 			path := writeConfig(t, document)
 			_, err := agentconfig.Load(path, agentconfig.LoadOptions{
-				WorkspaceRoot:  test.workspace,
-				SelfExecutable: testExecutable(t),
+				WorkspaceRoot:   test.workspace,
+				SelfExecutable:  testExecutable(t),
+				SelfExecCatalog: extensionregistry.Catalog,
 			})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Load() error = %v, want %q", err, test.want)

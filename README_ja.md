@@ -14,7 +14,7 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - process分離Extension内のcapability制御されたCoding Tool
 - 複数のRun固定Extension generation、Hook、Command、host所有state
 - manifest discoveryと開発時のatomic reload
-- `extensions.lock`から生成するself-exec catalogとlive manifest validation
+- fork不要でapplicationが所有する`extensions.lock` catalogとlive manifest validation
 - host所有Evidence Bundle
 - NagiベースのCLIと単一turn TUI
 - 末端のExtension processまで伝搬する安全な構造化diagnostics
@@ -310,12 +310,50 @@ go run ./cmd/qed extension generate
 go run ./cmd/qed extension generate --check
 ```
 
+別Host repositoryではdependency-lightなgeneratorを使い、生成packageとexported Catalog変数を自分で選択します
+
+```sh
+go run github.com/qed-runtime/qed/cmd/qed-extension-gen \
+  --lock extensions.lock \
+  --output extensionregistry/registry_gen.go \
+  --package extensionregistry \
+  --variable Catalog
+```
+
+生成sourceは公開QED packageとapplication側lockに記載したExtension packageだけへ依存します
+QEDのforkやinternal registry glueの複製は不要です
+
 lockはfirst-partyとthird-party packageを区別しません
 dependencyのversionとchecksumは`go.mod`と`go.sum`を正とし、生成処理は変更しません
 Go以外のExtensionは外部executableから同じprotocolを引き続き利用できます
 lock schemaと検証順序は[Extension process](docs/extensions_ja.md)を参照してください
 
 ## Runtimeの組み込み
+
+既存serverが宣言的Agent graphを読み込み、Provider、Profile、Store、Evidence、Extension lifecycleを所有する場合はrootの`qed.Host` APIを使います
+
+```go
+host, err := qed.LoadHost("qed.json", qed.HostLoadOptions{
+	LookupEnv:       os.LookupEnv,
+	WorkspaceRoot:   workspaceRoot,
+	SelfExecutable:  executable,
+	SelfExecCatalog: extensionregistry.Catalog,
+})
+if err != nil {
+	log.Fatal(err)
+}
+defer host.Close()
+
+outcome, err := host.Run(ctx, agent.RunRequest{
+	Input: []agent.Message{{Role: agent.RoleUser, Text: prompt}},
+}, nil)
+```
+
+`Host`はtransport-neutralで、複数Runから並行利用できます
+HTTPまたはgRPC schema、authentication、authorization、rate limit、shutdown順序は組み込み先applicationが引き続き所有します
+[QEDの組み込み](docs/embedding_ja.md)と[標準library server example](examples/embedded-server/README.md)を参照してください
+
+より小さいprogrammatic integrationでは`agent.Runtime`を直接利用します
 
 ```go
 package main
@@ -407,6 +445,7 @@ candidateは並行実行され、異なるProvider protocolを利用できます
 
 ## 主なimport path
 
+- `github.com/qed-runtime/qed`
 - `github.com/qed-runtime/qed/agent`
 - `github.com/qed-runtime/qed/orchestration`
 - `github.com/qed-runtime/qed/session`
@@ -421,12 +460,13 @@ candidateは並行実行され、異なるProvider protocolを利用できます
 - `github.com/qed-runtime/qed/extension/protocol`
 - `github.com/qed-runtime/qed/extension/reload`
 - `github.com/qed-runtime/qed/extension/server`
+- `github.com/qed-runtime/qed/extension/selfexec`
 - `github.com/qed-runtime/qed/profile/coding`
 
 ## 開発
 
 ```sh
-go -C tools tool goimports -w ../agent ../capability ../evidence ../extension ../extensions ../orchestration ../profile ../provider ../session ../workspace ../cmd ../internal
+go -C tools tool goimports -w ..
 go run ./cmd/qed extension generate --check
 go test ./...
 go vet ./...
@@ -443,7 +483,7 @@ go build ./...
 - `git_diff`はuntracked fileの内容を含みません
 - 共有tokenとcost上限はProviderがusageを遅れて返す場合や返さない場合に完全には強制できません
 - TUIは単一turn interfaceであり、永続chat clientではありません
-- HTTP server、GitHub Actions Adapter、SQLite Session Store、WebAssembly backendは未実装です
+- built-in HTTP service、GitHub Actions Adapter、SQLite Session Store、WebAssembly backendは未実装ですが、既存serverは`qed.Host`を組み込めます
 - すべてのthird-party OpenAI互換APIとの互換性は保証しません
 - `openai-codex`はexperimentalなChatGPT backend contractに追従し、現在はmodel discovery、Responses Lite、WebSocket transportを持たないfull ResponsesのSSE経路だけを利用します
 

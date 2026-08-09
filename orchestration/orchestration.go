@@ -142,7 +142,7 @@ func (registry *AgentRegistry) Start(ctx context.Context, request agent.RunReque
 	if ctx == nil {
 		return nil, errors.New("context must not be nil")
 	}
-	if len(request.Input) == 0 {
+	if request.Resume == nil && len(request.Input) == 0 {
 		return nil, errors.New("run input is required")
 	}
 	if err := validateAgentID(request.AgentID); err != nil {

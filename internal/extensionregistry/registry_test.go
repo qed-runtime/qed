@@ -14,11 +14,11 @@ func TestRegistryContainsOfficialExtensions(t *testing.T) {
 	t.Parallel()
 
 	want := []string{gitextension.ID, processextension.ID, workspaceextension.ID}
-	if got := extensionregistry.IDs(); !reflect.DeepEqual(got, want) {
+	if got := extensionregistry.Catalog.IDs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("IDs() = %v, want %v", got, want)
 	}
 	for _, id := range want {
-		definition, registered := extensionregistry.Lookup(id)
+		definition, registered := extensionregistry.Catalog.Lookup(id)
 		if !registered || definition.Manifest.ID != id {
 			t.Errorf("Lookup(%q) = %#v, %t", id, definition, registered)
 			continue
@@ -28,7 +28,7 @@ func TestRegistryContainsOfficialExtensions(t *testing.T) {
 			t.Errorf("NewServerOptions(%q) = %#v, %v", id, options, err)
 		}
 	}
-	if _, registered := extensionregistry.Lookup("coding-tools"); registered {
+	if _, registered := extensionregistry.Catalog.Lookup("coding-tools"); registered {
 		t.Fatal("Lookup() retained the removed coding-tools alias")
 	}
 }

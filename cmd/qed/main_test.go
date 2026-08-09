@@ -18,6 +18,7 @@ import (
 
 	"github.com/qed-runtime/qed/agent"
 	"github.com/qed-runtime/qed/evidence"
+	"github.com/qed-runtime/qed/extension/selfexec"
 	"github.com/qed-runtime/qed/internal/agentconfig"
 	"github.com/qed-runtime/qed/internal/chatauth"
 	"github.com/qed-runtime/qed/internal/tuiapp"
@@ -25,7 +26,7 @@ import (
 )
 
 func TestMain(testingMain *testing.M) {
-	if len(os.Args) >= 2 && os.Args[1] == "__extension" {
+	if len(os.Args) >= 2 && os.Args[1] == selfexec.ChildArgument {
 		os.Exit(runExtension(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}
 	os.Exit(testingMain.Run())
@@ -115,6 +116,7 @@ func TestExtensionGenerateWritesAndChecksCatalog(t *testing.T) {
 	var generateError bytes.Buffer
 	exitCode := run(context.Background(), []string{
 		"extension", "generate", "--lock", lockPath, "--output", outputPath,
+		"--package", "customregistry", "--variable", "Linked",
 	}, &generateOutput, &generateError)
 	if exitCode != 0 || !strings.Contains(generateOutput.String(), "Generated Extension catalog") || generateError.Len() != 0 {
 		t.Fatalf("generate exit/stdout/stderr = %d/%q/%q", exitCode, generateOutput.String(), generateError.String())
@@ -123,14 +125,17 @@ func TestExtensionGenerateWritesAndChecksCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(generated), `serverOptions: extension0.ServerOptions`) {
+	if !strings.Contains(string(generated), `package customregistry`) ||
+		!strings.Contains(string(generated), `var Linked = selfexec.MustNewCatalog`) ||
+		!strings.Contains(string(generated), `ServerOptions: extension0.ServerOptions`) {
 		t.Fatalf("generated catalog = %s", generated)
 	}
 
 	var checkOutput bytes.Buffer
 	var checkError bytes.Buffer
 	exitCode = run(context.Background(), []string{
-		"extension", "generate", "--lock", lockPath, "--output", outputPath, "--check",
+		"extension", "generate", "--lock", lockPath, "--output", outputPath,
+		"--package", "customregistry", "--variable", "Linked", "--check",
 	}, &checkOutput, &checkError)
 	if exitCode != 0 || !strings.Contains(checkOutput.String(), "is current") || checkError.Len() != 0 {
 		t.Fatalf("check exit/stdout/stderr = %d/%q/%q", exitCode, checkOutput.String(), checkError.String())
@@ -141,7 +146,8 @@ func TestExtensionGenerateWritesAndChecksCatalog(t *testing.T) {
 	checkOutput.Reset()
 	checkError.Reset()
 	exitCode = run(context.Background(), []string{
-		"extension", "generate", "--lock", lockPath, "--output", outputPath, "--check",
+		"extension", "generate", "--lock", lockPath, "--output", outputPath,
+		"--package", "customregistry", "--variable", "Linked", "--check",
 	}, &checkOutput, &checkError)
 	if exitCode == 0 || !strings.Contains(checkError.String(), "is stale") {
 		t.Fatalf("stale check exit/stdout/stderr = %d/%q/%q", exitCode, checkOutput.String(), checkError.String())
@@ -1153,7 +1159,7 @@ func TestRunPassesExplicitWorkspaceToAgentConfiguration(t *testing.T) {
 		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
 	if received.WorkspaceRoot != workspaceRoot || received.LookupEnv == nil || received.Approver == nil ||
-		!received.Verbose || received.DebugWriter == nil {
+		received.SelfExecCatalog == nil || !received.Verbose || received.DebugWriter == nil {
 		t.Fatalf("LoadOptions = %#v", received)
 	}
 }

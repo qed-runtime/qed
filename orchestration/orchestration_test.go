@@ -11,7 +11,39 @@ import (
 
 	"github.com/qed-runtime/qed/agent"
 	"github.com/qed-runtime/qed/orchestration"
+	"github.com/qed-runtime/qed/session"
 )
+
+func TestAgentRegistryAcceptsPersistedResumeWithoutNewInput(t *testing.T) {
+	t.Parallel()
+
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider:     &scriptedProvider{},
+		SessionStore: session.NewMemoryStore(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := orchestration.NewAgentRegistry(orchestration.AgentRegistryOptions{
+		Agents: []orchestration.AgentDefinition{{ID: "main", Runtime: runtime}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := registry.Start(context.Background(), agent.RunRequest{
+		AgentID:   "main",
+		SessionID: "missing",
+		Resume:    &agent.WaitResponse{RequestID: "wait-1"},
+	})
+	if err != nil {
+		t.Fatalf("Start(resume) error = %v", err)
+	}
+	for range handle.Events() {
+	}
+	if _, err := handle.Wait(); err == nil || !strings.Contains(err.Error(), "has no pending wait") {
+		t.Fatalf("Wait(resume) error = %v", err)
+	}
+}
 
 func TestAgentRegistryRunsMixedProviderSubagentTool(t *testing.T) {
 	t.Parallel()

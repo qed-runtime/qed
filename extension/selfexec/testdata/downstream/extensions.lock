@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "extensions": [
+    {
+      "go_package": "example.com/downstream/greeting",
+      "factory": "ServerOptions",
+      "manifest": {
+        "id": "downstream.greeting",
+        "version": "1.0.0",
+        "protocol_version": 1,
+        "capabilities": ["downstream.read"]
+      }
+    }
+  ]
+}

@@ -11,14 +11,17 @@ func TestSelfExecUsesLockedManifestExpectation(t *testing.T) {
 	t.Parallel()
 
 	const extensionID = "qed.workspace"
-	definition, registered := extensionregistry.Lookup(extensionID)
+	definition, registered := extensionregistry.Catalog.Lookup(extensionID)
 	if !registered {
 		t.Fatal("qed.workspace is not registered")
 	}
 	configured, err := buildExtensionCommands(
 		map[string]extensionProfile{extensionID: {Mode: "self-exec"}},
 		nil,
-		LoadOptions{SelfExecutable: filepath.Join(t.TempDir(), "qed")},
+		LoadOptions{
+			SelfExecutable:  filepath.Join(t.TempDir(), "qed"),
+			SelfExecCatalog: extensionregistry.Catalog,
+		},
 		t.TempDir(),
 	)
 	if err != nil {

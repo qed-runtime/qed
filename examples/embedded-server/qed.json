@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "default_agent": "main",
+  "providers": {
+    "local": {
+      "protocol": "echo"
+    }
+  },
+  "extensions": {
+    "example.greeting": {
+      "mode": "self-exec"
+    }
+  },
+  "profiles": {
+    "embedded": {
+      "kind": "coding",
+      "extensions": ["example.greeting"],
+      "capabilities": {
+        "allow": ["example.read"]
+      }
+    }
+  },
+  "agents": {
+    "main": {
+      "provider": "local",
+      "profile": "embedded"
+    }
+  }
+}

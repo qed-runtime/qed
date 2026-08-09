@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "extensions": [
+    {
+      "go_package": "github.com/qed-runtime/qed/examples/embedded-server/extension/greeting",
+      "factory": "ServerOptions",
+      "manifest": {
+        "id": "example.greeting",
+        "version": "0.1.0",
+        "protocol_version": 1,
+        "capabilities": ["example.read"]
+      }
+    }
+  ]
+}

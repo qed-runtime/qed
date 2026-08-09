@@ -99,7 +99,9 @@ TUIはwaitを表示して`Y`または`N`を受け取ります
 
 ## Go API
 
-embedding hostは明示的なExtension commandを渡し、そのlifetimeを所有します
+宣言的なserver組み込みでは[QEDの組み込み](embedding_ja.md)に従い、application所有self-exec Catalogと`qed.LoadHost`を使うことを推奨します
+
+より低水準のembedding hostは明示的なExtension commandを渡し、そのlifetimeを直接所有できます
 
 ```go
 policy, err := capability.NewStaticPolicy(capability.StaticPolicyOptions{
@@ -122,21 +124,21 @@ codingProfile, err := coding.New(ctx, coding.Options{
 			ID: workspaceextension.ID,
 			Command: host.Command{
 				Path: qedExecutable,
-				Args: []string{"__extension", workspaceextension.ID},
+				Args: []string{selfexec.ChildArgument, workspaceextension.ID},
 			},
 		},
 		{
 			ID: processextension.ID,
 			Command: host.Command{
 				Path: qedExecutable,
-				Args: []string{"__extension", processextension.ID},
+				Args: []string{selfexec.ChildArgument, processextension.ID},
 			},
 		},
 		{
 			ID: gitextension.ID,
 			Command: host.Command{
 				Path: qedExecutable,
-				Args: []string{"__extension", gitextension.ID},
+				Args: []string{selfexec.ChildArgument, gitextension.ID},
 			},
 		},
 	},
@@ -183,7 +185,7 @@ generation, err := codingProfile.Reload(
 	workspaceextension.ID,
 	host.Command{
 		Path: replacementExecutable,
-		Args: []string{"__extension", workspaceextension.ID},
+		Args: []string{selfexec.ChildArgument, workspaceextension.ID},
 	},
 )
 ```

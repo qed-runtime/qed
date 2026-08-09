@@ -1,6 +1,4 @@
-// Package extensionlock validates extensions.lock and generates a self-exec
-// Extension catalog for the QED binary
-package extensionlock
+package selfexec
 
 import (
 	"bytes"
@@ -22,35 +20,51 @@ import (
 )
 
 const (
-	// Filename is the conventional embedded Extension selection lock filename
-	Filename = "extensions.lock"
-	// CurrentVersion is the only lock format version supported by this package
-	CurrentVersion = 1
+	// LockFilename is the conventional embedded Extension selection filename
+	LockFilename = "extensions.lock"
+	// LockVersion is the supported Extension lock format version
+	LockVersion = 1
+	// DefaultGeneratedPackage is the default generated catalog package name
+	DefaultGeneratedPackage = "extensionregistry"
+	// DefaultGeneratedVariable is the default exported catalog variable name
+	DefaultGeneratedVariable = "Catalog"
 
 	maximumLockBytes        = 1 << 20
 	maximumGeneratedBytes   = 8 << 20
 	maximumLockedExtensions = 1024
 )
 
-type document struct {
-	Version    int     `json:"version"`
-	Extensions []entry `json:"extensions"`
+type lockDocument struct {
+	Version    int         `json:"version"`
+	Extensions []lockEntry `json:"extensions"`
 }
 
-type entry struct {
+type lockEntry struct {
 	GoPackage string               `json:"go_package"`
 	Factory   string               `json:"factory,omitempty"`
 	Manifest  manifest.Declaration `json:"manifest"`
 }
 
-// Generate reads a strict extensions.lock and returns deterministic Go source
-// for the internal self-exec catalog
-func Generate(lockPath string) ([]byte, error) {
-	document, err := load(lockPath)
+// GenerateOptions controls the package-level identifiers in generated source
+type GenerateOptions struct {
+	// PackageName is the package declared by generated source
+	PackageName string
+	// VariableName is the exported *Catalog variable declared by generated source
+	VariableName string
+}
+
+// Generate reads a strict extensions.lock and returns deterministic standalone
+// Go source for a public self-exec Catalog
+func Generate(lockPath string, options GenerateOptions) ([]byte, error) {
+	options, err := validateGenerateOptions(options)
 	if err != nil {
 		return nil, err
 	}
-	return generate(document)
+	document, err := loadLock(lockPath)
+	if err != nil {
+		return nil, err
+	}
+	return generateCatalog(document, options)
 }
 
 // WriteGenerated atomically replaces one regular generated source file
@@ -102,7 +116,7 @@ func WriteGenerated(outputPath string, source []byte) error {
 		return fmt.Errorf("sync temporary Extension catalog: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close temporary Extension catalog: %w", err)
+		return fmt.Errorf("close generated Extension catalog: %w", err)
 	}
 	if err := os.Rename(temporaryPath, absolute); err != nil {
 		return fmt.Errorf("replace generated Extension catalog: %w", err)
@@ -110,8 +124,7 @@ func WriteGenerated(outputPath string, source []byte) error {
 	return nil
 }
 
-// CheckGenerated reports whether outputPath is a regular file with source as
-// its exact contents
+// CheckGenerated reports whether outputPath exactly matches source
 func CheckGenerated(outputPath string, source []byte) (bool, error) {
 	if strings.TrimSpace(outputPath) == "" || strings.IndexByte(outputPath, 0) >= 0 {
 		return false, errors.New("generated Extension catalog path is required and must not contain NUL")
@@ -137,61 +150,77 @@ func CheckGenerated(outputPath string, source []byte) (bool, error) {
 	return bytes.Equal(data, source), nil
 }
 
-func load(lockPath string) (document, error) {
+func validateGenerateOptions(options GenerateOptions) (GenerateOptions, error) {
+	if options.PackageName == "" {
+		options.PackageName = DefaultGeneratedPackage
+	}
+	if options.VariableName == "" {
+		options.VariableName = DefaultGeneratedVariable
+	}
+	if !token.IsIdentifier(options.PackageName) || token.Lookup(options.PackageName).IsKeyword() {
+		return GenerateOptions{}, errors.New("generated Extension catalog package must be a valid non-keyword Go identifier")
+	}
+	if !token.IsIdentifier(options.VariableName) || token.Lookup(options.VariableName).IsKeyword() || !token.IsExported(options.VariableName) {
+		return GenerateOptions{}, errors.New("generated Extension catalog variable must be an exported Go identifier")
+	}
+	return options, nil
+}
+
+func loadLock(lockPath string) (lockDocument, error) {
 	if strings.TrimSpace(lockPath) == "" || strings.IndexByte(lockPath, 0) >= 0 {
-		return document{}, errors.New("Extension lock path is required and must not contain NUL")
+		return lockDocument{}, errors.New("Extension lock path is required and must not contain NUL")
 	}
 	absolute, err := filepath.Abs(lockPath)
 	if err != nil {
-		return document{}, fmt.Errorf("resolve Extension lock path: %w", err)
+		return lockDocument{}, fmt.Errorf("resolve Extension lock path: %w", err)
 	}
 	info, err := os.Lstat(absolute)
 	if err != nil {
-		return document{}, fmt.Errorf("stat Extension lock: %w", err)
+		return lockDocument{}, fmt.Errorf("stat Extension lock: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return document{}, errors.New("Extension lock must be a regular non-symlink file")
+		return lockDocument{}, errors.New("Extension lock must be a regular non-symlink file")
 	}
 	file, err := os.Open(absolute)
 	if err != nil {
-		return document{}, fmt.Errorf("open Extension lock: %w", err)
+		return lockDocument{}, fmt.Errorf("open Extension lock: %w", err)
 	}
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, maximumLockBytes+1))
 	if err != nil {
-		return document{}, fmt.Errorf("read Extension lock: %w", err)
+		return lockDocument{}, fmt.Errorf("read Extension lock: %w", err)
 	}
-	var decoded document
+	var decoded lockDocument
 	if err := jsonstrict.Decode(data, maximumLockBytes, &decoded); err != nil {
-		return document{}, fmt.Errorf("decode Extension lock: %w", err)
+		return lockDocument{}, fmt.Errorf("decode Extension lock: %w", err)
 	}
-	if decoded.Version != CurrentVersion {
-		return document{}, fmt.Errorf("unsupported Extension lock version %d, want %d", decoded.Version, CurrentVersion)
+	if decoded.Version != LockVersion {
+		return lockDocument{}, fmt.Errorf("unsupported Extension lock version %d, want %d", decoded.Version, LockVersion)
 	}
 	if len(decoded.Extensions) == 0 {
-		return document{}, errors.New("Extension lock requires at least one Extension")
+		return lockDocument{}, errors.New("Extension lock requires at least one Extension")
 	}
 	if len(decoded.Extensions) > maximumLockedExtensions {
-		return document{}, fmt.Errorf("Extension lock exceeds %d Extensions", maximumLockedExtensions)
+		return lockDocument{}, fmt.Errorf("Extension lock exceeds %d Extensions", maximumLockedExtensions)
 	}
 	seenIDs := make(map[string]struct{}, len(decoded.Extensions))
 	for index := range decoded.Extensions {
 		locked := &decoded.Extensions[index]
 		if err := manifest.ValidateDeclaration(locked.Manifest); err != nil {
-			return document{}, fmt.Errorf("Extension lock entry %d: %w", index, err)
+			return lockDocument{}, fmt.Errorf("Extension lock entry %d: %w", index, err)
 		}
 		if _, duplicate := seenIDs[locked.Manifest.ID]; duplicate {
-			return document{}, fmt.Errorf("Extension lock ID %q is declared more than once", locked.Manifest.ID)
+			return lockDocument{}, fmt.Errorf("Extension lock ID %q is declared more than once", locked.Manifest.ID)
 		}
 		seenIDs[locked.Manifest.ID] = struct{}{}
 		if err := validateGoPackage(locked.GoPackage); err != nil {
-			return document{}, fmt.Errorf("Extension lock %q: %w", locked.Manifest.ID, err)
+			return lockDocument{}, fmt.Errorf("Extension lock %q: %w", locked.Manifest.ID, err)
 		}
 		if locked.Factory == "" {
 			locked.Factory = "ServerOptions"
 		}
-		if !token.IsIdentifier(locked.Factory) || !token.IsExported(locked.Factory) {
-			return document{}, fmt.Errorf("Extension lock %q factory must be an exported Go identifier", locked.Manifest.ID)
+		if !token.IsIdentifier(locked.Factory) || token.Lookup(locked.Factory).IsKeyword() || !token.IsExported(locked.Factory) {
+			return lockDocument{}, fmt.Errorf("Extension lock %q factory must be an exported Go identifier", locked.Manifest.ID)
 		}
 	}
 	sort.Slice(decoded.Extensions, func(first, second int) bool {
@@ -219,14 +248,10 @@ func validateGoPackage(value string) error {
 			return errors.New("go_package contains an unsupported character")
 		}
 	}
-	if value == "encoding/json" || value == "github.com/qed-runtime/qed/extension/manifest" ||
-		value == "github.com/qed-runtime/qed/extension/protocol" {
-		return errors.New("go_package conflicts with a catalog generator import")
-	}
 	return nil
 }
 
-func generate(document document) ([]byte, error) {
+func generateCatalog(document lockDocument, options GenerateOptions) ([]byte, error) {
 	aliases := make(map[string]string)
 	seenPackages := make(map[string]struct{})
 	packages := make([]string, 0, len(document.Extensions))
@@ -246,9 +271,9 @@ func generate(document document) ([]byte, error) {
 	}
 
 	var source bytes.Buffer
-	source.WriteString("// Code generated by qed extension generate; DO NOT EDIT.\n")
+	source.WriteString("// Code generated by the QED Extension catalog generator; DO NOT EDIT.\n")
 	source.WriteString("// Source: extensions.lock\n\n")
-	source.WriteString("package extensionregistry\n\n")
+	fmt.Fprintf(&source, "package %s\n\n", options.PackageName)
 	source.WriteString("import (\n")
 	if hasCommands {
 		source.WriteString("\t\"encoding/json\"\n")
@@ -257,14 +282,16 @@ func generate(document document) ([]byte, error) {
 	if hasCommands {
 		source.WriteString("\textensionprotocol \"github.com/qed-runtime/qed/extension/protocol\"\n")
 	}
+	source.WriteString("\tselfexec \"github.com/qed-runtime/qed/extension/selfexec\"\n")
 	for _, packagePath := range packages {
 		fmt.Fprintf(&source, "\t%s %s\n", aliases[packagePath], strconv.Quote(packagePath))
 	}
 	source.WriteString(")\n\n")
-	source.WriteString("var generatedCatalog = map[string]catalogEntry{\n")
+	fmt.Fprintf(&source, "// %s contains the self-exec Extensions selected by extensions.lock\n", options.VariableName)
+	fmt.Fprintf(&source, "var %s = selfexec.MustNewCatalog([]selfexec.Definition{\n", options.VariableName)
 	for _, locked := range document.Extensions {
-		fmt.Fprintf(&source, "\t%s: {\n", strconv.Quote(locked.Manifest.ID))
-		source.WriteString("\t\tdeclaration: extensionmanifest.Declaration{\n")
+		source.WriteString("\t{\n")
+		source.WriteString("\t\tManifest: extensionmanifest.Declaration{\n")
 		fmt.Fprintf(&source, "\t\t\tID: %s,\n", strconv.Quote(locked.Manifest.ID))
 		fmt.Fprintf(&source, "\t\t\tVersion: %s,\n", strconv.Quote(locked.Manifest.Version))
 		fmt.Fprintf(&source, "\t\t\tProtocolVersion: %d,\n", locked.Manifest.ProtocolVersion)
@@ -291,10 +318,10 @@ func generate(document document) ([]byte, error) {
 			source.WriteString("\t\t\t},\n")
 		}
 		source.WriteString("\t\t},\n")
-		fmt.Fprintf(&source, "\t\tserverOptions: %s.%s,\n", aliases[locked.GoPackage], locked.Factory)
+		fmt.Fprintf(&source, "\t\tServerOptions: %s.%s,\n", aliases[locked.GoPackage], locked.Factory)
 		source.WriteString("\t},\n")
 	}
-	source.WriteString("}\n")
+	source.WriteString("})\n")
 	formatted, err := format.Source(source.Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("format generated Extension catalog: %w", err)

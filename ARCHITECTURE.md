@@ -75,10 +75,12 @@ generation leases
 
 `extension/manifest` validates the transport-independent declaration shared by
 external and embedded Extensions, resolves distributable manifests, and
-performs bounded recursive discovery. `internal/extensionlock` validates
-`extensions.lock` and generates the self-exec catalog consumed by
-`internal/extensionregistry`. `extension/reload` builds candidates, watches
-development source, and exposes an authenticated local reload control endpoint
+performs bounded recursive discovery. Public `extension/selfexec` validates
+`extensions.lock`, generates standalone catalogs, launches child commands, and
+dispatches the selected linked Server. QED's own generated catalog remains in
+`internal/extensionregistry`, while another host repository owns an equivalent
+generated package. `extension/reload` builds candidates, watches development
+source, and exposes an authenticated local reload control endpoint
 
 `evidence` builds versioned Bundles from a terminal Run, public Events, and
 host-owned Tool traces. Tool trace fields use payload digests, while public
@@ -90,8 +92,16 @@ for official workspace-scoped Tools. Traversal-resistant `os.Root` operations an
 preconditions protect file APIs from stale or escaping paths. They do not turn
 child processes into an operating-system sandbox
 
-`cmd/qed` and `internal/tuiapp` are adapters. Nagi remains inside these frontend
-packages and no Nagi type crosses into Runtime, Provider, or Extension APIs
+The root `qed.Host` API is the transport-neutral embedding facade. It loads a
+declarative Agent graph, owns configured Extension lifecycles, starts concurrent
+Runs, drains Events, and persists Evidence when configured. HTTP, gRPC, queue,
+authentication, and rate limiting remain responsibilities of the embedding
+application
+
+`cmd/qed` and `internal/tuiapp` are adapters. `cmd/qed-extension-gen` is the
+dependency-light downstream catalog generator. Nagi remains inside the QED CLI
+frontend packages and no Nagi type crosses into Runtime, Provider, Extension,
+or Host APIs
 
 ## Run and Event ordering
 

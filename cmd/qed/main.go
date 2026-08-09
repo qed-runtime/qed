@@ -27,11 +27,10 @@ import (
 	"github.com/qed-runtime/qed/extension"
 	"github.com/qed-runtime/qed/extension/manifest"
 	"github.com/qed-runtime/qed/extension/reload"
-	"github.com/qed-runtime/qed/extension/server"
+	"github.com/qed-runtime/qed/extension/selfexec"
 	"github.com/qed-runtime/qed/internal/agentconfig"
 	"github.com/qed-runtime/qed/internal/chatauth"
 	"github.com/qed-runtime/qed/internal/cliapproval"
-	"github.com/qed-runtime/qed/internal/extensionlock"
 	"github.com/qed-runtime/qed/internal/extensionregistry"
 	"github.com/qed-runtime/qed/internal/tuiapp"
 	"github.com/qed-runtime/qed/provider/anthropic"
@@ -41,35 +40,37 @@ import (
 )
 
 const (
-	promptValueID           = "prompt"
-	outputValueID           = "output"
-	providerValueID         = "provider"
-	modelValueID            = "model"
-	baseURLValueID          = "base-url"
-	instructionsValueID     = "system"
-	maxOutputTokensValueID  = "max-output-tokens"
-	authProfileValueID      = "auth-profile"
-	deviceCodeValueID       = "device-code"
-	noOpenValueID           = "no-open"
-	configValueID           = "config"
-	agentValueID            = "agent"
-	workspaceValueID        = "workspace"
-	approvalValueID         = "approval"
-	sessionIDValueID        = "session-id"
-	sessionIDArgumentID     = "session-id-argument"
-	responseJSONValueID     = "response-json"
-	evidenceStoreValueID    = "evidence-store"
-	runIDArgumentID         = "run-id"
-	verboseValueID          = "verbose"
-	extensionTargetID       = "extension-target"
-	buildProgramValueID     = "build-program"
-	buildArgumentValueID    = "build-arg"
-	watchIntervalValueID    = "watch-interval"
-	debounceValueID         = "debounce"
-	controlDirectoryValueID = "control-dir"
-	extensionLockValueID    = "extension-lock"
-	extensionOutputValueID  = "extension-output"
-	checkGeneratedValueID   = "check-generated"
+	promptValueID            = "prompt"
+	outputValueID            = "output"
+	providerValueID          = "provider"
+	modelValueID             = "model"
+	baseURLValueID           = "base-url"
+	instructionsValueID      = "system"
+	maxOutputTokensValueID   = "max-output-tokens"
+	authProfileValueID       = "auth-profile"
+	deviceCodeValueID        = "device-code"
+	noOpenValueID            = "no-open"
+	configValueID            = "config"
+	agentValueID             = "agent"
+	workspaceValueID         = "workspace"
+	approvalValueID          = "approval"
+	sessionIDValueID         = "session-id"
+	sessionIDArgumentID      = "session-id-argument"
+	responseJSONValueID      = "response-json"
+	evidenceStoreValueID     = "evidence-store"
+	runIDArgumentID          = "run-id"
+	verboseValueID           = "verbose"
+	extensionTargetID        = "extension-target"
+	buildProgramValueID      = "build-program"
+	buildArgumentValueID     = "build-arg"
+	watchIntervalValueID     = "watch-interval"
+	debounceValueID          = "debounce"
+	controlDirectoryValueID  = "control-dir"
+	extensionLockValueID     = "extension-lock"
+	extensionOutputValueID   = "extension-output"
+	extensionPackageValueID  = "extension-package"
+	extensionVariableValueID = "extension-variable"
+	checkGeneratedValueID    = "check-generated"
 
 	providerEcho            = "echo"
 	providerOpenAIResponses = "openai-responses"
@@ -119,7 +120,7 @@ func (writer *synchronizedWriter) Write(data []byte) (int, error) {
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if len(os.Args) >= 2 && os.Args[1] == "__extension" {
+	if len(os.Args) >= 2 && os.Args[1] == selfexec.ChildArgument {
 		os.Exit(runExtension(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}
 
@@ -127,23 +128,18 @@ func main() {
 }
 
 func runExtension(ctx context.Context, arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if len(arguments) != 2 || arguments[0] != "__extension" {
+	handled, err := extensionregistry.Catalog.Dispatch(ctx, selfexec.DispatchOptions{
+		Arguments:   arguments,
+		Input:       stdin,
+		Output:      stdout,
+		DebugWriter: stderr,
+	})
+	if !handled || errors.Is(err, selfexec.ErrInvalidInvocation) {
 		_, _ = fmt.Fprintln(stderr, "invalid internal Extension invocation")
 		return int(cli.StatusUsage)
 	}
-	definition, registered := extensionregistry.Lookup(arguments[1])
-	if !registered {
-		_, _ = fmt.Fprintln(stderr, "invalid internal Extension invocation")
-		return int(cli.StatusUsage)
-	}
-	options, err := definition.NewServerOptions()
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "invalid internal Extension invocation")
-		return int(cli.StatusUsage)
-	}
-	options.DebugWriter = stderr
-	if err := server.Serve(ctx, stdin, stdout, options); err != nil {
-		_, _ = fmt.Fprintf(stderr, "serve Extension %q: %v\n", options.ID, err)
+		_, _ = fmt.Fprintf(stderr, "serve Extension: %v\n", err)
 		return int(cli.StatusFailure)
 	}
 	return int(cli.StatusSuccess)
@@ -513,7 +509,7 @@ func generateExtensionCommand() *cli.Command {
 			cli.ValueOption(extensionLockValueID).
 				Long("lock").
 				Parser(cli.StringParser()).
-				Default(extensionlock.Filename).
+				Default(selfexec.LockFilename).
 				Help("Extension lock file"),
 		).
 		Option(
@@ -522,6 +518,20 @@ func generateExtensionCommand() *cli.Command {
 				Parser(cli.StringParser()).
 				Default("internal/extensionregistry/registry_gen.go").
 				Help("Generated Go catalog file"),
+		).
+		Option(
+			cli.ValueOption(extensionPackageValueID).
+				Long("package").
+				Parser(cli.StringParser()).
+				Default(selfexec.DefaultGeneratedPackage).
+				Help("Generated Go package name"),
+		).
+		Option(
+			cli.ValueOption(extensionVariableValueID).
+				Long("variable").
+				Parser(cli.StringParser()).
+				Default(selfexec.DefaultGeneratedVariable).
+				Help("Exported generated Catalog variable name"),
 		).
 		Option(
 			cli.Flag(checkGeneratedValueID).
@@ -539,15 +549,26 @@ func generateExtensionCommand() *cli.Command {
 			if diagnostic != nil {
 				return cli.Outcome{}, diagnostic
 			}
+			packageValue, diagnostic := requiredString(invocation, extensionPackageValueID)
+			if diagnostic != nil {
+				return cli.Outcome{}, diagnostic
+			}
+			variableValue, diagnostic := requiredString(invocation, extensionVariableValueID)
+			if diagnostic != nil {
+				return cli.Outcome{}, diagnostic
+			}
 			lockPath := resolveCLIPath(commandContext, lockValue)
 			outputPath := resolveCLIPath(commandContext, outputValue)
-			source, err := extensionlock.Generate(lockPath)
+			source, err := selfexec.Generate(lockPath, selfexec.GenerateOptions{
+				PackageName:  packageValue,
+				VariableName: variableValue,
+			})
 			if err != nil {
 				return cli.Outcome{}, cli.NewDiagnostic(cli.CodeHandlerError, fmt.Sprintf("generate Extension catalog: %v", err))
 			}
 			check, _ := invocation.Flag(checkGeneratedValueID)
 			if check {
-				current, err := extensionlock.CheckGenerated(outputPath, source)
+				current, err := selfexec.CheckGenerated(outputPath, source)
 				if err != nil {
 					return cli.Outcome{}, cli.NewDiagnostic(cli.CodeHandlerError, fmt.Sprintf("check Extension catalog: %v", err))
 				}
@@ -562,7 +583,7 @@ func generateExtensionCommand() *cli.Command {
 				}
 				return cli.Success(), nil
 			}
-			if err := extensionlock.WriteGenerated(outputPath, source); err != nil {
+			if err := selfexec.WriteGenerated(outputPath, source); err != nil {
 				return cli.Outcome{}, cli.NewDiagnostic(cli.CodeHandlerError, fmt.Sprintf("write Extension catalog: %v", err))
 			}
 			if _, err := fmt.Fprintf(commandContext.Stdout(), "Generated Extension catalog %s from %s\n", outputValue, lockValue); err != nil {
@@ -925,13 +946,14 @@ func runAgentCommand(dependencies commandDependencies) *cli.Command {
 					)
 				}
 				configured, err := dependencies.loadAgentConfig(configPath, agentconfig.LoadOptions{
-					LookupEnv:      commandContext.Environment,
-					WorkspaceRoot:  workspaceRoot,
-					SelfExecutable: selfExecutable,
-					Context:        commandContext.Cancellation(),
-					Approver:       approver,
-					Verbose:        verboseEnabled(invocation),
-					DebugWriter:    commandContext.Stderr(),
+					LookupEnv:       commandContext.Environment,
+					WorkspaceRoot:   workspaceRoot,
+					SelfExecutable:  selfExecutable,
+					SelfExecCatalog: extensionregistry.Catalog,
+					Context:         commandContext.Cancellation(),
+					Approver:        approver,
+					Verbose:         verboseEnabled(invocation),
+					DebugWriter:     commandContext.Stderr(),
 				})
 				if err != nil {
 					return cli.Outcome{}, cli.NewDiagnostic(
@@ -1069,13 +1091,14 @@ func runTUICommand(dependencies commandDependencies) *cli.Command {
 					return cli.Outcome{}, cli.NewDiagnostic(cli.CodeHandlerError, fmt.Sprintf("resolve absolute QED executable: %v", err))
 				}
 				configured, err := dependencies.loadAgentConfig(configPath, agentconfig.LoadOptions{
-					LookupEnv:      commandContext.Environment,
-					WorkspaceRoot:  workspaceRoot,
-					SelfExecutable: selfExecutable,
-					Context:        commandContext.Cancellation(),
-					Approver:       capability.WaitApprover{},
-					Verbose:        verboseEnabled(invocation),
-					DebugWriter:    commandContext.Stderr(),
+					LookupEnv:       commandContext.Environment,
+					WorkspaceRoot:   workspaceRoot,
+					SelfExecutable:  selfExecutable,
+					SelfExecCatalog: extensionregistry.Catalog,
+					Context:         commandContext.Cancellation(),
+					Approver:        capability.WaitApprover{},
+					Verbose:         verboseEnabled(invocation),
+					DebugWriter:     commandContext.Stderr(),
 				})
 				if err != nil {
 					return cli.Outcome{}, cli.NewDiagnostic(cli.CodeHandlerError, fmt.Sprintf("load Agent configuration: %v", err))
@@ -1330,13 +1353,14 @@ func resumeSessionCommand(dependencies commandDependencies) *cli.Command {
 				return cli.Outcome{}, cli.NewDiagnostic(cli.CodeHandlerError, fmt.Sprintf("resolve absolute QED executable: %v", err))
 			}
 			configured, err := dependencies.loadAgentConfig(configPath, agentconfig.LoadOptions{
-				LookupEnv:      commandContext.Environment,
-				WorkspaceRoot:  workspaceRoot,
-				SelfExecutable: selfExecutable,
-				Context:        commandContext.Cancellation(),
-				Approver:       capability.WaitApprover{},
-				Verbose:        verboseEnabled(invocation),
-				DebugWriter:    commandContext.Stderr(),
+				LookupEnv:       commandContext.Environment,
+				WorkspaceRoot:   workspaceRoot,
+				SelfExecutable:  selfExecutable,
+				SelfExecCatalog: extensionregistry.Catalog,
+				Context:         commandContext.Cancellation(),
+				Approver:        capability.WaitApprover{},
+				Verbose:         verboseEnabled(invocation),
+				DebugWriter:     commandContext.Stderr(),
 			})
 			if err != nil {
 				return cli.Outcome{}, cli.NewDiagnostic(cli.CodeHandlerError, fmt.Sprintf("load Agent configuration: %v", err))

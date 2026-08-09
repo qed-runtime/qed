@@ -16,7 +16,7 @@ executable today
 - capability-controlled Coding Tools behind process-isolated Extensions
 - multiple Run-pinned Extension generations, Hooks, Commands, and host-owned state
 - manifest discovery and atomic development reload
-- `extensions.lock`-generated self-exec catalogs with live manifest validation
+- fork-free, application-owned `extensions.lock` catalogs with live manifest validation
 - host-owned Evidence Bundles
 - Nagi-based CLI and single-turn TUI
 - safe structured diagnostics propagated to the final Extension process
@@ -330,6 +330,21 @@ go run ./cmd/qed extension generate
 go run ./cmd/qed extension generate --check
 ```
 
+Another Host repository uses the dependency-light generator and chooses its
+own generated package and exported Catalog variable
+
+```sh
+go run github.com/qed-runtime/qed/cmd/qed-extension-gen \
+  --lock extensions.lock \
+  --output extensionregistry/registry_gen.go \
+  --package extensionregistry \
+  --variable Catalog
+```
+
+The generated source depends only on public QED packages and the Extension
+packages named by that application's lock. No QED fork or copied internal
+registry glue is required
+
 The lock does not distinguish first-party and third-party packages. Dependency
 versions and checksums remain in `go.mod` and `go.sum`; generation never changes
 them. Non-Go Extensions continue to use the same protocol through an external
@@ -337,6 +352,34 @@ executable. See [Extension processes](docs/extensions.md) for the lock schema
 and validation sequence
 
 ## Embed the Runtime
+
+Use the root `qed.Host` API when an existing server should load a declarative
+Agent graph and own Provider, Profile, Store, Evidence, and Extension lifecycle
+
+```go
+host, err := qed.LoadHost("qed.json", qed.HostLoadOptions{
+	LookupEnv:       os.LookupEnv,
+	WorkspaceRoot:   workspaceRoot,
+	SelfExecutable:  executable,
+	SelfExecCatalog: extensionregistry.Catalog,
+})
+if err != nil {
+	log.Fatal(err)
+}
+defer host.Close()
+
+outcome, err := host.Run(ctx, agent.RunRequest{
+	Input: []agent.Message{{Role: agent.RoleUser, Text: prompt}},
+}, nil)
+```
+
+`Host` is transport-neutral and safe for concurrent Runs. The embedding
+application continues to own HTTP or gRPC schemas, authentication,
+authorization, rate limiting, and shutdown ordering. See
+[Embedding QED](docs/embedding.md) and the
+[standard-library server example](examples/embedded-server/README.md)
+
+Use `agent.Runtime` directly for a smaller programmatic integration
 
 ```go
 package main
@@ -431,6 +474,7 @@ Provider calls
 
 ## Main import paths
 
+- `github.com/qed-runtime/qed`
 - `github.com/qed-runtime/qed/agent`
 - `github.com/qed-runtime/qed/orchestration`
 - `github.com/qed-runtime/qed/session`
@@ -445,12 +489,13 @@ Provider calls
 - `github.com/qed-runtime/qed/extension/protocol`
 - `github.com/qed-runtime/qed/extension/reload`
 - `github.com/qed-runtime/qed/extension/server`
+- `github.com/qed-runtime/qed/extension/selfexec`
 - `github.com/qed-runtime/qed/profile/coding`
 
 ## Development
 
 ```sh
-go -C tools tool goimports -w ../agent ../capability ../evidence ../extension ../extensions ../orchestration ../profile ../provider ../session ../workspace ../cmd ../internal
+go -C tools tool goimports -w ..
 go run ./cmd/qed extension generate --check
 go test ./...
 go vet ./...
@@ -467,7 +512,7 @@ go build ./...
 - `git_diff` does not include untracked file content
 - Shared token and cost limits depend on Provider-reported usage, which may be late or absent
 - The TUI is a single-turn interface, not a persistent chat client
-- HTTP server, GitHub Actions adapter, SQLite Session Store, and WebAssembly backend are not implemented
+- A built-in HTTP service, GitHub Actions adapter, SQLite Session Store, and WebAssembly backend are not implemented; existing servers can embed `qed.Host`
 - Compatibility with every third-party OpenAI-compatible API is not guaranteed
 - `openai-codex` follows an experimental ChatGPT backend contract and currently uses full Responses over SSE without model discovery, Responses Lite, or WebSocket transport
 
