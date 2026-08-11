@@ -16,6 +16,19 @@ import (
 func TestBundleClassifiesRunEvidenceWithoutProviderState(t *testing.T) {
 	t.Parallel()
 
+	compiled, err := (agent.DefaultContextCompiler{}).Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: []agent.Message{{Role: agent.RoleUser, Text: "fix it"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := agent.BuildPrefixManifest(
+		agent.PrefixManifestOptions{Provider: "test", Model: "test-model"},
+		compiled.Segments,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	message := agent.Message{
 		Role:  agent.RoleAssistant,
 		Text:  "done",
@@ -33,9 +46,20 @@ func TestBundleClassifiesRunEvidenceWithoutProviderState(t *testing.T) {
 			{Role: agent.RoleUser, Text: "fix it"},
 			message,
 		},
-		Usage: agent.Usage{InputTokens: 3, OutputTokens: 2, TotalTokens: 5},
+		Usage: agent.Usage{
+			InputTokens:               3,
+			OutputTokens:              2,
+			TotalTokens:               5,
+			InputTokenDetailsReported: true,
+			UncachedInputTokens:       1,
+			CacheReadInputTokens:      1,
+			CacheWriteInputTokens:     1,
+		},
 	}, evidence.BundleOptions{
-		Events: []agent.Event{{Type: agent.EventMessageCompleted, RunID: "run-1", Message: &message}},
+		Events: []agent.Event{
+			{Type: agent.EventModelRequest, RunID: "run-1", PrefixManifest: &manifest},
+			{Type: agent.EventMessageCompleted, RunID: "run-1", Message: &message},
+		},
 		ToolInvocations: []evidence.ToolInvocation{
 			{CallID: "command-1", Tool: "run_command", ArgumentsDigest: "sha256:a", OutputDigest: "sha256:b", PolicyOutcome: "allow"},
 			{CallID: "change-1", Tool: "apply_patch", ArgumentsDigest: "sha256:c", OutputDigest: "sha256:d", PolicyOutcome: "allow"},
@@ -46,6 +70,10 @@ func TestBundleClassifiesRunEvidenceWithoutProviderState(t *testing.T) {
 	}
 	if bundle.Model.Name != "test-model" || len(bundle.Commands) != 1 || len(bundle.Checks) != 1 || len(bundle.Changes) != 1 {
 		t.Fatalf("Bundle = %#v", bundle)
+	}
+	if len(bundle.Events) != 2 || bundle.Events[0].PrefixManifest == nil ||
+		bundle.Events[0].PrefixManifest.Epoch != manifest.Epoch || !bundle.Usage.InputTokenDetailsReported {
+		t.Fatalf("Bundle Context observability = %#v / %#v", bundle.Events, bundle.Usage)
 	}
 	encoded, err := json.Marshal(bundle)
 	if err != nil {

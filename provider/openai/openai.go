@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/qed-runtime/qed/agent"
@@ -46,18 +47,25 @@ type Config struct {
 	MaxOutputTokens int
 	// HTTPClient defaults to http.DefaultClient
 	HTTPClient providerbase.HTTPClient
+	// CacheCapabilities overrides conservative endpoint and model detection
+	//
+	// Use this only when a trusted OpenAI-compatible endpoint documents the
+	// corresponding request fields and Usage behavior.
+	CacheCapabilities *agent.CacheCapabilities
 }
 
 // Provider implements agent.Provider for one OpenAI API dialect
 type Provider struct {
-	api              API
-	apiKey           string
-	credentialSource providerbase.CredentialSource
-	endpoint         string
-	model            string
-	maxOutputTokens  int
-	client           providerbase.HTTPClient
-	name             string
+	api               API
+	apiKey            string
+	credentialSource  providerbase.CredentialSource
+	endpoint          string
+	model             string
+	maxOutputTokens   int
+	client            providerbase.HTTPClient
+	name              string
+	official          bool
+	cacheCapabilities *agent.CacheCapabilities
 }
 
 // New validates config and constructs an OpenAI Provider
@@ -99,22 +107,90 @@ func New(config Config) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("configure OpenAI endpoint: %w", err)
 	}
+	if config.CacheCapabilities != nil {
+		if err := agent.ValidateCacheCapabilities(*config.CacheCapabilities); err != nil {
+			return nil, fmt.Errorf("configure OpenAI Cache Capabilities: %w", err)
+		}
+	}
 
 	return &Provider{
-		api:              api,
-		apiKey:           config.APIKey,
-		credentialSource: config.CredentialSource,
-		endpoint:         endpoint,
-		model:            model,
-		maxOutputTokens:  config.MaxOutputTokens,
-		client:           config.HTTPClient,
-		name:             name,
+		api:               api,
+		apiKey:            config.APIKey,
+		credentialSource:  config.CredentialSource,
+		endpoint:          endpoint,
+		model:             model,
+		maxOutputTokens:   config.MaxOutputTokens,
+		client:            config.HTTPClient,
+		name:              name,
+		official:          config.BaseURL == "" || strings.TrimRight(config.BaseURL, "/") == defaultBaseURL,
+		cacheCapabilities: cloneCacheCapabilities(config.CacheCapabilities),
 	}, nil
 }
 
 // Name returns the OpenAI API dialect used in diagnostics
 func (provider *Provider) Name() string {
 	return provider.name
+}
+
+// ModelID returns the exact model identifier configured for this Provider
+func (provider *Provider) ModelID() string {
+	return provider.model
+}
+
+// CacheCapabilities reports prompt cache behavior for the configured OpenAI dialect and model
+func (provider *Provider) CacheCapabilities() agent.CacheCapabilities {
+	if provider != nil && provider.cacheCapabilities != nil {
+		return *cloneCacheCapabilities(provider.cacheCapabilities)
+	}
+	if provider == nil || !provider.official {
+		return agent.CacheCapabilities{}
+	}
+	capabilities := agent.CacheCapabilities{
+		ExactPrefix:         true,
+		SupportsCacheKey:    true,
+		SupportsAutomatic:   true,
+		MinimumPrefixTokens: 1024,
+		ExposesReadTokens:   true,
+		ExposesWriteTokens:  true,
+	}
+	if supportsExplicitOpenAICache(provider.model) {
+		capabilities.SupportsExplicit = true
+		capabilities.MaxWriteBreakpoints = 4
+		capabilities.SupportedTTLs = []agent.CacheTTL{agent.CacheTTLThirtyMinutes}
+	}
+	return capabilities
+}
+
+func supportsExplicitOpenAICache(model string) bool {
+	model = strings.ToLower(model)
+	if !strings.HasPrefix(model, "gpt-") {
+		return false
+	}
+	version := strings.TrimPrefix(model, "gpt-")
+	majorText, remainder, hasMinor := strings.Cut(version, ".")
+	majorText, _, _ = strings.Cut(majorText, "-")
+	major, err := strconv.Atoi(majorText)
+	if err != nil {
+		return false
+	}
+	if major > 5 {
+		return true
+	}
+	if major != 5 || !hasMinor {
+		return false
+	}
+	minorText, _, _ := strings.Cut(remainder, "-")
+	minor, err := strconv.Atoi(minorText)
+	return err == nil && minor >= 6
+}
+
+func cloneCacheCapabilities(capabilities *agent.CacheCapabilities) *agent.CacheCapabilities {
+	if capabilities == nil {
+		return nil
+	}
+	cloned := *capabilities
+	cloned.SupportedTTLs = append([]agent.CacheTTL(nil), capabilities.SupportedTTLs...)
+	return &cloned
 }
 
 // Complete sends one model request and returns its completed Message

@@ -14,12 +14,14 @@ var (
 
 // SessionSnapshot contains one replayable Session state
 type SessionSnapshot struct {
-	ID          string       `json:"id"`
-	Revision    uint64       `json:"revision"`
-	Messages    []Message    `json:"messages,omitempty"`
-	Events      []Event      `json:"events,omitempty"`
-	PendingWait *WaitRequest `json:"pending_wait,omitempty"`
-	PendingTool *ToolCall    `json:"pending_tool,omitempty"`
+	ID              string              `json:"id"`
+	Revision        uint64              `json:"revision"`
+	Messages        []Message           `json:"messages,omitempty"`
+	Events          []Event             `json:"events,omitempty"`
+	Checkpoint      *ContextCheckpoint  `json:"checkpoint,omitempty"`
+	EvidenceObjects []EvidenceObjectRef `json:"evidence_objects,omitempty"`
+	PendingWait     *WaitRequest        `json:"pending_wait,omitempty"`
+	PendingTool     *ToolCall           `json:"pending_tool,omitempty"`
 }
 
 // SessionStore persists ordered Run Events with optimistic revisions

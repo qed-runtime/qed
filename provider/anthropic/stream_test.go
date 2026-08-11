@@ -76,7 +76,9 @@ func TestMessagesStreamReassemblesTextToolAndThinkingState(t *testing.T) {
 	if message.ProviderState == nil || !strings.Contains(string(message.ProviderState.Data), "sig_1") {
 		t.Fatalf("ProviderState = %#v", message.ProviderState)
 	}
-	if message.Usage == nil || message.Usage.InputTokens != 7 || message.Usage.OutputTokens != 6 {
+	if message.Usage == nil || message.Usage.InputTokens != 7 || message.Usage.OutputTokens != 6 ||
+		!message.Usage.InputTokenDetailsReported || message.Usage.UncachedInputTokens != 5 ||
+		message.Usage.CacheReadInputTokens != 2 || message.Usage.CacheWriteInputTokens != 0 {
 		t.Fatalf("Usage = %#v", message.Usage)
 	}
 }

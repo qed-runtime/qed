@@ -38,6 +38,20 @@ Events, Tool calls, waits, Hooks, Session contracts, cancellation, and local
 execution limits. It has no filesystem, Git, CLI, TUI, or Provider wire-format
 behavior
 
+Before every Provider call, `agent.ContextCompiler` produces a canonical
+`ModelRequest` and logical Context Segments. Runtime persists a content-free
+Prefix Manifest on `model.request.started`; Session and Evidence Stores retain
+that Event. The default compiler stabilizes Tool order and JSON schemas. The
+optional compacting compiler keeps raw Session messages immutable, stores exact
+compacted prefixes and large Tool output in a content-addressed Evidence Object
+Store, and publishes a validated typed Checkpoint plus recent raw tail
+
+`agent.CachePlanner` combines host policy with Provider capabilities after
+compilation. QED cache controls are disabled by default. An enabled Plan carries
+a hashed Cache Family, optional TTL and breakpoint, and optional host-priced
+forecast. Provider adapters translate that Plan to their wire format and
+normalize reported cache categories in `agent.Usage`
+
 `provider/openai`, `provider/openaicodex`, and `provider/anthropic` translate
 the common model to streaming HTTP APIs. The Codex package is deliberately a
 separate dialect because it uses ChatGPT OAuth, a fixed backend, and additional
@@ -57,6 +71,8 @@ credential, model, and protocol combinations without converting private state
 `session` implements the `agent.SessionStore` contract in memory and as an
 append-only JSONL Event Log. Runtime serializes concurrent Runs for one Session
 inside a process and Store revisions provide optimistic conflict detection
+JSONL records delta-encode growing Prefix Manifests while loading both the
+delta form and the earlier full form
 
 `profile/coding` assembles bounded project context, one capability Policy, an
 Evidence recorder, and one or more process-isolated Extensions. The reusable
@@ -85,7 +101,9 @@ source, and exposes an authenticated local reload control endpoint
 `evidence` builds versioned Bundles from a terminal Run, public Events, and
 host-owned Tool traces. Tool trace fields use payload digests, while public
 Events retain their observable payload for audit and replay. Evidence storage
-must therefore be treated as content-bearing and potentially sensitive
+must therefore be treated as content-bearing and potentially sensitive. Its
+JSON Store also implements the content-addressed Object Store required by
+context compression, with bounded reads and digest verification
 
 `workspace` provides a canonical filesystem boundary and process-local locks
 for official workspace-scoped Tools. Traversal-resistant `os.Root` operations and edit
@@ -131,11 +149,12 @@ the completed Provider request
 
 ## Configuration ownership
 
-A Provider profile owns protocol, endpoint, model, output limit, and credential
-source. An Extension definition owns its process startup. An execution Profile
+A Provider profile owns protocol, endpoint, model, output limit, credential
+source, optional cache capability overrides, and optional host-supplied pricing
+An Extension definition owns its process startup. An execution Profile
 references one or more Extensions and owns capability rules plus the selected
-Tool-process environment. An Agent independently references a Provider and an
-optional execution Profile
+Tool-process environment. An Agent independently references a Provider, an
+optional execution Profile, context compression, and cache policy
 
 This split permits mixed-Provider Agent graphs and prevents Provider
 credentials from becoming Extension environment by default. API-key values
@@ -203,6 +222,11 @@ stderr is never copied into verbose output
   and Evidence order; independent Agent Runs can execute concurrently
 - Candidate and judge Runs share orchestration budgets, while token and cost
   limits depend on Provider-reported usage that may arrive only at response end
+- Prefix Manifests describe QED's provider-neutral logical request, not the
+  exact Provider-rendered prefix or an authoritative cache hit
+- Context limits use canonical logical bytes and cache planning uses a
+  deterministic bytes-divided-by-four estimate; neither substitutes for a
+  model tokenizer or Provider-reported Usage
 - Old and new Extension processes may overlap during retirement and do not
   share process-local Workspace locks, so edit digests remain the cross-process
   stale-write defense

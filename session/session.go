@@ -176,6 +176,7 @@ func (store *JSONLStore) Append(ctx context.Context, id string, expectedRevision
 	var encoded bytes.Buffer
 	encoder := json.NewEncoder(&encoded)
 	revision := snapshot.Revision
+	previousManifest := lastPrefixManifest(snapshot.Events)
 	for index := range events {
 		event := cloneEvent(events[index])
 		if event.SessionID != "" && event.SessionID != id {
@@ -184,8 +185,12 @@ func (store *JSONLStore) Append(ctx context.Context, id string, expectedRevision
 		event.SessionID = id
 		revision++
 		event.SessionRevision = revision
-		if err := encoder.Encode(newEventRecord(event)); err != nil {
+		if err := encoder.Encode(newEventRecord(event, previousManifest)); err != nil {
 			return snapshot.Revision, fmt.Errorf("append Session Event: %w", err)
+		}
+		if event.PrefixManifest != nil {
+			manifest := clonePrefixManifest(*event.PrefixManifest)
+			previousManifest = &manifest
 		}
 	}
 	file, err := os.OpenFile(store.eventPath(id), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -231,6 +236,7 @@ func (store *JSONLStore) loadUnlocked(id string) (agent.SessionSnapshot, error) 
 
 	snapshot := agent.SessionSnapshot{ID: id}
 	decoder := json.NewDecoder(file)
+	var previousManifest *agent.PrefixManifest
 	for {
 		var record eventRecord
 		if err := decoder.Decode(&record); errors.Is(err, io.EOF) {
@@ -238,7 +244,10 @@ func (store *JSONLStore) loadUnlocked(id string) (agent.SessionSnapshot, error) 
 		} else if err != nil {
 			return agent.SessionSnapshot{}, fmt.Errorf("decode Session Event revision %d: %w", snapshot.Revision+1, err)
 		}
-		event := record.event()
+		event, err := record.event(previousManifest)
+		if err != nil {
+			return agent.SessionSnapshot{}, fmt.Errorf("reconstruct Session Event revision %d: %w", snapshot.Revision+1, err)
+		}
 		if event.SessionID != id {
 			return agent.SessionSnapshot{}, fmt.Errorf("Session Event Log contains ID %q, want %q", event.SessionID, id)
 		}
@@ -247,14 +256,19 @@ func (store *JSONLStore) loadUnlocked(id string) (agent.SessionSnapshot, error) 
 		}
 		applyEvent(&snapshot, event)
 		snapshot.Events = append(snapshot.Events, cloneEvent(event))
+		if event.PrefixManifest != nil {
+			manifest := clonePrefixManifest(*event.PrefixManifest)
+			previousManifest = &manifest
+		}
 		snapshot.Revision++
 	}
 	return snapshot, nil
 }
 
 type eventRecord struct {
-	Event         agent.Event               `json:"event"`
-	ProviderState *providerStateEventRecord `json:"provider_state,omitempty"`
+	Event               agent.Event                `json:"event"`
+	ProviderState       *providerStateEventRecord  `json:"provider_state,omitempty"`
+	PrefixManifestDelta *prefixManifestEventRecord `json:"prefix_manifest_delta,omitempty"`
 }
 
 type providerStateEventRecord struct {
@@ -262,7 +276,17 @@ type providerStateEventRecord struct {
 	Data     json.RawMessage `json:"data"`
 }
 
-func newEventRecord(event agent.Event) eventRecord {
+type prefixManifestEventRecord struct {
+	Version      uint32                     `json:"version"`
+	Provider     string                     `json:"provider"`
+	Model        string                     `json:"model,omitempty"`
+	CacheFamily  string                     `json:"cache_family,omitempty"`
+	Epoch        string                     `json:"epoch"`
+	CommonPrefix int                        `json:"common_prefix,omitempty"`
+	Segments     []agent.SegmentFingerprint `json:"segments,omitempty"`
+}
+
+func newEventRecord(event agent.Event, previous *agent.PrefixManifest) eventRecord {
 	record := eventRecord{Event: event}
 	if event.Message != nil && event.Message.ProviderState != nil {
 		record.ProviderState = &providerStateEventRecord{
@@ -270,18 +294,82 @@ func newEventRecord(event agent.Event) eventRecord {
 			Data:     cloneRaw(event.Message.ProviderState.Data),
 		}
 	}
+	if event.PrefixManifest != nil {
+		common := commonManifestPrefix(previous, event.PrefixManifest)
+		record.PrefixManifestDelta = &prefixManifestEventRecord{
+			Version:      event.PrefixManifest.Version,
+			Provider:     event.PrefixManifest.Provider,
+			Model:        event.PrefixManifest.Model,
+			CacheFamily:  event.PrefixManifest.CacheFamily,
+			Epoch:        event.PrefixManifest.Epoch,
+			CommonPrefix: common,
+			Segments:     append([]agent.SegmentFingerprint(nil), event.PrefixManifest.Segments[common:]...),
+		}
+		record.Event.PrefixManifest = nil
+	}
 	return record
 }
 
-func (record eventRecord) event() agent.Event {
+func (record eventRecord) event(previous *agent.PrefixManifest) (agent.Event, error) {
 	event := record.Event
+	if event.PrefixManifest != nil && record.PrefixManifestDelta != nil {
+		return agent.Event{}, errors.New("Session Event contains both full and delta Prefix Manifests")
+	}
+	if record.PrefixManifestDelta != nil {
+		delta := record.PrefixManifestDelta
+		if delta.CommonPrefix < 0 || (previous == nil && delta.CommonPrefix != 0) ||
+			(previous != nil && delta.CommonPrefix > len(previous.Segments)) {
+			return agent.Event{}, errors.New("Session Prefix Manifest delta has an invalid common prefix")
+		}
+		segments := make([]agent.SegmentFingerprint, 0, delta.CommonPrefix+len(delta.Segments))
+		if previous != nil {
+			segments = append(segments, previous.Segments[:delta.CommonPrefix]...)
+		}
+		segments = append(segments, delta.Segments...)
+		event.PrefixManifest = &agent.PrefixManifest{
+			Version:     delta.Version,
+			Provider:    delta.Provider,
+			Model:       delta.Model,
+			CacheFamily: delta.CacheFamily,
+			Epoch:       delta.Epoch,
+			Segments:    segments,
+		}
+	}
 	if event.Message != nil && record.ProviderState != nil {
 		event.Message.ProviderState = &agent.ProviderState{
 			Provider: record.ProviderState.Provider,
 			Data:     cloneRaw(record.ProviderState.Data),
 		}
 	}
-	return event
+	return event, nil
+}
+
+func commonManifestPrefix(previous, current *agent.PrefixManifest) int {
+	if previous == nil || current == nil {
+		return 0
+	}
+	maximum := min(len(previous.Segments), len(current.Segments))
+	for index := 0; index < maximum; index++ {
+		if previous.Segments[index] != current.Segments[index] {
+			return index
+		}
+	}
+	return maximum
+}
+
+func lastPrefixManifest(events []agent.Event) *agent.PrefixManifest {
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].PrefixManifest != nil {
+			manifest := clonePrefixManifest(*events[index].PrefixManifest)
+			return &manifest
+		}
+	}
+	return nil
+}
+
+func clonePrefixManifest(manifest agent.PrefixManifest) agent.PrefixManifest {
+	manifest.Segments = append([]agent.SegmentFingerprint(nil), manifest.Segments...)
+	return manifest
 }
 
 func (store *JSONLStore) acquireFileLock(ctx context.Context, id string) (func(), error) {
@@ -334,6 +422,16 @@ func applyEvent(snapshot *agent.SessionSnapshot, event agent.Event) {
 		if event.Message != nil {
 			snapshot.Messages = append(snapshot.Messages, cloneMessage(*event.Message))
 		}
+	case agent.EventContextCompacted:
+		if event.ContextCheckpoint != nil {
+			snapshot.Checkpoint = cloneContextCheckpoint(event.ContextCheckpoint)
+		}
+		if event.ContextCompaction != nil {
+			snapshot.EvidenceObjects = appendUniqueEvidenceObjects(
+				snapshot.EvidenceObjects,
+				event.ContextCompaction.Externalized,
+			)
+		}
 	case agent.EventToolStarted:
 		if event.ToolCall != nil {
 			call := cloneToolCall(*event.ToolCall)
@@ -360,6 +458,8 @@ func applyEvent(snapshot *agent.SessionSnapshot, event agent.Event) {
 func cloneSnapshot(snapshot agent.SessionSnapshot) agent.SessionSnapshot {
 	snapshot.Messages = cloneMessages(snapshot.Messages)
 	snapshot.Events = cloneEvents(snapshot.Events)
+	snapshot.Checkpoint = cloneContextCheckpoint(snapshot.Checkpoint)
+	snapshot.EvidenceObjects = append([]agent.EvidenceObjectRef(nil), snapshot.EvidenceObjects...)
 	if snapshot.PendingWait != nil {
 		request := cloneWaitRequest(*snapshot.PendingWait)
 		snapshot.PendingWait = &request
@@ -383,6 +483,18 @@ func cloneEvents(events []agent.Event) []agent.Event {
 }
 
 func cloneEvent(event agent.Event) agent.Event {
+	if event.PrefixManifest != nil {
+		manifest := *event.PrefixManifest
+		manifest.Segments = append([]agent.SegmentFingerprint(nil), event.PrefixManifest.Segments...)
+		event.PrefixManifest = &manifest
+	}
+	event.CachePlan = cloneCachePlan(event.CachePlan)
+	event.ContextCheckpoint = cloneContextCheckpoint(event.ContextCheckpoint)
+	if event.ContextCompaction != nil {
+		report := *event.ContextCompaction
+		report.Externalized = append([]agent.EvidenceObjectRef(nil), event.ContextCompaction.Externalized...)
+		event.ContextCompaction = &report
+	}
 	if event.Message != nil {
 		message := cloneMessage(*event.Message)
 		event.Message = &message
@@ -449,4 +561,53 @@ func cloneWaitRequest(request agent.WaitRequest) agent.WaitRequest {
 
 func cloneRaw(value json.RawMessage) json.RawMessage {
 	return append(json.RawMessage(nil), value...)
+}
+
+func cloneContextCheckpoint(checkpoint *agent.ContextCheckpoint) *agent.ContextCheckpoint {
+	if checkpoint == nil {
+		return nil
+	}
+	cloned := *checkpoint
+	if checkpoint.Goal != nil {
+		goal := *checkpoint.Goal
+		cloned.Goal = &goal
+	}
+	cloned.Facts = append([]agent.CheckpointFact(nil), checkpoint.Facts...)
+	cloned.Decisions = append([]agent.CheckpointFact(nil), checkpoint.Decisions...)
+	cloned.Executions = append([]agent.CheckpointExecution(nil), checkpoint.Executions...)
+	cloned.Evidence = append([]agent.EvidenceObjectRef(nil), checkpoint.Evidence...)
+	return &cloned
+}
+
+func cloneCachePlan(plan *agent.CachePlan) *agent.CachePlan {
+	if plan == nil {
+		return nil
+	}
+	cloned := *plan
+	cloned.Breakpoints = append([]agent.CacheBreakpoint(nil), plan.Breakpoints...)
+	if plan.Pricing != nil {
+		pricing := *plan.Pricing
+		cloned.Pricing = &pricing
+	}
+	if plan.Forecast != nil {
+		forecast := *plan.Forecast
+		cloned.Forecast = &forecast
+	}
+	return &cloned
+}
+
+func appendUniqueEvidenceObjects(
+	current []agent.EvidenceObjectRef,
+	additional []agent.EvidenceObjectRef,
+) []agent.EvidenceObjectRef {
+	seen := make(map[string]struct{}, len(current)+len(additional))
+	result := make([]agent.EvidenceObjectRef, 0, len(current)+len(additional))
+	for _, reference := range append(append([]agent.EvidenceObjectRef(nil), current...), additional...) {
+		if _, exists := seen[reference.Digest]; exists {
+			continue
+		}
+		seen[reference.Digest] = struct{}{}
+		result = append(result, reference)
+	}
+	return result
 }

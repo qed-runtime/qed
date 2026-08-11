@@ -211,7 +211,7 @@ func (provider *codingLoopProvider) Complete(ctx context.Context, request agent.
 
 	switch step {
 	case 0:
-		want := []string{"git_status", "git_diff", "run_command", "search_text", "read_file", "apply_patch"}
+		want := []string{"apply_patch", "git_diff", "git_status", "read_file", "run_command", "search_text"}
 		if len(request.Tools) != len(want) {
 			return agent.Message{}, fmt.Errorf("Tool count = %d, want %d", len(request.Tools), len(want))
 		}

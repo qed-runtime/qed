@@ -145,6 +145,22 @@ func (provider *Provider) Name() string {
 	return provider.name
 }
 
+// ModelID returns the exact model identifier configured for this Provider
+func (provider *Provider) ModelID() string {
+	return provider.model
+}
+
+// CacheCapabilities reports the observable automatic cache behavior of the ChatGPT backend
+func (provider *Provider) CacheCapabilities() agent.CacheCapabilities {
+	return agent.CacheCapabilities{
+		ExactPrefix:         true,
+		SupportsAutomatic:   true,
+		MinimumPrefixTokens: 1024,
+		ExposesReadTokens:   true,
+		ExposesWriteTokens:  true,
+	}
+}
+
 // Stream sends one model request to the ChatGPT Codex Responses backend
 func (provider *Provider) Stream(ctx context.Context, request agent.ModelRequest) (agent.ModelStream, error) {
 	if ctx == nil {

@@ -31,7 +31,7 @@ func TestResponsesStreamEmitsDeltasAndCompletedMessage(t *testing.T) {
 		writer.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprint(writer, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hel\"}\n\n")
 		_, _ = fmt.Fprint(writer, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n")
-		_, _ = fmt.Fprint(writer, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"test-model\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n")
+		_, _ = fmt.Fprint(writer, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"test-model\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5,\"input_tokens_details\":{\"cached_tokens\":1,\"cache_write_tokens\":1}}}}\n\n")
 	}))
 	defer server.Close()
 
@@ -47,7 +47,9 @@ func TestResponsesStreamEmitsDeltasAndCompletedMessage(t *testing.T) {
 	if deltas != "hello" || message.Text != "hello" || message.ResponseID != "resp_1" {
 		t.Fatalf("deltas/message = %q/%#v", deltas, message)
 	}
-	if message.Usage == nil || message.Usage.TotalTokens != 5 {
+	if message.Usage == nil || message.Usage.TotalTokens != 5 ||
+		!message.Usage.InputTokenDetailsReported || message.Usage.UncachedInputTokens != 1 ||
+		message.Usage.CacheReadInputTokens != 1 || message.Usage.CacheWriteInputTokens != 1 {
 		t.Fatalf("usage = %#v", message.Usage)
 	}
 }
@@ -60,7 +62,7 @@ func TestChatStreamReassemblesToolCallAndUsage(t *testing.T) {
 		_, _ = fmt.Fprint(writer, "data: {\"id\":\"chat_1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi \"}}]}\n\n")
 		_, _ = fmt.Fprint(writer, "data: {\"id\":\"chat_1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"upper\",\"arguments\":\"{\\\"text\\\":\"}}]}}]}\n\n")
 		_, _ = fmt.Fprint(writer, "data: {\"id\":\"chat_1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"hello\\\"}\"}}]}}]}\n\n")
-		_, _ = fmt.Fprint(writer, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":3,\"total_tokens\":7}}\n\n")
+		_, _ = fmt.Fprint(writer, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":3,\"total_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":2,\"cache_write_tokens\":1}}}\n\n")
 		_, _ = fmt.Fprint(writer, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
@@ -81,7 +83,9 @@ func TestChatStreamReassemblesToolCallAndUsage(t *testing.T) {
 	if call.ID != "call_1" || call.Name != "upper" || string(call.Arguments) != `{"text":"hello"}` {
 		t.Fatalf("tool call = %#v", call)
 	}
-	if message.Usage == nil || message.Usage.TotalTokens != 7 {
+	if message.Usage == nil || message.Usage.TotalTokens != 7 ||
+		!message.Usage.InputTokenDetailsReported || message.Usage.UncachedInputTokens != 1 ||
+		message.Usage.CacheReadInputTokens != 2 || message.Usage.CacheWriteInputTokens != 1 {
 		t.Fatalf("usage = %#v", message.Usage)
 	}
 }

@@ -66,6 +66,15 @@ QEDは1つのstrictなJSON documentからProvider profile、process分離Extensi
       "provider": "primary",
       "profile": "coding",
       "instructions": "Use specialists when useful and return the final answer",
+      "context": {
+        "max_input_bytes": 65536,
+        "recent_messages": 12
+      },
+      "cache": {
+        "mode": "adaptive",
+        "expected_reuse": 3,
+        "isolation_key": "tenant-a"
+      },
       "delegations": [
         {
           "name": "consult_candidates",
@@ -139,6 +148,8 @@ Provider profileはprotocol、endpoint、model、credential source、Provider op
 | `auth_profile` | `openai-codex` | 名前付きChatGPT credential profile |
 | `max_output_tokens` | no | output上限、`0`はProvider behaviorを選択 |
 | `api_version` | no | Anthropic API version override専用 |
+| `pricing` | no | forecastとUsage cost estimate用のhost supplied rate |
+| `cache_capabilities` | no | 設定endpointとmodelに対するtrusted override |
 
 `echo`はendpoint、model、credential、API optionを受け取りません
 
@@ -149,7 +160,7 @@ custom endpointは認証不要のlocal service向けに`token_env`を省略で�
 Provider profile IDはProvider identityとopaque continuation stateに含まれ、別endpointまたは別profileへのstate再利用を防ぎます
 
 `openai-codex`は別途保存したChatGPT OAuth profileを読み、固定のChatGPT Codex backendを使います
-必須fieldは`protocol`、`model`、`auth_profile`だけであり、`base_url`、`token_env`、`max_output_tokens`、`api_version`を拒否します
+`protocol`、`model`、`auth_profile`、任意の`pricing`を受け取り、`base_url`、`token_env`、`max_output_tokens`、`api_version`、`cache_capabilities`を拒否します
 設定をloadする時点で名前付きprofileが存在する必要があります
 
 ```json
@@ -296,6 +307,8 @@ executable lookupは選択した`PATH`だけを使い、Host environmentへfallb
 | `instructions` | no | このAgentのbase instruction |
 | `max_provider_calls` | no | Runtime local Provider call上限 |
 | `max_tool_calls` | no | Runtime local Tool call上限 |
+| `context` | no | Evidence preservingなcontext圧縮policy |
+| `cache` | no | Provider neutralなprompt cache policy |
 | `delegations` | no | このAgentへ公開するSubagent Tool |
 
 Delegation field
@@ -317,6 +330,79 @@ Subagent Toolは明示的なpromptだけを渡し、parentの完全なconversati
 共有上限の既定値はAgent Run 16、depth 4、Provider call 64です
 parent、candidate、judge Runは同じtop-level budgetを消費します
 
+## Context圧縮とprompt cache
+
+Context圧縮はAgent単位で設定します
+QEDは正確なcompact済みmessage prefixと外部化したTool outputをcontent-addressed objectとして保存するためJSON Evidence Storeが必要です
+
+| Context field | 必須 | 意味と既定値 |
+| --- | --- | --- |
+| `max_input_bytes` | yes | canonical logical inputのhard byte上限 |
+| `recent_messages` | no | 優先するraw tail長、既定値`12` |
+| `evidence_threshold_bytes` | no | Tool outputを外部化するsize、既定値`16384` |
+| `evidence_excerpt_bytes` | no | 両端に保持するbyte数、既定値`2048` |
+| `checkpoint_max_bytes` | no | encoded Checkpoint上限、既定値`8192` |
+
+`max_input_bytes`は決定的なProvider neutral値でありtokenizer basedなmodel context limitではありません
+QEDはraw Session messageを書き換えません
+検証済みCheckpointとrecent raw tailをcompileし、安全なTool transaction境界でhard limit内に収まらなければProvider call前に停止します
+
+`cache`を省略した場合、または`mode`が空か`disabled`の場合、QED側のprompt cache制御は無効です
+Provider側のimplicit behaviorは独立して発生する場合があります
+
+| Cache field | 必須 | 意味と既定値 |
+| --- | --- | --- |
+| `mode` | yes | `disabled`、`adaptive`、`automatic`、`explicit` |
+| `ttl` | no | `5m`、`30m`、`1h`などProviderへ要求するlifetime |
+| `expected_reuse` | no | prefixの予想総利用回数、既定値`2` |
+| `required` | no | 未対応requestをfallbackせず失敗させる |
+| `isolation_key` | no | hashed family IDだけに含めるhost isolation label |
+| `family` | no | hashed family IDだけに含めるhost sharing label |
+
+`adaptive`はexplicit breakpoint、automatic cache、disabled Planの順に選びます
+Cache FamilyにはProvider、model、Agent、Session IDも入り、SessionがなければRun IDが入ります
+raw `isolation_key`と`family`はEventへ永続化せずProviderへも送りません
+
+operator supplied pricingをmodel名から推測することはありません
+
+```json
+{
+  "pricing": {
+    "currency": "USD",
+    "uncached_input_micros_per_million": 2500000,
+    "cache_read_micros_per_million": 250000,
+    "cache_write_micros_per_million": 3000000,
+    "output_micros_per_million": 10000000
+  }
+}
+```
+
+rateは1 million token当たりの`currency`のmicro単位です
+`pricing`がある場合は3つのinput rateをすべて正数にする必要があり、output rateは0でも構いません
+この数値は例示であり現在のProvider価格ではありません
+
+trustedなcustom endpointはAdapterがrender可能なCapability factを宣言できます
+
+```json
+{
+  "cache_capabilities": {
+    "exact_prefix": true,
+    "supports_cache_key": true,
+    "supports_explicit": true,
+    "supports_automatic": true,
+    "max_write_breakpoints": 4,
+    "minimum_prefix_tokens": 1024,
+    "supported_ttls": ["30m"],
+    "supports_mixed_ttl": false,
+    "exposes_read_tokens": true,
+    "exposes_write_tokens": true
+  }
+}
+```
+
+選択したwire Adapterがrenderできないfieldを宣言しないでください
+組み込みendpointとmodel検出、wire mapping、現在の制限は[Context compilation、圧縮、prompt cache](context-caching_ja.md)を参照してください
+
 ## Session Store
 
 ```json
@@ -333,6 +419,8 @@ parent、candidate、judge Runは同じtop-level budgetを消費します
 
 Memory Sessionはprocess localです
 JSONL Sessionはappend-onlyでprivate fileとrevision lockを使い、provider-private continuation stateを保持し、後続CLI processからresumeできます
+Prefix Manifestはcommon prefixと変更suffixとして保存し、load時に再構築します
+以前のfull Manifest record形式も読み取れます
 
 `--session-id`には設定済みSession Storeが必要です
 Runtimeはpublic Eventを追記し、message、pending wait、pending Tool callを再構築します
@@ -349,7 +437,8 @@ approval resumeは`--approval prompt|approve|deny`を受け取り、それ以外
 
 設定済みCLIとTUI Runはterminal完了後にversion付きBundleを保存します
 Bundleはpublic Event、usage、configとworkspaceのdigest、host所有Tool traceを含みます
-2つのcommand familyからinspectまたはexportできます
+同じStoreがcontext圧縮用のcontent-addressed objectも保持します
+2つのcommand familyからBundleをinspectまたはexportできます
 
 Tool trace payloadはdigestで表現されますが、public Eventは通常のobservable payloadを保持します
 そのためBundleはprompt、assistant message、Tool引数、Tool output、wait payload、errorを含む場合があります
@@ -360,7 +449,11 @@ qed run inspect <run-id> --store .qed/evidence
 qed run export <run-id> --store .qed/evidence
 qed evidence inspect <run-id> --store .qed/evidence
 qed evidence export <run-id> --store .qed/evidence
+qed evidence fetch sha256:<digest> --store .qed/evidence
+qed cache status [run-id] --store .qed/evidence
 ```
+
+`qed cache status`はRun ID省略時に最新Bundleを選び、effective Plan、normalized cache Usage、任意のforecastとUsage cost estimate、最初のPrefix divergence、最新compaction recordを表示します
 
 ## Extension State Store
 

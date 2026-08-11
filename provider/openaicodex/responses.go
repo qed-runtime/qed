@@ -31,6 +31,11 @@ type responsesTool struct {
 	Strict      bool            `json:"strict"`
 }
 
+type inputTokenDetails struct {
+	CachedTokens     int64 `json:"cached_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
+}
+
 type responsesResponse struct {
 	ID                string            `json:"id"`
 	Model             string            `json:"model"`
@@ -44,13 +49,18 @@ type responsesResponse struct {
 		Message string `json:"message"`
 	} `json:"error"`
 	Usage struct {
-		InputTokens  int64 `json:"input_tokens"`
-		OutputTokens int64 `json:"output_tokens"`
-		TotalTokens  int64 `json:"total_tokens"`
+		InputTokens        int64              `json:"input_tokens"`
+		OutputTokens       int64              `json:"output_tokens"`
+		TotalTokens        int64              `json:"total_tokens"`
+		InputTokensDetails *inputTokenDetails `json:"input_tokens_details"`
 	} `json:"usage"`
 }
 
 func (provider *Provider) responsesRequest(request agent.ModelRequest) (responsesRequest, error) {
+	if request.CachePlan != nil && request.CachePlan.Mode != agent.CacheModeDisabled &&
+		request.CachePlan.Mode != agent.CacheModeAutomatic {
+		return responsesRequest{}, fmt.Errorf("unsupported OpenAI Codex Cache Plan mode %q", request.CachePlan.Mode)
+	}
 	input := make([]json.RawMessage, 0, len(request.Messages))
 	for _, message := range request.Messages {
 		if message.Role == agent.RoleAssistant {
@@ -251,7 +261,12 @@ func (provider *Provider) messageFromResponsesResponse(response responsesRespons
 		ToolCalls:     toolCalls,
 		StopReason:    mapStopReason(rawStopReason, len(toolCalls) > 0),
 		RawStopReason: rawStopReason,
-		Usage:         usage(response.Usage.InputTokens, response.Usage.OutputTokens, response.Usage.TotalTokens),
+		Usage: usage(
+			response.Usage.InputTokens,
+			response.Usage.OutputTokens,
+			response.Usage.TotalTokens,
+			response.Usage.InputTokensDetails,
+		),
 		ResponseID:    response.ID,
 		Model:         response.Model,
 		ProviderState: &agent.ProviderState{Provider: provider.Name(), Data: state},
@@ -282,14 +297,27 @@ func stateData(message agent.Message, providerName string) (json.RawMessage, boo
 	return message.ProviderState.Data, true
 }
 
-func usage(input, output, total int64) *agent.Usage {
+func usage(input, output, total int64, details *inputTokenDetails) *agent.Usage {
 	if input == 0 && output == 0 && total == 0 {
 		return nil
 	}
 	if total == 0 {
 		total = input + output
 	}
-	return &agent.Usage{InputTokens: input, OutputTokens: output, TotalTokens: total}
+	reported := &agent.Usage{InputTokens: input, OutputTokens: output, TotalTokens: total}
+	if details == nil {
+		return reported
+	}
+	if input < 0 || details.CachedTokens < 0 || details.CacheWriteTokens < 0 ||
+		details.CachedTokens > input || details.CacheWriteTokens > input-details.CachedTokens {
+		return reported
+	}
+	classified := details.CachedTokens + details.CacheWriteTokens
+	reported.InputTokenDetailsReported = true
+	reported.UncachedInputTokens = input - classified
+	reported.CacheReadInputTokens = details.CachedTokens
+	reported.CacheWriteInputTokens = details.CacheWriteTokens
+	return reported
 }
 
 func mapStopReason(raw string, hasToolCalls bool) agent.StopReason {

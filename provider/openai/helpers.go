@@ -36,14 +36,65 @@ func stateData(message agent.Message, providerName string) (json.RawMessage, boo
 	return message.ProviderState.Data, true
 }
 
-func usage(input, output, total int64) *agent.Usage {
+func (provider *Provider) validatedCachePlan(request agent.ModelRequest) (*agent.CachePlan, error) {
+	plan := request.CachePlan
+	if plan == nil || plan.Mode == agent.CacheModeDisabled {
+		return nil, nil
+	}
+	capabilities := provider.CacheCapabilities()
+	if plan.FamilyID == "" {
+		return nil, errors.New("OpenAI Cache Plan family is required")
+	}
+	switch plan.Mode {
+	case agent.CacheModeAutomatic:
+		if !capabilities.SupportsAutomatic {
+			return nil, errors.New("OpenAI automatic prompt cache is unsupported by this endpoint")
+		}
+	case agent.CacheModeExplicit:
+		if !capabilities.SupportsExplicit {
+			return nil, errors.New("OpenAI explicit prompt cache is unsupported by this API or model")
+		}
+		if len(plan.Breakpoints) == 0 || len(plan.Breakpoints) > capabilities.MaxWriteBreakpoints {
+			return nil, errors.New("OpenAI explicit Cache Plan has an invalid breakpoint count")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported OpenAI Cache Plan mode %q", plan.Mode)
+	}
+	for _, breakpoint := range plan.Breakpoints {
+		if breakpoint.MessageIndex < 0 || breakpoint.MessageIndex >= len(request.Messages) ||
+			request.Messages[breakpoint.MessageIndex].Role != agent.RoleUser {
+			return nil, errors.New("OpenAI Cache Plan breakpoint does not identify a user message")
+		}
+	}
+	return plan, nil
+}
+
+type inputTokenDetails struct {
+	CachedTokens     int64 `json:"cached_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
+}
+
+func usage(input, output, total int64, details *inputTokenDetails) *agent.Usage {
 	if input == 0 && output == 0 && total == 0 {
 		return nil
 	}
 	if total == 0 {
 		total = input + output
 	}
-	return &agent.Usage{InputTokens: input, OutputTokens: output, TotalTokens: total}
+	reported := &agent.Usage{InputTokens: input, OutputTokens: output, TotalTokens: total}
+	if details == nil {
+		return reported
+	}
+	if input < 0 || details.CachedTokens < 0 || details.CacheWriteTokens < 0 ||
+		details.CachedTokens > input || details.CacheWriteTokens > input-details.CachedTokens {
+		return reported
+	}
+	classified := details.CachedTokens + details.CacheWriteTokens
+	reported.InputTokenDetailsReported = true
+	reported.UncachedInputTokens = input - classified
+	reported.CacheReadInputTokens = details.CachedTokens
+	reported.CacheWriteInputTokens = details.CacheWriteTokens
+	return reported
 }
 
 func mapStopReason(raw string, hasToolCalls bool) agent.StopReason {

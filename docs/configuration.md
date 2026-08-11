@@ -67,6 +67,15 @@ The format is used by `qed run`, `qed tui`, and `qed session resume`
       "provider": "primary",
       "profile": "coding",
       "instructions": "Use specialists when useful and return the final answer",
+      "context": {
+        "max_input_bytes": 65536,
+        "recent_messages": 12
+      },
+      "cache": {
+        "mode": "adaptive",
+        "expected_reuse": 3,
+        "isolation_key": "tenant-a"
+      },
       "delegations": [
         {
           "name": "consult_candidates",
@@ -142,6 +151,8 @@ different endpoints of the same dialect
 | `auth_profile` | `openai-codex` | Named ChatGPT credential profile |
 | `max_output_tokens` | no | Output limit; `0` selects Provider behavior |
 | `api_version` | no | Anthropic API version override only |
+| `pricing` | no | Host-supplied rates for forecasting and usage-cost estimates |
+| `cache_capabilities` | no | Trusted override for the configured endpoint and model |
 
 `echo` accepts no endpoint, model, credential, or API options
 
@@ -154,10 +165,10 @@ The Provider profile ID is part of Provider identity and opaque continuation
 state, preventing state from one endpoint/profile from being reused by another
 
 `openai-codex` reads a separately stored ChatGPT OAuth profile and uses the
-fixed ChatGPT Codex backend. It requires only `protocol`, `model`, and
-`auth_profile`; `base_url`, `token_env`, `max_output_tokens`, and `api_version`
-are rejected. The named profile must already exist when configuration is
-loaded
+fixed ChatGPT Codex backend. It accepts `protocol`, `model`, `auth_profile`, and
+optional `pricing`; `base_url`, `token_env`, `max_output_tokens`, `api_version`,
+and `cache_capabilities` are rejected. The named profile must already exist
+when configuration is loaded
 
 ```json
 {
@@ -311,6 +322,8 @@ selected `PATH` and does not fall back to the Host environment
 | `instructions` | no | Base instructions for this Agent |
 | `max_provider_calls` | no | Runtime-local Provider call limit |
 | `max_tool_calls` | no | Runtime-local Tool call limit |
+| `context` | no | Evidence-preserving context compression policy |
+| `cache` | no | Provider-neutral prompt-cache policy |
 | `delegations` | no | Subagent Tools exposed to this Agent |
 
 Delegation fields
@@ -332,6 +345,84 @@ prompt, not the parent's full conversation, Session ID, or Metadata
 Shared limits default to 16 Agent Runs, depth 4, and 64 Provider calls. Parent,
 candidate, and judge Runs count against the same top-level budget
 
+## Context compression and prompt caching
+
+Context compression is configured per Agent and requires a JSON Evidence Store
+because QED stores both exact compacted message prefixes and externalized Tool
+output as content-addressed objects
+
+| Context field | Required | Meaning and default |
+| --- | --- | --- |
+| `max_input_bytes` | yes | Hard canonical logical-input byte limit |
+| `recent_messages` | no | Preferred raw tail length, default `12` |
+| `evidence_threshold_bytes` | no | Externalize Tool output at this size, default `16384` |
+| `evidence_excerpt_bytes` | no | Retain this many bytes from both ends, default `2048` |
+| `checkpoint_max_bytes` | no | Maximum encoded Checkpoint size, default `8192` |
+
+`max_input_bytes` is deterministic and Provider-neutral, not a tokenizer-backed
+model context limit. QED never rewrites raw Session messages. It compiles a
+validated Checkpoint followed by a recent raw tail, and stops before a Provider
+call when no safe Tool-transaction boundary fits the hard limit
+
+Prompt-cache control is disabled when `cache` is omitted or `mode` is empty or
+`disabled`. Provider-side implicit behavior may still occur independently
+
+| Cache field | Required | Meaning and default |
+| --- | --- | --- |
+| `mode` | yes | `disabled`, `adaptive`, `automatic`, or `explicit` |
+| `ttl` | no | Requested Provider lifetime such as `5m`, `30m`, or `1h` |
+| `expected_reuse` | no | Expected total prefix uses, default `2` |
+| `required` | no | Fail instead of falling back from an unsupported request |
+| `isolation_key` | no | Host isolation label included only in a hashed family ID |
+| `family` | no | Host sharing label included only in a hashed family ID |
+
+`adaptive` prefers an explicit breakpoint, then automatic caching, then a
+disabled Plan. A Cache Family also includes Provider, model, Agent, and Session
+ID, or Run ID when no Session exists. Raw `isolation_key` and `family` values are
+not persisted in Events or sent to a Provider
+
+Operator-supplied pricing is never inferred from a model name
+
+```json
+{
+  "pricing": {
+    "currency": "USD",
+    "uncached_input_micros_per_million": 2500000,
+    "cache_read_micros_per_million": 250000,
+    "cache_write_micros_per_million": 3000000,
+    "output_micros_per_million": 10000000
+  }
+}
+```
+
+Rates are millionths of `currency` per one million tokens. The three input
+rates must all be positive when `pricing` is present; the output rate may be
+zero. These numbers are illustrative, not current Provider prices
+
+A trusted custom endpoint may declare the capability facts its adapter can
+render
+
+```json
+{
+  "cache_capabilities": {
+    "exact_prefix": true,
+    "supports_cache_key": true,
+    "supports_explicit": true,
+    "supports_automatic": true,
+    "max_write_breakpoints": 4,
+    "minimum_prefix_tokens": 1024,
+    "supported_ttls": ["30m"],
+    "supports_mixed_ttl": false,
+    "exposes_read_tokens": true,
+    "exposes_write_tokens": true
+  }
+}
+```
+
+Do not declare fields that the selected wire adapter cannot render. See
+[Context compilation, compression, and prompt caching](context-caching.md) for
+built-in endpoint and model detection, wire mappings, and current limits
+
 ## Session Store
 
 ```json
@@ -348,7 +439,9 @@ candidate, and judge Runs count against the same top-level budget
 
 Memory Sessions are process-local. JSONL Sessions are append-only, use private
 files and revision locks, preserve provider-private continuation state, and can
-be resumed by a later CLI process
+be resumed by a later CLI process. Prefix Manifests are stored as a common
+prefix plus changed suffix and reconstructed on load; the earlier full-Manifest
+record format remains readable
 
 `--session-id` requires a configured Session Store. The Runtime appends public
 Events and reconstructs messages, pending waits, and pending Tool calls. Use
@@ -366,7 +459,8 @@ accepts `--approval prompt|approve|deny`; other wait kinds require
 
 Configured CLI and TUI Runs save one versioned Bundle after terminal completion,
 including public Events, usage, config/workspace digests, and host-owned Tool
-trace records. Inspect or export with either command family
+trace records. The same Store keeps content-addressed objects used by context
+compression. Inspect or export Bundles with either command family
 
 Tool trace payloads are represented by digests, but public Events retain their
 normal observable payload. A Bundle may therefore contain prompts, assistant
@@ -378,7 +472,13 @@ qed run inspect <run-id> --store .qed/evidence
 qed run export <run-id> --store .qed/evidence
 qed evidence inspect <run-id> --store .qed/evidence
 qed evidence export <run-id> --store .qed/evidence
+qed evidence fetch sha256:<digest> --store .qed/evidence
+qed cache status [run-id] --store .qed/evidence
 ```
+
+`qed cache status` defaults to the newest Bundle and reports the effective
+Plan, normalized cache Usage, optional forecast and usage-cost estimate, first
+Prefix divergence, and latest compaction record
 
 ## Extension State Store
 

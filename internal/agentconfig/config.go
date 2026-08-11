@@ -245,13 +245,15 @@ type registryLimits struct {
 }
 
 type providerProfile struct {
-	Protocol        string `json:"protocol"`
-	BaseURL         string `json:"base_url,omitempty"`
-	Model           string `json:"model,omitempty"`
-	TokenEnv        string `json:"token_env,omitempty"`
-	AuthProfile     string `json:"auth_profile,omitempty"`
-	MaxOutputTokens int    `json:"max_output_tokens,omitempty"`
-	APIVersion      string `json:"api_version,omitempty"`
+	Protocol          string                   `json:"protocol"`
+	BaseURL           string                   `json:"base_url,omitempty"`
+	Model             string                   `json:"model,omitempty"`
+	TokenEnv          string                   `json:"token_env,omitempty"`
+	AuthProfile       string                   `json:"auth_profile,omitempty"`
+	MaxOutputTokens   int                      `json:"max_output_tokens,omitempty"`
+	APIVersion        string                   `json:"api_version,omitempty"`
+	Pricing           *cachePricingProfile     `json:"pricing,omitempty"`
+	CacheCapabilities *agent.CacheCapabilities `json:"cache_capabilities,omitempty"`
 }
 
 type agentProfile struct {
@@ -261,6 +263,33 @@ type agentProfile struct {
 	MaxProviderCalls int                 `json:"max_provider_calls,omitempty"`
 	MaxToolCalls     int                 `json:"max_tool_calls,omitempty"`
 	Delegations      []delegationProfile `json:"delegations,omitempty"`
+	Context          *contextProfile     `json:"context,omitempty"`
+	Cache            *cacheProfile       `json:"cache,omitempty"`
+}
+
+type contextProfile struct {
+	MaxInputBytes          int64 `json:"max_input_bytes"`
+	RecentMessages         int   `json:"recent_messages,omitempty"`
+	EvidenceThresholdBytes int   `json:"evidence_threshold_bytes,omitempty"`
+	EvidenceExcerptBytes   int   `json:"evidence_excerpt_bytes,omitempty"`
+	CheckpointMaxBytes     int   `json:"checkpoint_max_bytes,omitempty"`
+}
+
+type cacheProfile struct {
+	Mode          agent.CacheMode `json:"mode"`
+	TTL           agent.CacheTTL  `json:"ttl,omitempty"`
+	ExpectedReuse int             `json:"expected_reuse,omitempty"`
+	Required      bool            `json:"required,omitempty"`
+	IsolationKey  string          `json:"isolation_key,omitempty"`
+	Family        string          `json:"family,omitempty"`
+}
+
+type cachePricingProfile struct {
+	Currency                      string `json:"currency"`
+	UncachedInputMicrosPerMillion int64  `json:"uncached_input_micros_per_million"`
+	CacheReadMicrosPerMillion     int64  `json:"cache_read_micros_per_million"`
+	CacheWriteMicrosPerMillion    int64  `json:"cache_write_micros_per_million"`
+	OutputMicrosPerMillion        int64  `json:"output_micros_per_million,omitempty"`
 }
 
 type executionProfile struct {
@@ -356,6 +385,15 @@ func build(document fileConfig, options LoadOptions, configurationDirectory stri
 		closeProfiles()
 		return nil, err
 	}
+	pricing, err := buildCachePricing(document.Providers)
+	if err != nil {
+		closeProfiles()
+		return nil, err
+	}
+	var objectStore agent.EvidenceObjectStore
+	if evidenceStore != nil {
+		objectStore, _ = evidenceStore.(agent.EvidenceObjectStore)
+	}
 	registry, err := orchestration.NewAgentRegistry(orchestration.AgentRegistryOptions{
 		MaxRuns:          document.Limits.MaxRuns,
 		MaxDepth:         document.Limits.MaxDepth,
@@ -372,6 +410,8 @@ func build(document fileConfig, options LoadOptions, configurationDirectory stri
 		profiles:  profiles,
 		registry:  registry,
 		sessions:  sessions,
+		objects:   objectStore,
+		pricing:   pricing,
 		states:    make(map[string]buildState, len(document.Agents)),
 		logger:    options.Logger,
 	}
@@ -459,6 +499,27 @@ func buildEvidenceStore(specification *evidenceProfile, configurationDirectory s
 		return nil, fmt.Errorf("configure Evidence Store: %w", err)
 	}
 	return store, nil
+}
+
+func buildCachePricing(profiles map[string]providerProfile) (map[string]*agent.CachePricing, error) {
+	pricing := make(map[string]*agent.CachePricing, len(profiles))
+	for profileID, profile := range profiles {
+		if profile.Pricing == nil {
+			continue
+		}
+		configured := &agent.CachePricing{
+			Currency:                      profile.Pricing.Currency,
+			UncachedInputMicrosPerMillion: profile.Pricing.UncachedInputMicrosPerMillion,
+			CacheReadMicrosPerMillion:     profile.Pricing.CacheReadMicrosPerMillion,
+			CacheWriteMicrosPerMillion:    profile.Pricing.CacheWriteMicrosPerMillion,
+			OutputMicrosPerMillion:        profile.Pricing.OutputMicrosPerMillion,
+		}
+		if _, err := agent.ForecastCacheCost(*configured, 0, 1); err != nil {
+			return nil, fmt.Errorf("provider profile %q pricing: %w", profileID, err)
+		}
+		pricing[profileID] = configured
+	}
+	return pricing, nil
 }
 
 func buildSessionStore(specification *sessionProfile, configurationDirectory string) (agent.SessionStore, error) {
@@ -814,7 +875,8 @@ func buildProvider(profileID string, profile providerProfile, options LoadOption
 	switch profile.Protocol {
 	case protocolEcho:
 		if profile.BaseURL != "" || profile.Model != "" || profile.TokenEnv != "" ||
-			profile.AuthProfile != "" || profile.MaxOutputTokens != 0 || profile.APIVersion != "" {
+			profile.AuthProfile != "" || profile.MaxOutputTokens != 0 || profile.APIVersion != "" ||
+			profile.CacheCapabilities != nil {
 			return nil, errors.New("echo profile does not accept model, endpoint, credential, or API options")
 		}
 		return echo.NewProfile(profileID)
@@ -837,12 +899,13 @@ func buildProvider(profileID string, profile providerProfile, options LoadOption
 			return nil, err
 		}
 		return openai.New(openai.Config{
-			ProfileID:        profileID,
-			API:              api,
-			CredentialSource: credentialSource,
-			BaseURL:          profile.BaseURL,
-			Model:            profile.Model,
-			MaxOutputTokens:  profile.MaxOutputTokens,
+			ProfileID:         profileID,
+			API:               api,
+			CredentialSource:  credentialSource,
+			BaseURL:           profile.BaseURL,
+			Model:             profile.Model,
+			MaxOutputTokens:   profile.MaxOutputTokens,
+			CacheCapabilities: profile.CacheCapabilities,
 		})
 	case protocolOpenAICodex:
 		if profile.Model == "" {
@@ -851,8 +914,9 @@ func buildProvider(profileID string, profile providerProfile, options LoadOption
 		if profile.AuthProfile == "" {
 			return nil, errors.New("auth_profile is required")
 		}
-		if profile.BaseURL != "" || profile.TokenEnv != "" || profile.MaxOutputTokens != 0 || profile.APIVersion != "" {
-			return nil, errors.New("openai-codex profile accepts only protocol, model, and auth_profile")
+		if profile.BaseURL != "" || profile.TokenEnv != "" || profile.MaxOutputTokens != 0 || profile.APIVersion != "" ||
+			profile.CacheCapabilities != nil {
+			return nil, errors.New("openai-codex profile accepts only protocol, model, auth_profile, and pricing")
 		}
 		var authService *chatauth.Service
 		var err error
@@ -892,12 +956,13 @@ func buildProvider(profileID string, profile providerProfile, options LoadOption
 			return nil, err
 		}
 		return anthropic.New(anthropic.Config{
-			ProfileID:        profileID,
-			CredentialSource: credentialSource,
-			BaseURL:          profile.BaseURL,
-			APIVersion:       profile.APIVersion,
-			Model:            profile.Model,
-			MaxOutputTokens:  profile.MaxOutputTokens,
+			ProfileID:         profileID,
+			CredentialSource:  credentialSource,
+			BaseURL:           profile.BaseURL,
+			APIVersion:        profile.APIVersion,
+			Model:             profile.Model,
+			MaxOutputTokens:   profile.MaxOutputTokens,
+			CacheCapabilities: profile.CacheCapabilities,
 		})
 	}
 	return nil, fmt.Errorf("unsupported protocol %q", profile.Protocol)
@@ -962,6 +1027,8 @@ type graphBuilder struct {
 	profiles  map[string]*coding.Profile
 	registry  *orchestration.AgentRegistry
 	sessions  agent.SessionStore
+	objects   agent.EvidenceObjectStore
+	pricing   map[string]*agent.CachePricing
 	states    map[string]buildState
 	stack     []string
 	logger    *slog.Logger
@@ -1009,6 +1076,33 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 	}
 	instructions = combineInstructions(instructions, specification.Instructions)
 
+	var contextCompiler agent.ContextCompiler
+	if specification.Context != nil {
+		if builder.objects == nil {
+			return fmt.Errorf("agent %q context compaction requires a JSON Evidence Store", agentID)
+		}
+		configured, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
+			MaxInputBytes:          specification.Context.MaxInputBytes,
+			RecentMessages:         specification.Context.RecentMessages,
+			EvidenceThresholdBytes: specification.Context.EvidenceThresholdBytes,
+			EvidenceExcerptBytes:   specification.Context.EvidenceExcerptBytes,
+			CheckpointMaxBytes:     specification.Context.CheckpointMaxBytes,
+		}, builder.objects, nil)
+		if err != nil {
+			return fmt.Errorf("agent %q context: %w", agentID, err)
+		}
+		contextCompiler = configured
+	}
+	cachePolicy := agent.CachePolicy{Pricing: builder.pricing[specification.Provider]}
+	if specification.Cache != nil {
+		cachePolicy.Mode = specification.Cache.Mode
+		cachePolicy.TTL = specification.Cache.TTL
+		cachePolicy.ExpectedReuse = specification.Cache.ExpectedReuse
+		cachePolicy.Required = specification.Cache.Required
+		cachePolicy.IsolationKey = specification.Cache.IsolationKey
+		cachePolicy.Family = specification.Cache.Family
+	}
+
 	for index, delegation := range specification.Delegations {
 		if delegation.Name == "" || strings.TrimSpace(delegation.Name) != delegation.Name {
 			return fmt.Errorf("agent %q delegation %d name is required and must not have surrounding whitespace", agentID, index)
@@ -1055,6 +1149,8 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 		MaxProviderCalls: specification.MaxProviderCalls,
 		MaxToolCalls:     specification.MaxToolCalls,
 		SessionStore:     builder.sessions,
+		ContextCompiler:  contextCompiler,
+		CachePolicy:      cachePolicy,
 		Logger:           builder.logger,
 	})
 	if err != nil {

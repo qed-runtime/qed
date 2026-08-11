@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -32,7 +33,8 @@ type Options struct {
 	Tools []Tool
 	// ToolSource supplies one Tool generation that remains pinned for a Run
 	//
-	// Source Tools are ordered before fixed Tools when both are configured
+	// Source Tools are combined with fixed Tools before the Context Compiler
+	// canonicalizes their order for Provider calls
 	ToolSource ToolSource
 	// ComponentSource supplies one atomic Tool and Hook generation set for a Run
 	//
@@ -48,6 +50,16 @@ type Options struct {
 	//
 	// A nil Store keeps Runs ephemeral
 	SessionStore SessionStore
+	// ContextCompiler prepares each Provider call and produces Context Segments
+	//
+	// A nil Compiler uses DefaultContextCompiler
+	ContextCompiler ContextCompiler
+	// CachePlanner creates Provider-neutral cache routing and breakpoint decisions
+	//
+	// A nil Planner uses DefaultCachePlanner
+	CachePlanner CachePlanner
+	// CachePolicy supplies host cache intent, isolation, and optional pricing
+	CachePolicy CachePolicy
 	// Logger receives safe structured debug diagnostics without message content,
 	// Tool arguments, Tool output, metadata values, or Provider-private state
 	Logger *slog.Logger
@@ -65,6 +77,9 @@ type Runtime struct {
 	maxProviderCalls int
 	maxToolCalls     int
 	sessionStore     SessionStore
+	contextCompiler  ContextCompiler
+	cachePlanner     CachePlanner
+	cachePolicy      CachePolicy
 	logger           *slog.Logger
 	sessionMu        sync.Mutex
 	sessionLocks     map[string]*runtimeSessionLock
@@ -118,6 +133,18 @@ func NewRuntime(options Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	contextCompiler := options.ContextCompiler
+	if contextCompiler == nil {
+		contextCompiler = DefaultContextCompiler{}
+	}
+	cachePlanner := options.CachePlanner
+	if cachePlanner == nil {
+		cachePlanner = DefaultCachePlanner{}
+	}
+	cachePolicy, err := normalizeCachePolicy(options.CachePolicy)
+	if err != nil {
+		return nil, fmt.Errorf("configure Cache Policy: %w", err)
+	}
 
 	return &Runtime{
 		provider:         options.Provider,
@@ -128,6 +155,9 @@ func NewRuntime(options Options) (*Runtime, error) {
 		maxProviderCalls: maxProviderCalls,
 		maxToolCalls:     maxToolCalls,
 		sessionStore:     options.SessionStore,
+		contextCompiler:  contextCompiler,
+		cachePlanner:     cachePlanner,
+		cachePolicy:      cachePolicy,
 		logger:           options.Logger,
 		sessionLocks:     make(map[string]*runtimeSessionLock),
 	}, nil
@@ -351,6 +381,13 @@ func (runtime *Runtime) execute(
 	defer releaseSession()
 	messages := loaded.messages
 	sessionRevision := loaded.revision
+	activeCheckpoint := cloneContextCheckpointPointer(loaded.checkpoint)
+	knownEvidence := make(map[string]struct{}, len(loaded.evidenceObjects))
+	for _, reference := range loaded.evidenceObjects {
+		knownEvidence[reference.Digest] = struct{}{}
+	}
+	var latestCompaction *ContextCompactionReport
+	var latestCachePlan *CachePlan
 
 	ctx = WithRunInfo(ctx, RunInfo{
 		RunID:        runID,
@@ -373,6 +410,7 @@ func (runtime *Runtime) execute(
 	toolCalls := 0
 	sequence := uint64(0)
 	usage := Usage{}
+	inputTokenDetailsComplete := true
 
 	emit := func(event Event) error {
 		event.Sequence = sequence + 1
@@ -488,18 +526,21 @@ func (runtime *Runtime) execute(
 			"error_type", errorType(runErr),
 		)
 		handle.complete(RunResult{
-			RunID:           runID,
-			ParentRunID:     request.ParentRunID,
-			AgentID:         request.AgentID,
-			SessionID:       request.SessionID,
-			Status:          status,
-			Messages:        messages,
-			ToolResults:     toolResults,
-			ProviderCalls:   providerCalls,
-			ToolCalls:       toolCalls,
-			Usage:           usage,
-			Budget:          budgetSnapshot,
-			SessionRevision: sessionRevision,
+			RunID:             runID,
+			ParentRunID:       request.ParentRunID,
+			AgentID:           request.AgentID,
+			SessionID:         request.SessionID,
+			Status:            status,
+			Messages:          messages,
+			ToolResults:       toolResults,
+			ProviderCalls:     providerCalls,
+			ToolCalls:         toolCalls,
+			Usage:             usage,
+			Budget:            budgetSnapshot,
+			SessionRevision:   sessionRevision,
+			ContextCheckpoint: cloneContextCheckpointPointer(activeCheckpoint),
+			ContextCompaction: cloneContextCompactionReport(latestCompaction),
+			CachePlan:         cloneCachePlanPointer(latestCachePlan),
 		}, runErr)
 	}
 
@@ -563,6 +604,75 @@ func (runtime *Runtime) execute(
 			return
 		}
 
+		modelRequest := ModelRequest{
+			AgentID:      request.AgentID,
+			SessionID:    request.SessionID,
+			Metadata:     cloneMetadata(request.Metadata),
+			Instructions: request.Instructions,
+			Messages:     cloneMessages(messages),
+			Tools:        cloneToolDefinitions(toolSet.definitions),
+		}
+		compileStartedAt := time.Now()
+		compiled, manifest, err := runtime.compileContext(
+			ctx,
+			runID,
+			modelRequest,
+			sessionRevision,
+			activeCheckpoint,
+		)
+		if err != nil {
+			runtime.debug("context.compile.failed",
+				"run_id", runID,
+				"provider", runtime.provider.Name(),
+				"duration_ms", time.Since(compileStartedAt).Milliseconds(),
+				"error_type", fmt.Sprintf("%T", err),
+			)
+			fail(fmt.Errorf("compile Provider context: %w", err))
+			return
+		}
+		runtime.debug("context.compile.completed",
+			"run_id", runID,
+			"provider", runtime.provider.Name(),
+			"duration_ms", time.Since(compileStartedAt).Milliseconds(),
+			"segment_count", len(manifest.Segments),
+			"prefix_epoch", manifest.Epoch,
+		)
+		checkpointChanged := compiled.Checkpoint != nil && !contextCheckpointsEqual(activeCheckpoint, compiled.Checkpoint)
+		var newEvidence []EvidenceObjectRef
+		if compiled.Compaction != nil {
+			for _, reference := range compiled.Compaction.Externalized {
+				if _, exists := knownEvidence[reference.Digest]; exists {
+					continue
+				}
+				newEvidence = append(newEvidence, reference)
+			}
+		}
+		if checkpointChanged || len(newEvidence) > 0 {
+			report := cloneContextCompactionReport(compiled.Compaction)
+			if report == nil {
+				report = &ContextCompactionReport{Applied: true, Reason: "checkpoint"}
+			}
+			report.Externalized = append([]EvidenceObjectRef(nil), newEvidence...)
+			event := Event{Type: EventContextCompacted, ContextCompaction: report}
+			if checkpointChanged {
+				event.ContextCheckpoint = cloneContextCheckpointPointer(compiled.Checkpoint)
+			}
+			if err := emit(event); err != nil {
+				fail(err)
+				return
+			}
+			if checkpointChanged {
+				activeCheckpoint = cloneContextCheckpointPointer(compiled.Checkpoint)
+			}
+			for _, reference := range newEvidence {
+				knownEvidence[reference.Digest] = struct{}{}
+			}
+			latestCompaction = cloneContextCompactionReport(report)
+		}
+		if compiled.Compaction != nil {
+			latestCompaction = cloneContextCompactionReport(compiled.Compaction)
+		}
+
 		if err := request.Budget.consumeProviderCall(); err != nil {
 			fail(err)
 			return
@@ -575,18 +685,18 @@ func (runtime *Runtime) execute(
 			"provider", runtime.provider.Name(),
 			"call", providerCalls,
 		)
-		if err := emit(Event{Type: EventModelRequest}); err != nil {
+		manifestEvent := clonePrefixManifest(manifest)
+		cachePlanEvent := cloneCachePlanPointer(compiled.ModelRequest.CachePlan)
+		if err := emit(Event{
+			Type:           EventModelRequest,
+			PrefixManifest: &manifestEvent,
+			CachePlan:      cachePlanEvent,
+		}); err != nil {
 			fail(err)
 			return
 		}
-		stream, err := runtime.provider.Stream(ctx, ModelRequest{
-			AgentID:      request.AgentID,
-			SessionID:    request.SessionID,
-			Metadata:     cloneMetadata(request.Metadata),
-			Instructions: request.Instructions,
-			Messages:     cloneMessages(messages),
-			Tools:        cloneToolDefinitions(toolSet.definitions),
-		})
+		latestCachePlan = cloneCachePlanPointer(cachePlanEvent)
+		stream, err := runtime.provider.Stream(ctx, compiled.ModelRequest)
 		if err != nil {
 			runtime.debug("provider.stream.failed",
 				"run_id", runID,
@@ -628,11 +738,15 @@ func (runtime *Runtime) execute(
 			fail(fmt.Errorf("provider %q returned message role %q, want %q", runtime.provider.Name(), message.Role, RoleAssistant))
 			return
 		}
+		if err := validateUsage(message.Usage); err != nil {
+			fail(fmt.Errorf("provider %q returned invalid Usage: %w", runtime.provider.Name(), err))
+			return
+		}
+		if err := accumulateUsage(&usage, message.Usage, &inputTokenDetailsComplete); err != nil {
+			fail(fmt.Errorf("aggregate provider %q Usage: %w", runtime.provider.Name(), err))
+			return
+		}
 		if message.Usage != nil {
-			usage.InputTokens += message.Usage.InputTokens
-			usage.OutputTokens += message.Usage.OutputTokens
-			usage.TotalTokens += message.Usage.TotalTokens
-			usage.CostMicros += message.Usage.CostMicros
 			if err := request.Budget.recordUsage(message.Usage); err != nil {
 				fail(err)
 				return
@@ -707,6 +821,193 @@ func (runtime *Runtime) debug(message string, arguments ...any) {
 	}
 }
 
+func (runtime *Runtime) compileContext(
+	ctx context.Context,
+	runID string,
+	request ModelRequest,
+	sessionRevision uint64,
+	checkpoint *ContextCheckpoint,
+) (CompiledContext, PrefixManifest, error) {
+	model := ""
+	if provider, ok := runtime.provider.(ModelIDProvider); ok {
+		model = provider.ModelID()
+	}
+	compiled, err := runtime.contextCompiler.Compile(ctx, ContextCompileRequest{
+		Provider:        runtime.provider.Name(),
+		Model:           model,
+		ModelRequest:    cloneModelRequest(request),
+		SessionRevision: sessionRevision,
+		Checkpoint:      cloneContextCheckpointPointer(checkpoint),
+	})
+	if err != nil {
+		return CompiledContext{}, PrefixManifest{}, err
+	}
+	compiled.ModelRequest = cloneModelRequest(compiled.ModelRequest)
+	compiled.Segments = cloneContextSegments(compiled.Segments)
+	compiled.Checkpoint = cloneContextCheckpointPointer(compiled.Checkpoint)
+	compiled.Compaction = cloneContextCompactionReport(compiled.Compaction)
+	if compiled.ModelRequest.AgentID != request.AgentID {
+		return CompiledContext{}, PrefixManifest{}, errors.New("Context Compiler changed Agent ID")
+	}
+	if compiled.ModelRequest.SessionID != request.SessionID {
+		return CompiledContext{}, PrefixManifest{}, errors.New("Context Compiler changed Session ID")
+	}
+	if !metadataEqual(compiled.ModelRequest.Metadata, request.Metadata) {
+		return CompiledContext{}, PrefixManifest{}, errors.New("Context Compiler changed request metadata")
+	}
+	if len(compiled.ModelRequest.Messages) == 0 && compiled.ModelRequest.Instructions == "" {
+		return CompiledContext{}, PrefixManifest{}, errors.New("Context Compiler returned an empty model request")
+	}
+	toolNames := make(map[string]struct{}, len(compiled.ModelRequest.Tools))
+	for _, definition := range compiled.ModelRequest.Tools {
+		if strings.TrimSpace(definition.Name) != definition.Name || definition.Name == "" {
+			return CompiledContext{}, PrefixManifest{}, errors.New("Context Compiler returned a Tool without a valid name")
+		}
+		if _, duplicate := toolNames[definition.Name]; duplicate {
+			return CompiledContext{}, PrefixManifest{}, fmt.Errorf("Context Compiler returned duplicate Tool %q", definition.Name)
+		}
+		toolNames[definition.Name] = struct{}{}
+		if len(definition.InputSchema) > 0 && !json.Valid(definition.InputSchema) {
+			return CompiledContext{}, PrefixManifest{}, fmt.Errorf("Context Compiler returned Tool %q with an invalid input schema", definition.Name)
+		}
+	}
+	capabilities := CacheCapabilities{}
+	if provider, ok := runtime.provider.(CacheCapabilityProvider); ok {
+		capabilities = provider.CacheCapabilities()
+	}
+	plan, err := runtime.cachePlanner.Plan(ctx, CachePlanRequest{
+		RunID:        runID,
+		Provider:     runtime.provider.Name(),
+		Model:        model,
+		ModelRequest: cloneModelRequest(compiled.ModelRequest),
+		Segments:     cloneContextSegments(compiled.Segments),
+		Capabilities: capabilities,
+		Policy:       runtime.cachePolicy,
+	})
+	if err != nil {
+		return CompiledContext{}, PrefixManifest{}, fmt.Errorf("plan Provider cache: %w", err)
+	}
+	if err := validateCachePlan(plan, capabilities, compiled.ModelRequest, compiled.Segments); err != nil {
+		return CompiledContext{}, PrefixManifest{}, fmt.Errorf("validate Provider Cache Plan: %w", err)
+	}
+	compiled.ModelRequest.CachePlan = cloneCachePlanPointer(&plan)
+	manifest, err := BuildPrefixManifest(PrefixManifestOptions{
+		Provider:    runtime.provider.Name(),
+		Model:       model,
+		CacheFamily: plan.FamilyID,
+	}, compiled.Segments)
+	if err != nil {
+		return CompiledContext{}, PrefixManifest{}, err
+	}
+	return compiled, manifest, nil
+}
+
+func metadataEqual(first, second map[string]string) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for key, value := range first {
+		if second[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func validateUsage(usage *Usage) error {
+	if usage == nil {
+		return nil
+	}
+	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.TotalTokens < 0 || usage.CostMicros < 0 ||
+		usage.UncachedInputTokens < 0 || usage.CacheReadInputTokens < 0 || usage.CacheWriteInputTokens < 0 {
+		return errors.New("token and cost values must not be negative")
+	}
+	classified, err := addUsageValue(usage.UncachedInputTokens, usage.CacheReadInputTokens)
+	if err != nil {
+		return err
+	}
+	classified, err = addUsageValue(classified, usage.CacheWriteInputTokens)
+	if err != nil {
+		return err
+	}
+	if usage.InputTokenDetailsReported {
+		if classified != usage.InputTokens {
+			return fmt.Errorf("input token categories total %d, want %d", classified, usage.InputTokens)
+		}
+		return nil
+	}
+	if classified != 0 {
+		return errors.New("input token categories require InputTokenDetailsReported")
+	}
+	return nil
+}
+
+func accumulateUsage(total *Usage, next *Usage, inputDetailsComplete *bool) error {
+	if next == nil {
+		*inputDetailsComplete = false
+		total.InputTokenDetailsReported = false
+		total.UncachedInputTokens = 0
+		total.CacheReadInputTokens = 0
+		total.CacheWriteInputTokens = 0
+		return nil
+	}
+	candidate := *total
+	fields := []struct {
+		name   string
+		stored *int64
+		value  int64
+	}{
+		{name: "input tokens", stored: &candidate.InputTokens, value: next.InputTokens},
+		{name: "output tokens", stored: &candidate.OutputTokens, value: next.OutputTokens},
+		{name: "total tokens", stored: &candidate.TotalTokens, value: next.TotalTokens},
+		{name: "cost", stored: &candidate.CostMicros, value: next.CostMicros},
+	}
+	for _, field := range fields {
+		value, err := addUsageValue(*field.stored, field.value)
+		if err != nil {
+			return fmt.Errorf("%s: %w", field.name, err)
+		}
+		*field.stored = value
+	}
+	if *inputDetailsComplete && next.InputTokenDetailsReported {
+		candidate.InputTokenDetailsReported = true
+		detailFields := []struct {
+			name   string
+			stored *int64
+			value  int64
+		}{
+			{name: "uncached input tokens", stored: &candidate.UncachedInputTokens, value: next.UncachedInputTokens},
+			{name: "cache read input tokens", stored: &candidate.CacheReadInputTokens, value: next.CacheReadInputTokens},
+			{name: "cache write input tokens", stored: &candidate.CacheWriteInputTokens, value: next.CacheWriteInputTokens},
+		}
+		for _, field := range detailFields {
+			value, err := addUsageValue(*field.stored, field.value)
+			if err != nil {
+				return fmt.Errorf("%s: %w", field.name, err)
+			}
+			*field.stored = value
+		}
+	} else {
+		*inputDetailsComplete = false
+		candidate.InputTokenDetailsReported = false
+		candidate.UncachedInputTokens = 0
+		candidate.CacheReadInputTokens = 0
+		candidate.CacheWriteInputTokens = 0
+	}
+	*total = candidate
+	return nil
+}
+
+func addUsageValue(first, second int64) (int64, error) {
+	if first < 0 || second < 0 {
+		return 0, errors.New("usage values must not be negative")
+	}
+	if second > math.MaxInt64-first {
+		return 0, errors.New("usage value overflow")
+	}
+	return first + second, nil
+}
+
 func errorType(err error) string {
 	if err == nil {
 		return ""
@@ -715,10 +1016,12 @@ func errorType(err error) string {
 }
 
 type loadedSession struct {
-	messages    []Message
-	revision    uint64
-	pendingWait *WaitRequest
-	pendingTool *ToolCall
+	messages        []Message
+	revision        uint64
+	checkpoint      *ContextCheckpoint
+	evidenceObjects []EvidenceObjectRef
+	pendingWait     *WaitRequest
+	pendingTool     *ToolCall
 }
 
 func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (loadedSession, func(), error) {
@@ -754,10 +1057,12 @@ func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (lo
 		wait := cloneWaitRequest(*snapshot.PendingWait)
 		tool := cloneToolCall(*snapshot.PendingTool)
 		return loadedSession{
-			messages:    cloneMessages(snapshot.Messages),
-			revision:    snapshot.Revision,
-			pendingWait: &wait,
-			pendingTool: &tool,
+			messages:        cloneMessages(snapshot.Messages),
+			revision:        snapshot.Revision,
+			checkpoint:      cloneContextCheckpointPointer(snapshot.Checkpoint),
+			evidenceObjects: append([]EvidenceObjectRef(nil), snapshot.EvidenceObjects...),
+			pendingWait:     &wait,
+			pendingTool:     &tool,
 		}, release, nil
 	}
 	if snapshot.PendingWait != nil || snapshot.PendingTool != nil {
@@ -766,7 +1071,12 @@ func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (lo
 	}
 	messages := cloneMessages(snapshot.Messages)
 	messages = append(messages, cloneMessages(request.Input)...)
-	return loadedSession{messages: messages, revision: snapshot.Revision}, release, nil
+	return loadedSession{
+		messages:        messages,
+		revision:        snapshot.Revision,
+		checkpoint:      cloneContextCheckpointPointer(snapshot.Checkpoint),
+		evidenceObjects: append([]EvidenceObjectRef(nil), snapshot.EvidenceObjects...),
+	}, release, nil
 }
 
 func (runtime *Runtime) acquireSession(ctx context.Context, sessionID string) (func(), error) {
@@ -1029,6 +1339,13 @@ func cloneToolResults(results []ToolResult) []ToolResult {
 }
 
 func cloneEvent(event Event) Event {
+	if event.PrefixManifest != nil {
+		manifest := clonePrefixManifest(*event.PrefixManifest)
+		event.PrefixManifest = &manifest
+	}
+	event.CachePlan = cloneCachePlanPointer(event.CachePlan)
+	event.ContextCheckpoint = cloneContextCheckpointPointer(event.ContextCheckpoint)
+	event.ContextCompaction = cloneContextCompactionReport(event.ContextCompaction)
 	if event.Message != nil {
 		message := cloneMessage(*event.Message)
 		event.Message = &message
@@ -1060,5 +1377,17 @@ func cloneRunResult(result RunResult) RunResult {
 		budget := *result.Budget
 		result.Budget = &budget
 	}
+	result.ContextCheckpoint = cloneContextCheckpointPointer(result.ContextCheckpoint)
+	result.ContextCompaction = cloneContextCompactionReport(result.ContextCompaction)
+	result.CachePlan = cloneCachePlanPointer(result.CachePlan)
 	return result
+}
+
+func contextCheckpointsEqual(first, second *ContextCheckpoint) bool {
+	if first == nil || second == nil {
+		return first == nil && second == nil
+	}
+	return first.Generation == second.Generation &&
+		first.SourceMessageCount == second.SourceMessageCount &&
+		first.SourceHash == second.SourceHash
 }

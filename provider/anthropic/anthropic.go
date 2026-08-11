@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/qed-runtime/qed/agent"
@@ -44,18 +45,22 @@ type Config struct {
 	MaxOutputTokens int
 	// HTTPClient defaults to http.DefaultClient
 	HTTPClient providerbase.HTTPClient
+	// CacheCapabilities overrides the standard Anthropic Messages declaration
+	CacheCapabilities *agent.CacheCapabilities
 }
 
 // Provider implements agent.Provider using the Anthropic Messages API
 type Provider struct {
-	apiKey           string
-	credentialSource providerbase.CredentialSource
-	apiVersion       string
-	endpoint         string
-	model            string
-	maxOutputTokens  int
-	client           providerbase.HTTPClient
-	name             string
+	apiKey            string
+	credentialSource  providerbase.CredentialSource
+	apiVersion        string
+	endpoint          string
+	model             string
+	maxOutputTokens   int
+	client            providerbase.HTTPClient
+	name              string
+	official          bool
+	cacheCapabilities *agent.CacheCapabilities
 }
 
 // New validates config and constructs an Anthropic Provider
@@ -88,22 +93,86 @@ func New(config Config) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("configure Anthropic endpoint: %w", err)
 	}
+	if config.CacheCapabilities != nil {
+		if err := agent.ValidateCacheCapabilities(*config.CacheCapabilities); err != nil {
+			return nil, fmt.Errorf("configure Anthropic Cache Capabilities: %w", err)
+		}
+	}
 
 	return &Provider{
-		apiKey:           config.APIKey,
-		credentialSource: config.CredentialSource,
-		apiVersion:       apiVersion,
-		endpoint:         endpoint,
-		model:            model,
-		maxOutputTokens:  maxOutputTokens,
-		client:           config.HTTPClient,
-		name:             name,
+		apiKey:            config.APIKey,
+		credentialSource:  config.CredentialSource,
+		apiVersion:        apiVersion,
+		endpoint:          endpoint,
+		model:             model,
+		maxOutputTokens:   maxOutputTokens,
+		client:            config.HTTPClient,
+		name:              name,
+		official:          config.BaseURL == "" || strings.TrimRight(config.BaseURL, "/") == defaultBaseURL,
+		cacheCapabilities: cloneCacheCapabilities(config.CacheCapabilities),
 	}, nil
 }
 
 // Name returns the Anthropic API dialect used in diagnostics
 func (provider *Provider) Name() string {
 	return provider.name
+}
+
+// ModelID returns the exact model identifier configured for this Provider
+func (provider *Provider) ModelID() string {
+	return provider.model
+}
+
+// CacheCapabilities reports prompt cache behavior for Anthropic Messages
+func (provider *Provider) CacheCapabilities() agent.CacheCapabilities {
+	if provider != nil && provider.cacheCapabilities != nil {
+		return *cloneCacheCapabilities(provider.cacheCapabilities)
+	}
+	if provider == nil || !provider.official {
+		return agent.CacheCapabilities{}
+	}
+	return agent.CacheCapabilities{
+		ExactPrefix:         true,
+		SupportsExplicit:    true,
+		SupportsAutomatic:   true,
+		MaxWriteBreakpoints: 4,
+		MinimumPrefixTokens: anthropicMinimumCacheTokens(provider.model),
+		SupportedTTLs: []agent.CacheTTL{
+			agent.CacheTTLFiveMinutes,
+			agent.CacheTTLOneHour,
+		},
+		ExposesReadTokens:  true,
+		ExposesWriteTokens: true,
+	}
+}
+
+func anthropicMinimumCacheTokens(model string) int64 {
+	model = strings.ToLower(model)
+	switch {
+	case strings.Contains(model, "fable-5"), strings.Contains(model, "mythos-5"):
+		return 512
+	case strings.Contains(model, "mythos-preview"), strings.Contains(model, "opus-4-7"):
+		return 2048
+	case strings.Contains(model, "opus-4-6"), strings.Contains(model, "opus-4-5"),
+		strings.Contains(model, "haiku-4-5"):
+		return 4096
+	case strings.Contains(model, "haiku-3-5"):
+		return 2048
+	case strings.Contains(model, "opus-4-8"), strings.Contains(model, "sonnet-5"),
+		strings.Contains(model, "sonnet-4"), strings.Contains(model, "opus-4"):
+		return 1024
+	default:
+		return 4096
+	}
+}
+
+func cloneCacheCapabilities(capabilities *agent.CacheCapabilities) *agent.CacheCapabilities {
+	if capabilities == nil {
+		return nil
+	}
+	cloned := *capabilities
+	cloned.SupportedTTLs = append([]agent.CacheTTL(nil), capabilities.SupportedTTLs...)
+	return &cloned
 }
 
 // Complete sends one Messages API request and returns its completed Message
@@ -179,17 +248,22 @@ func (provider *Provider) messageFromMessagesResponse(response messagesResponse)
 	if len(toolCalls) > 0 {
 		rawStopReason = "tool_use"
 	}
-	inputTokens := response.Usage.InputTokens +
-		response.Usage.CacheCreationInputTokens +
-		response.Usage.CacheReadInputTokens
-
+	reportedUsage, err := usage(
+		response.Usage.InputTokens,
+		response.Usage.OutputTokens,
+		response.Usage.CacheCreationInputTokens,
+		response.Usage.CacheReadInputTokens,
+	)
+	if err != nil {
+		return agent.Message{}, err
+	}
 	return agent.Message{
 		Role:          agent.RoleAssistant,
 		Text:          text.String(),
 		ToolCalls:     toolCalls,
 		StopReason:    mapStopReason(rawStopReason, len(toolCalls) > 0),
 		RawStopReason: rawStopReason,
-		Usage:         usage(inputTokens, response.Usage.OutputTokens),
+		Usage:         reportedUsage,
 		ResponseID:    response.ID,
 		Model:         response.Model,
 		ProviderState: &agent.ProviderState{
@@ -200,12 +274,18 @@ func (provider *Provider) messageFromMessagesResponse(response messagesResponse)
 }
 
 type messagesRequest struct {
-	Model     string             `json:"model"`
-	MaxTokens int                `json:"max_tokens"`
-	System    string             `json:"system,omitempty"`
-	Messages  []anthropicMessage `json:"messages"`
-	Tools     []anthropicTool    `json:"tools,omitempty"`
-	Stream    bool               `json:"stream,omitempty"`
+	Model        string                 `json:"model"`
+	MaxTokens    int                    `json:"max_tokens"`
+	System       string                 `json:"system,omitempty"`
+	Messages     []anthropicMessage     `json:"messages"`
+	Tools        []anthropicTool        `json:"tools,omitempty"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+	Stream       bool                   `json:"stream,omitempty"`
+}
+
+type anthropicCacheControl struct {
+	Type string         `json:"type"`
+	TTL  agent.CacheTTL `json:"ttl,omitempty"`
 }
 
 type anthropicMessage struct {
@@ -234,15 +314,31 @@ type messagesResponse struct {
 }
 
 func (provider *Provider) messagesRequest(request agent.ModelRequest) (messagesRequest, error) {
+	cachePlan, err := provider.validatedCachePlan(request)
+	if err != nil {
+		return messagesRequest{}, err
+	}
+	breakpoints := make(map[int]struct{})
+	if cachePlan != nil && cachePlan.Mode == agent.CacheModeExplicit {
+		for _, breakpoint := range cachePlan.Breakpoints {
+			breakpoints[breakpoint.MessageIndex] = struct{}{}
+		}
+	}
 	messages := make([]anthropicMessage, 0, len(request.Messages))
 	for index := 0; index < len(request.Messages); index++ {
 		message := request.Messages[index]
 		switch message.Role {
 		case agent.RoleUser:
+			_, marked := breakpoints[index]
 			block, err := json.Marshal(struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			}{Type: "text", Text: message.Text})
+				Type         string                 `json:"type"`
+				Text         string                 `json:"text"`
+				CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+			}{
+				Type:         "text",
+				Text:         message.Text,
+				CacheControl: anthropicExplicitCacheControl(cachePlan, marked),
+			})
 			if err != nil {
 				return messagesRequest{}, err
 			}
@@ -332,13 +428,55 @@ func (provider *Provider) messagesRequest(request agent.ModelRequest) (messagesR
 		})
 	}
 
-	return messagesRequest{
+	payload := messagesRequest{
 		Model:     provider.model,
 		MaxTokens: provider.maxOutputTokens,
 		System:    request.Instructions,
 		Messages:  messages,
 		Tools:     tools,
-	}, nil
+	}
+	if cachePlan != nil && cachePlan.Mode == agent.CacheModeAutomatic {
+		payload.CacheControl = &anthropicCacheControl{Type: "ephemeral", TTL: cachePlan.TTL}
+	}
+	return payload, nil
+}
+
+func (provider *Provider) validatedCachePlan(request agent.ModelRequest) (*agent.CachePlan, error) {
+	plan := request.CachePlan
+	if plan == nil || plan.Mode == agent.CacheModeDisabled {
+		return nil, nil
+	}
+	capabilities := provider.CacheCapabilities()
+	if plan.FamilyID == "" {
+		return nil, errors.New("Anthropic Cache Plan family is required")
+	}
+	switch plan.Mode {
+	case agent.CacheModeAutomatic:
+		if !capabilities.SupportsAutomatic {
+			return nil, errors.New("Anthropic automatic prompt cache is unsupported")
+		}
+	case agent.CacheModeExplicit:
+		if !capabilities.SupportsExplicit || len(plan.Breakpoints) == 0 ||
+			len(plan.Breakpoints) > capabilities.MaxWriteBreakpoints {
+			return nil, errors.New("Anthropic explicit Cache Plan has an invalid breakpoint count")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported Anthropic Cache Plan mode %q", plan.Mode)
+	}
+	for _, breakpoint := range plan.Breakpoints {
+		if breakpoint.MessageIndex < 0 || breakpoint.MessageIndex >= len(request.Messages) ||
+			request.Messages[breakpoint.MessageIndex].Role != agent.RoleUser {
+			return nil, errors.New("Anthropic Cache Plan breakpoint does not identify a user message")
+		}
+	}
+	return plan, nil
+}
+
+func anthropicExplicitCacheControl(plan *agent.CachePlan, marked bool) *anthropicCacheControl {
+	if plan == nil || plan.Mode != agent.CacheModeExplicit || !marked {
+		return nil
+	}
+	return &anthropicCacheControl{Type: "ephemeral", TTL: plan.TTL}
 }
 
 func toolSchema(definition agent.ToolDefinition) (json.RawMessage, error) {
@@ -358,15 +496,46 @@ func stateData(message agent.Message, providerName string) (json.RawMessage, boo
 	return message.ProviderState.Data, true
 }
 
-func usage(inputTokens, outputTokens int64) *agent.Usage {
+func usage(
+	uncachedInputTokens,
+	outputTokens,
+	cacheWriteInputTokens,
+	cacheReadInputTokens int64,
+) (*agent.Usage, error) {
+	if uncachedInputTokens < 0 || outputTokens < 0 || cacheWriteInputTokens < 0 || cacheReadInputTokens < 0 {
+		return nil, errors.New("Anthropic Usage token values must not be negative")
+	}
+	inputTokens, err := addUsageTokens(uncachedInputTokens, cacheWriteInputTokens)
+	if err != nil {
+		return nil, err
+	}
+	inputTokens, err = addUsageTokens(inputTokens, cacheReadInputTokens)
+	if err != nil {
+		return nil, err
+	}
 	if inputTokens == 0 && outputTokens == 0 {
-		return nil
+		return nil, nil
+	}
+	totalTokens, err := addUsageTokens(inputTokens, outputTokens)
+	if err != nil {
+		return nil, err
 	}
 	return &agent.Usage{
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
-		TotalTokens:  inputTokens + outputTokens,
+		InputTokens:               inputTokens,
+		OutputTokens:              outputTokens,
+		TotalTokens:               totalTokens,
+		InputTokenDetailsReported: true,
+		UncachedInputTokens:       uncachedInputTokens,
+		CacheReadInputTokens:      cacheReadInputTokens,
+		CacheWriteInputTokens:     cacheWriteInputTokens,
+	}, nil
+}
+
+func addUsageTokens(first, second int64) (int64, error) {
+	if second > math.MaxInt64-first {
+		return 0, errors.New("Anthropic Usage token value overflow")
 	}
+	return first + second, nil
 }
 
 func mapStopReason(raw string, hasToolCalls bool) agent.StopReason {

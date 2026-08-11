@@ -36,10 +36,18 @@ func (provider *Provider) Name() string {
 	return provider.name
 }
 
+// CacheCapabilities reports that the local Echo Provider has no prompt cache
+func (provider *Provider) CacheCapabilities() agent.CacheCapabilities {
+	return agent.CacheCapabilities{}
+}
+
 // Complete returns the most recent user message as an assistant message
 func (provider *Provider) Complete(ctx context.Context, request agent.ModelRequest) (agent.Message, error) {
 	if err := ctx.Err(); err != nil {
 		return agent.Message{}, err
+	}
+	if request.CachePlan != nil && request.CachePlan.Mode != agent.CacheModeDisabled {
+		return agent.Message{}, errors.New("echo Provider does not support prompt caching")
 	}
 
 	for index := len(request.Messages) - 1; index >= 0; index-- {

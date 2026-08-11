@@ -18,6 +18,8 @@ executable today
 - manifest discovery and atomic development reload
 - fork-free, application-owned `extensions.lock` catalogs with live manifest validation
 - host-owned Evidence Bundles
+- Evidence-preserving Context compression, Prefix Manifests, prompt-cache Plans,
+  and normalized cache Usage
 - Nagi-based CLI and single-turn TUI
 - safe structured diagnostics propagated to the final Extension process
 
@@ -50,6 +52,19 @@ go run ./cmd/qed run --prompt "hello" --output jsonl
 
 The echo Provider emits the complete lifecycle, including `run.started`, user
 and model events, text deltas, and `run.completed`
+
+`model.request.started` includes a content-free Prefix Manifest and Cache Plan
+QED cache controls are disabled until configured; Provider-side implicit
+behavior may still apply. Providers that report prompt-cache usage populate
+normalized cache read, write, and uncached input counts. Configured JSON
+Evidence Stores also retain exact compacted context objects
+
+```sh
+qed cache status --store .qed/evidence
+qed evidence fetch sha256:<digest> --store .qed/evidence
+```
+
+See [Context compilation, compression, and prompt caching](docs/context-caching.md)
 
 Enable safe structured diagnostics on stderr with the root flag
 
