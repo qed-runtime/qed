@@ -102,7 +102,7 @@ type ToolCall struct {
 	ID string `json:"id"`
 	// Name must exactly match a registered Tool name
 	Name string `json:"name"`
-	// Arguments must contain one valid JSON value when present
+	// Arguments contains Provider-supplied JSON validated before Tool execution
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
@@ -112,7 +112,7 @@ type ToolDefinition struct {
 	Name string `json:"name"`
 	// Description explains when the Provider should use the Tool
 	Description string `json:"description,omitempty"`
-	// InputSchema describes Arguments but is not enforced by the minimal Runtime
+	// InputSchema describes Arguments and is enforced before Tool execution
 	InputSchema json.RawMessage `json:"input_schema,omitempty"`
 	// Capabilities identifies host permissions required to execute this Tool
 	//

@@ -30,6 +30,14 @@ authentication, authorization, inbound client or tenant rate limiting,
 tenancy, or request schemas for the containing application. QED separately
 enforces configured outbound Provider concurrency and cooldown policies
 
+`HostLoadOptions.ToolInputValidator` replaces the default bounded JSON Schema
+subset for every loaded Runtime and host-side Extension proxy. The validator is
+not serialized across the process boundary. An external or self-exec Extension
+that uses the same custom dialect must also set
+`server.Options.ToolInputValidator`; otherwise its server applies the default
+subset. See [Extension processes](extensions.md#tools) for the validation order
+and supported keywords
+
 ## Application-owned self-exec catalog
 
 A downstream application can link its Go Extensions without importing a QED

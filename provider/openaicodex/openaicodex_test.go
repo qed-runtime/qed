@@ -217,6 +217,23 @@ func TestStreamReconstructsDoneOutputItemsWhenTerminalOutputIsOmitted(t *testing
 	}
 }
 
+func TestResponsesMessagePreservesMalformedToolArgumentsForRuntimeValidation(t *testing.T) {
+	t.Parallel()
+
+	message, err := (&Provider{}).messageFromResponsesResponse(responsesResponse{
+		Status: "completed",
+		Output: []json.RawMessage{
+			json.RawMessage(`{"type":"function_call","call_id":"call-1","name":"read","arguments":"{"}`),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(message.ToolCalls) != 1 || string(message.ToolCalls[0].Arguments) != `{` {
+		t.Fatalf("Tool calls = %#v", message.ToolCalls)
+	}
+}
+
 func TestStreamReplaysOpaqueContinuationState(t *testing.T) {
 	t.Parallel()
 

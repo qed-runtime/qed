@@ -596,6 +596,81 @@ func TestRuntimeExecutesToolAndContinues(t *testing.T) {
 	assertEventTypes(t, events, wantEvents)
 }
 
+func TestRuntimeReturnsToolInputValidationFailureToProvider(t *testing.T) {
+	t.Parallel()
+
+	tool := &countingTool{}
+	store := session.NewMemoryStore()
+	provider := &scriptedProvider{responses: []providerResponse{
+		{message: agent.Message{
+			Role: agent.RoleAssistant,
+			ToolCalls: []agent.ToolCall{{
+				ID:        "call-1",
+				Name:      "count",
+				Arguments: json.RawMessage(`{`),
+			}},
+		}},
+		{message: agent.Message{Role: agent.RoleAssistant, Text: "corrected"}},
+	}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider:     provider,
+		Tools:        []agent.Tool{tool},
+		SessionStore: store,
+		ProviderRetry: agent.ProviderRetryPolicy{
+			MaxAttempts: 2,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		SessionID: "invalid-tool-input",
+		Input:     []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, runErr := collectRun(handle)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if result.ProviderCalls != 2 || result.ToolCalls != 1 || tool.Calls() != 0 {
+		t.Fatalf("Run = %#v, Tool executions = %d", result, tool.Calls())
+	}
+	if len(result.ToolResults) != 1 || !result.ToolResults[0].IsError ||
+		!strings.Contains(result.ToolResults[0].Output, "input validation") {
+		t.Fatalf("Tool results = %#v", result.ToolResults)
+	}
+	for _, event := range events {
+		if event.Type == agent.EventProviderRetry {
+			t.Fatalf("validation failure emitted Provider retry: %#v", event)
+		}
+	}
+	requests := provider.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("Provider requests = %d, want 2", len(requests))
+	}
+	messages := requests[1].Messages
+	toolMessage := messages[len(messages)-1]
+	if toolMessage.Role != agent.RoleTool || !toolMessage.ToolIsError ||
+		!strings.Contains(toolMessage.Text, "input validation") {
+		t.Fatalf("Tool error message = %#v", toolMessage)
+	}
+	snapshot, err := store.Snapshot(context.Background(), "invalid-tool-input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted bool
+	for _, event := range snapshot.Events {
+		if event.Type == agent.EventToolCompleted && event.ToolResult != nil && event.ToolResult.IsError {
+			persisted = true
+		}
+	}
+	if !persisted {
+		t.Fatalf("Session Events do not contain validation failure: %#v", snapshot.Events)
+	}
+}
+
 func TestRuntimeEmitsAppendOnlyPrefixManifests(t *testing.T) {
 	t.Parallel()
 

@@ -241,9 +241,6 @@ func (provider *Provider) messageFromResponsesResponse(response responsesRespons
 			if len(arguments) == 0 {
 				arguments = json.RawMessage(`{}`)
 			}
-			if !json.Valid(arguments) {
-				return agent.Message{}, fmt.Errorf("OpenAI Codex function %q returned invalid JSON arguments", call.Name)
-			}
 			toolCalls = append(toolCalls, agent.ToolCall{ID: call.CallID, Name: call.Name, Arguments: arguments})
 		}
 	}

@@ -28,6 +28,11 @@ QED rootの`extensions.lock`は公式`qed` executableへ組み込むExtensionだ
 network listener、authentication、authorization、inbound clientまたはtenant rate limit、tenant、request schemaは組み込み先applicationが所有します
 QEDはこれとは別に、設定済みoutbound Provider concurrencyとcooldown policyを適用します
 
+`HostLoadOptions.ToolInputValidator`は読み込んだ全Runtimeとhost側Extension proxyの既定JSON Schema subsetを置き換えます
+validatorはprocess境界を越えてserializeされません
+同じcustom dialectを使うexternalまたはself-exec Extensionは`server.Options.ToolInputValidator`にも設定する必要があり、未設定時はExtension serverが既定subsetを使います
+validation順序と対応keywordは[Extension process](extensions_ja.md#tool)を参照してください
+
 ## application所有のself-exec catalog
 
 外部applicationはQEDの`internal` packageをimportせずに独自Go Extensionをlinkできます

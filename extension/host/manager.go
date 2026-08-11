@@ -19,10 +19,12 @@ const defaultRetireTimeout = 10 * time.Second
 
 // ManagerOptions configures one reloadable Extension component source
 type ManagerOptions struct {
-	Process  ProcessOptions
-	Policy   capability.Policy
-	Approver capability.Approver
-	Recorder evidence.Recorder
+	Process ProcessOptions
+	// ToolInputValidator compiles Tool schemas for every Extension generation
+	ToolInputValidator agent.ToolInputValidator
+	Policy             capability.Policy
+	Approver           capability.Approver
+	Recorder           evidence.Recorder
 	// StateStore persists opaque process state under the Extension namespace
 	StateStore extension.StateStore
 	// StateScope selects the host-owned state namespace and defaults to "process"
@@ -39,6 +41,7 @@ type ManagerOptions struct {
 // generation unchanged
 type Manager struct {
 	policy        capability.Policy
+	toolValidator agent.ToolInputValidator
 	approver      capability.Approver
 	recorder      evidence.Recorder
 	stateStore    extension.StateStore
@@ -111,6 +114,7 @@ func NewManager(ctx context.Context, options ManagerOptions) (*Manager, error) {
 	close(idle)
 	manager := &Manager{
 		policy:        options.Policy,
+		toolValidator: options.ToolInputValidator,
 		approver:      options.Approver,
 		recorder:      options.Recorder,
 		stateStore:    options.StateStore,
@@ -352,10 +356,11 @@ func (manager *Manager) configureGeneration(process *Process, number uint64) (*g
 	tools := make([]agent.Tool, len(rawTools))
 	for index, raw := range rawTools {
 		configured, err := extension.NewTool(extension.ToolOptions{
-			Tool:     raw,
-			Policy:   manager.policy,
-			Approver: manager.approver,
-			Recorder: manager.recorder,
+			Tool:               raw,
+			ToolInputValidator: manager.toolValidator,
+			Policy:             manager.policy,
+			Approver:           manager.approver,
+			Recorder:           manager.recorder,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("configure Extension Tool %q: %w", raw.Definition().Name, err)

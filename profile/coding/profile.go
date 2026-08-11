@@ -52,21 +52,23 @@ type Options struct {
 	ExtensionShutdownTimeout time.Duration
 	ExtensionRetireTimeout   time.Duration
 	Policy                   capability.Policy
-	Approver                 capability.Approver
-	Recorder                 evidence.Recorder
-	StateStore               extension.StateStore
-	StateScope               string
-	Verbose                  bool
-	DebugWriter              io.Writer
-	Logger                   *slog.Logger
-	DisableProjectContext    bool
-	MaxContextFileBytes      int64
-	MaxContextBytes          int
-	CommandEnvironment       map[string]string
-	Filesystem               filesystemextension.Options
-	Edit                     edit.Options
-	Process                  processextension.Options
-	Git                      gitextension.Options
+	// ToolInputValidator compiles Tool schemas for host-side Extension proxies
+	ToolInputValidator    agent.ToolInputValidator
+	Approver              capability.Approver
+	Recorder              evidence.Recorder
+	StateStore            extension.StateStore
+	StateScope            string
+	Verbose               bool
+	DebugWriter           io.Writer
+	Logger                *slog.Logger
+	DisableProjectContext bool
+	MaxContextFileBytes   int64
+	MaxContextBytes       int
+	CommandEnvironment    map[string]string
+	Filesystem            filesystemextension.Options
+	Edit                  edit.Options
+	Process               processextension.Options
+	Git                   gitextension.Options
 }
 
 // ExtensionOptions configures one process-isolated Extension in the Coding Profile
@@ -169,14 +171,15 @@ func New(ctx context.Context, options Options) (*Profile, error) {
 			Logger:      options.Logger,
 		}
 		manager, err := host.NewManager(ctx, host.ManagerOptions{
-			Process:       processOptions,
-			Policy:        options.Policy,
-			Approver:      options.Approver,
-			Recorder:      recorder,
-			StateStore:    options.StateStore,
-			StateScope:    options.StateScope,
-			Logger:        options.Logger,
-			RetireTimeout: options.ExtensionRetireTimeout,
+			Process:            processOptions,
+			ToolInputValidator: options.ToolInputValidator,
+			Policy:             options.Policy,
+			Approver:           options.Approver,
+			Recorder:           recorder,
+			StateStore:         options.StateStore,
+			StateScope:         options.StateScope,
+			Logger:             options.Logger,
+			RetireTimeout:      options.ExtensionRetireTimeout,
 		})
 		if err != nil {
 			closeManagers()

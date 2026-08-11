@@ -277,6 +277,25 @@ func runLifecycleAndComponents(t *testing.T, command host.Command, timeout time.
 	if !ok {
 		t.Fatal("echo Tool does not expose DynamicCapabilities")
 	}
+	invalidCall := agent.ToolCall{
+		ID:        "contract-echo-invalid",
+		Name:      echoToolName,
+		Arguments: json.RawMessage(`{"value":1}`),
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), timeout)
+	_, err = resolver.RequiredCapabilities(ctx, invalidCall)
+	cancel()
+	var invalidParams *protocol.RPCError
+	if !errors.As(err, &invalidParams) || invalidParams.Code != protocol.ErrorCodeInvalidParams {
+		t.Fatalf("RequiredCapabilities(invalid) error = %v, want invalid params RPC error", err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), timeout)
+	_, err = echo.Execute(ctx, invalidCall)
+	cancel()
+	invalidParams = nil
+	if !errors.As(err, &invalidParams) || invalidParams.Code != protocol.ErrorCodeInvalidParams {
+		t.Fatalf("Execute(invalid) error = %v, want invalid params RPC error", err)
+	}
 	call := agent.ToolCall{
 		ID:        "contract-echo-1",
 		Name:      echoToolName,

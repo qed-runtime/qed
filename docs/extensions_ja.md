@@ -59,6 +59,24 @@ Hookはpublic Agent Event JSONとRun identityだけを受け取ります
 各Toolはname、description、input schema、static capability、invocation固有capabilityの有無を宣言します
 Hostはdynamic capabilityを問い合わせ、結合したsetを`capability.Policy`で評価し、必要なapprovalを取得した後だけ`invoke_tool`を送ります
 
+RuntimeはProviderが返したargumentをdynamic capability解決、Policy、approval、Tool実行より前に検証します
+Extension serverはdirect protocol callを含むRPC境界でも同じargumentを再検証します
+validation failureは通常の失敗Tool resultとなり、modelは次の通常turnで修正できます
+Provider failureではないためProvider retryは起動しません
+
+全validator経路でschemaを1 MiB、argumentを8 MiB、nestingを64に制限し、重複JSON key、trailing value、不正JSONを拒否します
+依存追加のない既定実装はJSON Schema subsetです
+`integer`を含む全JSON `type`に加えて`properties`、`required`、booleanの`additionalProperties`、単一schemaの`items`、`minItems`、`minimum`、`maximum`、`enum`をサポートします
+`description`と`title`はannotationとして受理します
+既定実装ではcompile済みschema nodeと`required` nameは4096、`enum` entryは256が上限です
+不正schemaと未対応keywordは無視せず拒否します
+schema省略時はobject schemaを使用します
+
+別dialectが必要なapplicationは`agent.ToolInputValidator`と`agent.CompiledToolInputValidator`を実装できます
+`agent.Options`、`qed.HostLoadOptions`、`extension.ToolOptions`、`host.ManagerOptions`、`coding.Options`、`server.Options`から注入できます
+custom host validatorはprocess-localであり、process分離Extensionは自身の`server.Options.ToolInputValidator`にも設定する必要があります
+具象Tool decoderはdefense in depthとして引き続き必要です
+
 Tool definitionはRuntimeへ入る前にExtension IDとgeneration metadataを受け取ります
 Evidenceはそのoriginとargumentおよびoutputのhashを記録します
 

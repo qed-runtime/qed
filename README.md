@@ -536,7 +536,7 @@ go build ./...
 - `run_command` and Extension child processes use host-account authority and are not OS sandboxes
 - Tool Trace records use hashes, but the Bundle's public Events may contain prompts, messages, Tool arguments, Tool output, and errors; protect the Evidence Store as sensitive data
 - Evidence is not a complete workspace archive
-- Official Tools enforce strict concrete argument decoders; QED has no general-purpose JSON Schema validation engine
+- Tool input uses a bounded JSON Schema subset plus strict concrete decoders; embedders can inject another validator, but QED does not implement the complete JSON Schema vocabulary
 - `git_diff` does not include untracked file content
 - Shared token and cost limits depend on Provider-reported usage, which may be late or absent
 - The TUI is a single-turn interface, not a persistent chat client

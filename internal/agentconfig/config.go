@@ -71,6 +71,8 @@ type LoadOptions struct {
 	Context  context.Context
 	Approver capability.Approver
 	Recorder evidence.Recorder
+	// ToolInputValidator compiles Tool schemas for Runtime and Extension boundaries
+	ToolInputValidator agent.ToolInputValidator
 	// Verbose enables safe structured Runtime and Extension diagnostics
 	Verbose bool
 	// DebugWriter receives JSON diagnostics when Logger is nil
@@ -418,16 +420,17 @@ func build(document fileConfig, options LoadOptions, configurationDirectory stri
 	}
 
 	builder := graphBuilder{
-		agents:    document.Agents,
-		providers: providers,
-		limiters:  providerLimiters,
-		profiles:  profiles,
-		registry:  registry,
-		sessions:  sessions,
-		objects:   objectStore,
-		pricing:   pricing,
-		states:    make(map[string]buildState, len(document.Agents)),
-		logger:    options.Logger,
+		agents:        document.Agents,
+		providers:     providers,
+		limiters:      providerLimiters,
+		profiles:      profiles,
+		registry:      registry,
+		sessions:      sessions,
+		objects:       objectStore,
+		pricing:       pricing,
+		states:        make(map[string]buildState, len(document.Agents)),
+		logger:        options.Logger,
+		toolValidator: options.ToolInputValidator,
 	}
 	for _, agentID := range sortedKeys(document.Agents) {
 		if err := validateID("agent ID", agentID); err != nil {
@@ -653,6 +656,7 @@ func buildExecutionProfiles(
 			Root:               options.WorkspaceRoot,
 			Extensions:         profileExtensions,
 			Policy:             policy,
+			ToolInputValidator: options.ToolInputValidator,
 			Approver:           options.Approver,
 			Recorder:           recorder,
 			StateStore:         stateStore,
@@ -1053,17 +1057,18 @@ const (
 )
 
 type graphBuilder struct {
-	agents    map[string]agentProfile
-	providers map[string]agent.Provider
-	limiters  map[string]*agent.ProviderRateLimiter
-	profiles  map[string]*coding.Profile
-	registry  *orchestration.AgentRegistry
-	sessions  agent.SessionStore
-	objects   agent.EvidenceObjectStore
-	pricing   map[string]*agent.CachePricing
-	states    map[string]buildState
-	stack     []string
-	logger    *slog.Logger
+	agents        map[string]agentProfile
+	providers     map[string]agent.Provider
+	limiters      map[string]*agent.ProviderRateLimiter
+	profiles      map[string]*coding.Profile
+	registry      *orchestration.AgentRegistry
+	sessions      agent.SessionStore
+	objects       agent.EvidenceObjectStore
+	pricing       map[string]*agent.CachePricing
+	states        map[string]buildState
+	stack         []string
+	logger        *slog.Logger
+	toolValidator agent.ToolInputValidator
 }
 
 func (builder *graphBuilder) buildAgent(agentID string) error {
@@ -1181,6 +1186,7 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 	runtime, err := agent.NewRuntime(agent.Options{
 		Provider:            modelProvider,
 		ProviderRateLimiter: builder.limiters[specification.Provider],
+		ToolInputValidator:  builder.toolValidator,
 		Tools:               tools,
 		ComponentSource:     componentSource,
 		MaxProviderCalls:    specification.MaxProviderCalls,

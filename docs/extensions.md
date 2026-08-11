@@ -63,6 +63,31 @@ whether it has invocation-specific capabilities. The Host asks for dynamic
 capabilities, evaluates the combined set through `capability.Policy`, obtains
 approval if required, and sends `invoke_tool` only after authorization
 
+Runtime validates Provider-supplied arguments before dynamic capability
+resolution, Policy, approval, or Tool execution. The Extension server validates
+the same arguments again at the RPC boundary, including direct protocol calls.
+A validation failure is an ordinary failed Tool result and can be corrected by
+the model on its next normal turn; it is not a Provider failure and does not
+activate Provider retry
+
+Every validator path limits schemas to 1 MiB, arguments to 8 MiB, and nesting
+to 64, and rejects duplicate JSON keys, trailing values, and malformed JSON.
+The dependency-free default adds a JSON Schema subset supporting every JSON
+`type` value, including `integer`, plus `properties`, `required`,
+`additionalProperties` as a boolean, `items` as one schema, `minItems`,
+`minimum`, `maximum`, and `enum`. `description` and `title` are accepted as
+annotations. The default limits compiled schema nodes and `required` names to
+4096 and `enum` entries to 256. Invalid schemas and unsupported keywords are
+rejected rather than ignored. An omitted schema defaults to an object schema
+
+Applications that need another dialect can implement
+`agent.ToolInputValidator` and `agent.CompiledToolInputValidator`. Injection is
+available through `agent.Options`, `qed.HostLoadOptions`,
+`extension.ToolOptions`, `host.ManagerOptions`, `coding.Options`, and
+`server.Options`. A custom host validator is process-local; a process-isolated
+Extension must configure its own `server.Options.ToolInputValidator`. Concrete
+Tool decoders remain required as defense in depth
+
 Tool definitions receive Extension ID and generation metadata before entering
 Runtime. Evidence records that origin plus hashes of arguments and output
 

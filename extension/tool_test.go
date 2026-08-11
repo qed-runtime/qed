@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/qed-runtime/qed/agent"
@@ -89,6 +90,43 @@ func TestToolProxyRequiresAndRecordsApproval(t *testing.T) {
 	}
 }
 
+func TestToolProxyRejectsInvalidInputBeforeCapabilitiesAndPolicy(t *testing.T) {
+	t.Parallel()
+
+	tool := &validationBoundaryTool{}
+	policy := &countingPolicy{}
+	recorder := &evidence.MemoryRecorder{}
+	proxy, err := extension.NewTool(extension.ToolOptions{
+		Tool:     tool,
+		Policy:   policy,
+		Recorder: recorder,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = proxy.Execute(context.Background(), agent.ToolCall{
+		ID:        "invalid-call",
+		Name:      "validated",
+		Arguments: json.RawMessage(`{"value":1}`),
+	})
+	if !errors.Is(err, agent.ErrToolInputValidation) || !strings.Contains(err.Error(), "$/value") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if tool.capabilityCalls != 0 || tool.executeCalls != 0 || policy.calls != 0 {
+		t.Fatalf(
+			"side effects = capabilities:%d policy:%d execute:%d",
+			tool.capabilityCalls,
+			policy.calls,
+			tool.executeCalls,
+		)
+	}
+	records := recorder.ToolInvocations()
+	if len(records) != 1 || !records[0].IsError || records[0].PolicyOutcome != "" ||
+		!strings.Contains(records[0].Error, "input validation") {
+		t.Fatalf("Evidence = %#v", records)
+	}
+}
+
 type recordingTool struct{}
 
 func (recordingTool) Definition() agent.ToolDefinition {
@@ -105,4 +143,35 @@ func (recordingTool) Execute(_ context.Context, call agent.ToolCall) (agent.Tool
 		}
 	}
 	return agent.ToolResult{Output: input.Value}, nil
+}
+
+type validationBoundaryTool struct {
+	capabilityCalls int
+	executeCalls    int
+}
+
+func (tool *validationBoundaryTool) Definition() agent.ToolDefinition {
+	return agent.ToolDefinition{
+		Name:        "validated",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}`),
+	}
+}
+
+func (tool *validationBoundaryTool) RequiredCapabilities(context.Context, agent.ToolCall) ([]capability.Name, error) {
+	tool.capabilityCalls++
+	return nil, nil
+}
+
+func (tool *validationBoundaryTool) Execute(context.Context, agent.ToolCall) (agent.ToolResult, error) {
+	tool.executeCalls++
+	return agent.ToolResult{Output: "unexpected"}, nil
+}
+
+type countingPolicy struct {
+	calls int
+}
+
+func (policy *countingPolicy) Evaluate(context.Context, capability.Request) (capability.Decision, error) {
+	policy.calls++
+	return capability.Decision{Outcome: capability.OutcomeAllow}, nil
 }

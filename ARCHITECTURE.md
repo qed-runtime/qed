@@ -83,13 +83,15 @@ Evidence recorder, and one or more process-isolated Extensions. The reusable
 standard Tools while keeping them outside Runtime Core
 
 `extension.ToolProxy` and `extension.CommandProxy` are host enforcement points.
-They combine static and invocation-specific capabilities, evaluate Policy,
+Tool input is schema-validated before invocation-specific capability discovery,
+Policy, or approval. The proxies then combine capabilities, evaluate Policy,
 request approval when required, and invoke the remote component only after
 authorization. Tool Evidence is recorded in the Host
 
 `extension/protocol` defines Protocol v1 as 4-byte big-endian length-prefixed
 strict JSON over stdio. `extension/server` adapts Go Tools, Hooks, Commands, and
-lifecycle callbacks to that contract. `extension/host` supervises processes and
+lifecycle callbacks to that contract and revalidates Tool input before direct
+RPC calls reach component code. `extension/host` supervises processes and
 generation leases
 
 `extension/manifest` validates the transport-independent declaration shared by

@@ -42,6 +42,10 @@ type Options struct {
 	//
 	// ComponentSource and ToolSource are mutually exclusive
 	ComponentSource ComponentSource
+	// ToolInputValidator compiles and validates Tool input schemas
+	//
+	// A nil Validator uses JSONSchemaSubsetValidator
+	ToolInputValidator ToolInputValidator
 	// Hooks contains fixed Run Event Hooks shared by every Run
 	Hooks []Hook
 	// MaxProviderCalls bounds one Run and defaults to 16 when zero
@@ -79,6 +83,7 @@ type Options struct {
 type Runtime struct {
 	provider         Provider
 	staticTools      runtimeToolSet
+	toolValidator    ToolInputValidator
 	toolSource       ToolSource
 	componentSource  ComponentSource
 	staticHooks      []runtimeHook
@@ -102,6 +107,7 @@ type runtimeSessionLock struct {
 
 type runtimeToolSet struct {
 	tools       map[string]Tool
+	validators  map[string]CompiledToolInputValidator
 	definitions []ToolDefinition
 }
 
@@ -132,7 +138,7 @@ func NewRuntime(options Options) (*Runtime, error) {
 		return nil, errors.New("max tool calls must be positive")
 	}
 
-	staticTools, err := newRuntimeToolSet(options.Tools)
+	staticTools, err := newRuntimeToolSet(options.Tools, options.ToolInputValidator)
 	if err != nil {
 		return nil, err
 	}
@@ -174,6 +180,7 @@ func NewRuntime(options Options) (*Runtime, error) {
 	return &Runtime{
 		provider:         options.Provider,
 		staticTools:      staticTools,
+		toolValidator:    options.ToolInputValidator,
 		toolSource:       options.ToolSource,
 		componentSource:  options.ComponentSource,
 		staticHooks:      staticHooks,
@@ -216,8 +223,9 @@ func newRuntimeHooks(configured []Hook) ([]runtimeHook, error) {
 	return hooks, nil
 }
 
-func newRuntimeToolSet(configured []Tool) (runtimeToolSet, error) {
+func newRuntimeToolSet(configured []Tool, validator ToolInputValidator) (runtimeToolSet, error) {
 	tools := make(map[string]Tool, len(configured))
+	validators := make(map[string]CompiledToolInputValidator, len(configured))
 	definitions := make([]ToolDefinition, 0, len(configured))
 	for _, tool := range configured {
 		if tool == nil {
@@ -228,8 +236,9 @@ func newRuntimeToolSet(configured []Tool) (runtimeToolSet, error) {
 		if strings.TrimSpace(definition.Name) != definition.Name || definition.Name == "" {
 			return runtimeToolSet{}, errors.New("tool name is required")
 		}
-		if len(definition.InputSchema) > 0 && !json.Valid(definition.InputSchema) {
-			return runtimeToolSet{}, fmt.Errorf("tool %q has an invalid input schema", definition.Name)
+		compiled, err := CompileToolInputSchema(validator, definition.InputSchema)
+		if err != nil {
+			return runtimeToolSet{}, fmt.Errorf("tool %q input schema: %w", definition.Name, err)
 		}
 		if _, exists := tools[definition.Name]; exists {
 			return runtimeToolSet{}, fmt.Errorf("tool %q is registered more than once", definition.Name)
@@ -246,9 +255,10 @@ func newRuntimeToolSet(configured []Tool) (runtimeToolSet, error) {
 		}
 
 		tools[definition.Name] = tool
+		validators[definition.Name] = compiled
 		definitions = append(definitions, definition)
 	}
-	return runtimeToolSet{tools: tools, definitions: definitions}, nil
+	return runtimeToolSet{tools: tools, validators: validators, definitions: definitions}, nil
 }
 
 // Run starts an Agent Run and returns immediately with a handle
@@ -351,7 +361,7 @@ func (runtime *Runtime) acquireComponents(ctx context.Context) (runtimeToolSet, 
 	for _, definition := range runtime.staticTools.definitions {
 		combined = append(combined, runtime.staticTools.tools[definition.Name])
 	}
-	toolSet, err := newRuntimeToolSet(combined)
+	toolSet, err := newRuntimeToolSet(combined, runtime.toolValidator)
 	if err != nil {
 		release()
 		return runtimeToolSet{}, nil, nil, fmt.Errorf("validate acquired Run tools: %w", err)
@@ -1282,8 +1292,8 @@ func (runtime *Runtime) executeTool(ctx context.Context, toolSet runtimeToolSet,
 	if len(arguments) == 0 {
 		arguments = json.RawMessage(`{}`)
 	}
-	if !json.Valid(arguments) {
-		result.Output = "tool arguments are not valid JSON"
+	if err := ValidateToolInput(toolSet.validators[call.Name], arguments); err != nil {
+		result.Output = fmt.Sprintf("tool %q input validation: %v", call.Name, err)
 		result.IsError = true
 		return result
 	}

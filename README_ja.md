@@ -501,7 +501,7 @@ go build ./...
 - `run_command`とExtension child processはhost account権限で動作し、OS sandboxではありません
 - Tool Trace recordはhashを使いますが、Bundleのpublic Eventはprompt、message、Tool引数、Tool output、errorを含む場合があるためEvidence Storeを機密データとして保護する必要があります
 - Evidenceは完全なworkspace archiveではありません
-- 公式Toolはstrictな具象argument decoderで検証し、汎用JSON Schema validation engineはありません
+- Tool inputは上限付きJSON Schema subsetとstrictな具象argument decoderで検証しますが、完全なJSON Schema vocabularyは実装せず、別validatorは組み込み側から注入します
 - `git_diff`はuntracked fileの内容を含みません
 - 共有tokenとcost上限はProviderがusageを遅れて返す場合や返さない場合に完全には強制できません
 - TUIは単一turn interfaceであり、永続chat clientではありません

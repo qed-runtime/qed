@@ -639,7 +639,7 @@ func (service *testService) Definition() agent.ToolDefinition {
 	return agent.ToolDefinition{
 		Name:         "identity",
 		Description:  "Return the test Extension generation",
-		InputSchema:  json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+		InputSchema:  json.RawMessage(`{"type":"object","properties":{"secret":{"type":"string"}},"additionalProperties":false}`),
 		Capabilities: []string{"test.execute"},
 	}
 }
