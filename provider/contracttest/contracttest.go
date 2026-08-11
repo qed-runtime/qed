@@ -61,6 +61,8 @@ const (
 	FixtureHTTPErrorCode = "rate_limit"
 	// FixtureHTTPErrorMessage is the Provider error message for ScenarioHTTPError
 	FixtureHTTPErrorMessage = "contract rate limit"
+	// FixtureRetryAfterSeconds is the Retry-After delay for ScenarioHTTPError
+	FixtureRetryAfterSeconds = 2
 	// FixtureRequestID is the request identifier for ScenarioHTTPError
 	FixtureRequestID = "contract-request"
 	// FixtureStreamErrorCode is the Provider error code for ScenarioStreamError
@@ -414,8 +416,12 @@ func runHTTPError(t *testing.T, options SuiteOptions, timeout time.Duration) {
 	}
 	if apiError.StatusCode != FixtureHTTPStatus || apiError.Type != FixtureHTTPErrorType ||
 		apiError.Code != FixtureHTTPErrorCode || apiError.Message != FixtureHTTPErrorMessage ||
-		apiError.RequestID != FixtureRequestID {
+		apiError.RequestID != FixtureRequestID || apiError.RetryAfter != FixtureRetryAfterSeconds*time.Second {
 		t.Errorf("HTTP error = %#v", apiError)
+	}
+	if info := providerbase.ClassifyError(err); info.Code != providerbase.ErrorCodeRateLimited ||
+		info.RetryAfter != FixtureRetryAfterSeconds*time.Second {
+		t.Errorf("classified HTTP error = %#v", info)
 	}
 	assertError(t, options, ScenarioHTTPError, err)
 }
@@ -438,6 +444,9 @@ func runStreamError(t *testing.T, options SuiteOptions, timeout time.Duration) {
 	}
 	if !strings.Contains(err.Error(), FixtureStreamErrorMessage) {
 		t.Errorf("Provider stream error = %q, want message %q", err, FixtureStreamErrorMessage)
+	}
+	if info := providerbase.ClassifyError(err); info.Code != providerbase.ErrorCodeTerminal {
+		t.Errorf("classified stream error = %#v, want terminal", info)
 	}
 	assertError(t, options, ScenarioStreamError, err)
 }

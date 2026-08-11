@@ -66,6 +66,11 @@ QEDは1つのstrictなJSON documentからProvider profile、process分離Extensi
       "provider": "primary",
       "profile": "coding",
       "instructions": "Use specialists when useful and return the final answer",
+      "provider_retry": {
+        "max_attempts": 3,
+        "initial_backoff": "1s",
+        "max_backoff": "8s"
+      },
       "context": {
         "max_input_bytes": 65536,
         "recent_messages": 12
@@ -307,6 +312,7 @@ executable lookupは選択した`PATH`だけを使い、Host environmentへfallb
 | `instructions` | no | このAgentのbase instruction |
 | `max_provider_calls` | no | Runtime local Provider call上限 |
 | `max_tool_calls` | no | Runtime local Tool call上限 |
+| `provider_retry` | no | transientなProvider failureに対するbounded retry policy |
 | `context` | no | Evidence preservingなcontext圧縮policy |
 | `cache` | no | Provider neutralなprompt cache policy |
 | `delegations` | no | このAgentへ公開するSubagent Tool |
@@ -329,6 +335,25 @@ Subagent Toolは明示的なpromptだけを渡し、parentの完全なconversati
 
 共有上限の既定値はAgent Run 16、depth 4、Provider call 64です
 parent、candidate、judge Runは同じtop-level budgetを消費します
+
+## Provider retry
+
+Provider retryはAgent単位で設定します
+
+| Field | 必須 | 意味と既定値 |
+| --- | --- | --- |
+| `max_attempts` | no | 1つのlogical model requestに対する総attempt数、既定値`3`、`1`でretry無効 |
+| `initial_backoff` | no | 最初のfailure後に使う正のGo duration、既定値`1s` |
+| `max_backoff` | no | exponential fallback delayを制限する正のGo duration、既定値`8s` |
+
+QEDは`retryable`と`rate_limited`だけをretryします
+有効な`Retry-After` response headerは最小delayとして扱い、`max_backoff`を超える場合があります
+すべてのattemptはRuntime localと共有Provider call budgetを消費し、Run cancelとDeadlineに従います
+
+automatic retryは最初の観測可能な`ModelStream` itemより前のfailureだけに限定されます
+text deltaまたはcompleted messageの後はretryしないため、公開済みoutputやTool副作用を重複させません
+ordered Event streamは各delayの前に`provider.retry.scheduled`を出します
+公開error codeとEvent fieldは[Provider errorとretry](providers_ja.md)を参照してください
 
 ## Context圧縮とprompt cache
 

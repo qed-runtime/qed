@@ -181,6 +181,18 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 	case agent.EventModelRequest:
 		update.status = "thinking"
 		activity("Model request", "")
+	case agent.EventProviderRetry:
+		update.status = "waiting to retry"
+		label := "Model retry scheduled"
+		if event.ProviderRetry != nil {
+			label = fmt.Sprintf(
+				"Model retry %d in %dms (%s)",
+				event.ProviderRetry.NextAttempt,
+				event.ProviderRetry.DelayMilliseconds,
+				event.ProviderRetry.Error.Code,
+			)
+		}
+		activity(label, activityStateWaiting)
 	case agent.EventMessageStarted:
 		update.status = "responding"
 		update.resetAnswer = true

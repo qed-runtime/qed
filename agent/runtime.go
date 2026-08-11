@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	providerbase "github.com/qed-runtime/qed/provider"
 )
 
 const (
@@ -60,6 +62,8 @@ type Options struct {
 	CachePlanner CachePlanner
 	// CachePolicy supplies host cache intent, isolation, and optional pricing
 	CachePolicy CachePolicy
+	// ProviderRetry controls bounded retries before Provider output becomes observable
+	ProviderRetry ProviderRetryPolicy
 	// Logger receives safe structured debug diagnostics without message content,
 	// Tool arguments, Tool output, metadata values, or Provider-private state
 	Logger *slog.Logger
@@ -80,6 +84,7 @@ type Runtime struct {
 	contextCompiler  ContextCompiler
 	cachePlanner     CachePlanner
 	cachePolicy      CachePolicy
+	providerRetry    ProviderRetryPolicy
 	logger           *slog.Logger
 	sessionMu        sync.Mutex
 	sessionLocks     map[string]*runtimeSessionLock
@@ -145,6 +150,10 @@ func NewRuntime(options Options) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("configure Cache Policy: %w", err)
 	}
+	providerRetry, err := normalizeProviderRetryPolicy(options.ProviderRetry)
+	if err != nil {
+		return nil, fmt.Errorf("configure Provider retry: %w", err)
+	}
 
 	return &Runtime{
 		provider:         options.Provider,
@@ -158,6 +167,7 @@ func NewRuntime(options Options) (*Runtime, error) {
 		contextCompiler:  contextCompiler,
 		cachePlanner:     cachePlanner,
 		cachePolicy:      cachePolicy,
+		providerRetry:    providerRetry,
 		logger:           options.Logger,
 		sessionLocks:     make(map[string]*runtimeSessionLock),
 	}, nil
@@ -486,6 +496,11 @@ func (runtime *Runtime) execute(
 		event := Event{Type: eventType}
 		if runErr != nil {
 			event.Error = runErr.Error()
+			var providerError *runtimeProviderError
+			if errors.As(runErr, &providerError) {
+				info := providerError.eventInfo()
+				event.ProviderError = &info
+			}
 		}
 		emitErr := emit(event)
 		if emitErr != nil {
@@ -673,67 +688,126 @@ func (runtime *Runtime) execute(
 			latestCompaction = cloneContextCompactionReport(compiled.Compaction)
 		}
 
-		if err := request.Budget.consumeProviderCall(); err != nil {
-			fail(err)
-			return
-		}
+		var message Message
+		providerAttempt := 0
+		for {
+			if providerCalls >= runtime.maxProviderCalls {
+				fail(ErrProviderCallLimit)
+				return
+			}
+			if err := request.Budget.consumeProviderCall(); err != nil {
+				fail(err)
+				return
+			}
 
-		providerCalls++
-		providerStartedAt := time.Now()
-		runtime.debug("provider.stream.started",
-			"run_id", runID,
-			"provider", runtime.provider.Name(),
-			"call", providerCalls,
-		)
-		manifestEvent := clonePrefixManifest(manifest)
-		cachePlanEvent := cloneCachePlanPointer(compiled.ModelRequest.CachePlan)
-		if err := emit(Event{
-			Type:           EventModelRequest,
-			PrefixManifest: &manifestEvent,
-			CachePlan:      cachePlanEvent,
-		}); err != nil {
-			fail(err)
-			return
-		}
-		latestCachePlan = cloneCachePlanPointer(cachePlanEvent)
-		stream, err := runtime.provider.Stream(ctx, compiled.ModelRequest)
-		if err != nil {
+			providerCalls++
+			providerAttempt++
+			providerStartedAt := time.Now()
+			runtime.debug("provider.stream.started",
+				"run_id", runID,
+				"provider", runtime.provider.Name(),
+				"call", providerCalls,
+				"attempt", providerAttempt,
+			)
+			manifestEvent := clonePrefixManifest(manifest)
+			cachePlanEvent := cloneCachePlanPointer(compiled.ModelRequest.CachePlan)
+			if err := emit(Event{
+				Type:            EventModelRequest,
+				PrefixManifest:  &manifestEvent,
+				CachePlan:       cachePlanEvent,
+				ProviderCall:    providerCalls,
+				ProviderAttempt: providerAttempt,
+			}); err != nil {
+				fail(err)
+				return
+			}
+			latestCachePlan = cloneCachePlanPointer(cachePlanEvent)
+
+			phase := "failed"
+			stream, providerErr := runtime.provider.Stream(ctx, compiled.ModelRequest)
+			outputObserved := false
+			providerFailure := true
+			if providerErr == nil {
+				phase = "stream failed"
+				message, outputObserved, providerFailure, providerErr = consumeModelStream(
+					ctx,
+					stream,
+					func() error { return emit(Event{Type: EventMessageStarted}) },
+					func(delta string) error { return emit(Event{Type: EventMessageDelta, Delta: delta}) },
+				)
+			}
+			if providerErr == nil {
+				runtime.debug("provider.stream.completed",
+					"run_id", runID,
+					"provider", runtime.provider.Name(),
+					"call", providerCalls,
+					"attempt", providerAttempt,
+					"duration_ms", time.Since(providerStartedAt).Milliseconds(),
+					"tool_call_count", len(message.ToolCalls),
+				)
+				break
+			}
+			if !providerFailure {
+				fail(providerErr)
+				return
+			}
+
+			errorInfo := providerbase.ClassifyError(providerErr)
+			classifiedError := &runtimeProviderError{
+				providerName: runtime.provider.Name(),
+				phase:        phase,
+				info:         errorInfo,
+				attempt:      providerAttempt,
+				err:          providerErr,
+			}
 			runtime.debug("provider.stream.failed",
 				"run_id", runID,
 				"provider", runtime.provider.Name(),
 				"call", providerCalls,
+				"attempt", providerAttempt,
 				"duration_ms", time.Since(providerStartedAt).Milliseconds(),
-				"error_type", fmt.Sprintf("%T", err),
+				"error_type", fmt.Sprintf("%T", providerErr),
+				"error_code", errorInfo.Code,
+				"output_observed", outputObserved,
 			)
-			fail(fmt.Errorf("provider %q failed: %w", runtime.provider.Name(), err))
-			return
-		}
-		if err := emit(Event{Type: EventMessageStarted}); err != nil {
-			_ = stream.Close()
-			fail(err)
-			return
-		}
-		message, err := consumeModelStream(ctx, stream, func(delta string) error {
-			return emit(Event{Type: EventMessageDelta, Delta: delta})
-		})
-		if err != nil {
-			runtime.debug("provider.stream.failed",
+			if !errorInfo.Retryable() || outputObserved || providerAttempt >= runtime.providerRetry.MaxAttempts {
+				fail(classifiedError)
+				return
+			}
+			if providerCalls >= runtime.maxProviderCalls {
+				fail(errors.Join(ErrProviderCallLimit, classifiedError))
+				return
+			}
+
+			delay := providerRetryDelay(runtime.providerRetry, providerAttempt, errorInfo.RetryAfter)
+			retry := ProviderRetryInfo{
+				Error:             classifiedError.eventInfo(),
+				NextAttempt:       providerAttempt + 1,
+				DelayMilliseconds: delay.Milliseconds(),
+			}
+			if err := emit(Event{
+				Type:            EventProviderRetry,
+				ProviderCall:    providerCalls,
+				ProviderAttempt: providerAttempt,
+				ProviderRetry:   &retry,
+			}); err != nil {
+				fail(err)
+				return
+			}
+			runtime.debug("provider.retry.scheduled",
 				"run_id", runID,
 				"provider", runtime.provider.Name(),
 				"call", providerCalls,
-				"duration_ms", time.Since(providerStartedAt).Milliseconds(),
-				"error_type", fmt.Sprintf("%T", err),
+				"attempt", providerAttempt,
+				"next_attempt", providerAttempt+1,
+				"delay_ms", delay.Milliseconds(),
+				"error_code", errorInfo.Code,
 			)
-			fail(fmt.Errorf("provider %q stream failed: %w", runtime.provider.Name(), err))
-			return
+			if err := waitForProviderRetry(ctx, delay); err != nil {
+				fail(err)
+				return
+			}
 		}
-		runtime.debug("provider.stream.completed",
-			"run_id", runID,
-			"provider", runtime.provider.Name(),
-			"call", providerCalls,
-			"duration_ms", time.Since(providerStartedAt).Milliseconds(),
-			"tool_call_count", len(message.ToolCalls),
-		)
 		if message.Role != RoleAssistant {
 			fail(fmt.Errorf("provider %q returned message role %q, want %q", runtime.provider.Name(), message.Role, RoleAssistant))
 			return
@@ -1344,6 +1418,14 @@ func cloneEvent(event Event) Event {
 		event.PrefixManifest = &manifest
 	}
 	event.CachePlan = cloneCachePlanPointer(event.CachePlan)
+	if event.ProviderError != nil {
+		providerError := *event.ProviderError
+		event.ProviderError = &providerError
+	}
+	if event.ProviderRetry != nil {
+		providerRetry := *event.ProviderRetry
+		event.ProviderRetry = &providerRetry
+	}
 	event.ContextCheckpoint = cloneContextCheckpointPointer(event.ContextCheckpoint)
 	event.ContextCompaction = cloneContextCompactionReport(event.ContextCompaction)
 	if event.Message != nil {

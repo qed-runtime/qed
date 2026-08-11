@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // CredentialSource resolves one Provider credential for an HTTP request
@@ -47,11 +48,46 @@ type HTTPError struct {
 	Message string
 	// RequestID identifies the failed API request when available
 	RequestID string
+	// RetryAfter is the minimum server-requested delay before another attempt
+	RetryAfter time.Duration
 }
 
 // Error returns a diagnostic that does not include credentials or request bodies
 func (apiError *HTTPError) Error() string {
 	message := fmt.Sprintf("provider API returned HTTP %d", apiError.StatusCode)
+	if apiError.Type != "" {
+		message += " " + apiError.Type
+	}
+	if apiError.Code != "" {
+		message += "[" + apiError.Code + "]"
+	}
+	if apiError.Message != "" {
+		message += ": " + apiError.Message
+	}
+	if apiError.RequestID != "" {
+		message += " (request_id=" + apiError.RequestID + ")"
+	}
+	return message
+}
+
+// APIError describes a Provider error reported independently of an HTTP status
+//
+// Streaming Providers use APIError when an accepted stream later emits a
+// structured error event
+type APIError struct {
+	// Type is the Provider-specific error type when available
+	Type string
+	// Code is the Provider-specific error code when available
+	Code string
+	// Message is the Provider-provided error description when available
+	Message string
+	// RequestID identifies the failed API request when available
+	RequestID string
+}
+
+// Error returns a diagnostic that does not include credentials or request bodies
+func (apiError *APIError) Error() string {
+	message := "provider API returned an error"
 	if apiError.Type != "" {
 		message += " " + apiError.Type
 	}

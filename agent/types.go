@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"time"
+
+	providerbase "github.com/qed-runtime/qed/provider"
 )
 
 // Role identifies the author or purpose of a message
@@ -290,6 +292,7 @@ const (
 	EventUserMessageAdded EventType = "user.message.added"
 	EventContextCompacted EventType = "context.compacted"
 	EventModelRequest     EventType = "model.request.started"
+	EventProviderRetry    EventType = "provider.retry.scheduled"
 	EventMessageStarted   EventType = "message.started"
 	EventMessageDelta     EventType = "message.delta"
 	EventMessageCompleted EventType = "message.completed"
@@ -301,6 +304,26 @@ const (
 	EventRunFailed        EventType = "run.failed"
 	EventRunCanceled      EventType = "run.canceled"
 )
+
+// ProviderErrorInfo describes a Provider failure without response content
+type ProviderErrorInfo struct {
+	// Code is the provider-neutral error classification
+	Code providerbase.ErrorCode `json:"code"`
+	// Attempt is the one-based attempt that failed within one logical model request
+	Attempt int `json:"attempt"`
+	// RetryAfterMilliseconds is the server-requested minimum delay when available
+	RetryAfterMilliseconds int64 `json:"retry_after_ms,omitempty"`
+}
+
+// ProviderRetryInfo describes one scheduled retry of a logical model request
+type ProviderRetryInfo struct {
+	// Error describes the transient failure that triggered this retry
+	Error ProviderErrorInfo `json:"error"`
+	// NextAttempt is the one-based attempt that follows the delay
+	NextAttempt int `json:"next_attempt"`
+	// DelayMilliseconds is the effective delay before NextAttempt
+	DelayMilliseconds int64 `json:"delay_ms"`
+}
 
 // Event is one ordered state change emitted by a Run
 type Event struct {
@@ -325,6 +348,14 @@ type Event struct {
 	PrefixManifest *PrefixManifest `json:"prefix_manifest,omitempty"`
 	// CachePlan describes the effective Provider cache decision for a model request
 	CachePlan *CachePlan `json:"cache_plan,omitempty"`
+	// ProviderCall is the one-based Run-wide Provider attempt for model request and retry Events
+	ProviderCall int `json:"provider_call,omitempty"`
+	// ProviderAttempt is the one-based attempt within one logical model request
+	ProviderAttempt int `json:"provider_attempt,omitempty"`
+	// ProviderError describes a terminal Provider failure
+	ProviderError *ProviderErrorInfo `json:"provider_error,omitempty"`
+	// ProviderRetry describes the transient failure and scheduled retry delay
+	ProviderRetry *ProviderRetryInfo `json:"provider_retry,omitempty"`
 	// ContextCheckpoint is the newly published Checkpoint for context.compacted
 	ContextCheckpoint *ContextCheckpoint `json:"context_checkpoint,omitempty"`
 	// ContextCompaction describes the provider-neutral reduction for context.compacted

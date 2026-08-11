@@ -15,6 +15,7 @@ import (
 
 	"github.com/qed-runtime/qed/agent"
 	"github.com/qed-runtime/qed/evidence"
+	providerbase "github.com/qed-runtime/qed/provider"
 	"github.com/qed-runtime/qed/session"
 )
 
@@ -182,6 +183,327 @@ func TestRuntimeDebugDiagnosticsExcludeMessageContentAndMetadataValues(t *testin
 		if strings.Contains(output, sensitive) {
 			t.Errorf("diagnostics contain sensitive value %q: %s", sensitive, output)
 		}
+	}
+}
+
+func TestRuntimeRetriesTransientProviderFailures(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{
+		{err: &providerbase.HTTPError{StatusCode: 503, RetryAfter: 3 * time.Millisecond}},
+		{err: &providerbase.APIError{Type: "rate_limit_error"}},
+		{message: agent.Message{Role: agent.RoleAssistant, Text: "done"}},
+	}}
+	budget, err := agent.NewBudget(agent.BudgetLimits{MaxProviderCalls: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := session.NewMemoryStore()
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider:     provider,
+		SessionStore: store,
+		ProviderRetry: agent.ProviderRetryPolicy{
+			MaxAttempts:    3,
+			InitialBackoff: time.Millisecond,
+			MaxBackoff:     2 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Budget:    budget,
+		SessionID: "retry-session",
+		Input:     []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, runErr := collectRun(handle)
+	if runErr != nil {
+		t.Fatalf("Run error = %v", runErr)
+	}
+	if result.ProviderCalls != 3 || len(provider.Requests()) != 3 {
+		t.Fatalf("Provider calls = %d/%d, want 3", result.ProviderCalls, len(provider.Requests()))
+	}
+	if snapshot := budget.Snapshot(); snapshot.ProviderCalls != 3 {
+		t.Fatalf("Budget Provider calls = %d, want 3", snapshot.ProviderCalls)
+	}
+
+	var requestEvents []agent.Event
+	var retryEvents []agent.Event
+	messageStarted := 0
+	for _, event := range events {
+		switch event.Type {
+		case agent.EventModelRequest:
+			requestEvents = append(requestEvents, event)
+		case agent.EventProviderRetry:
+			retryEvents = append(retryEvents, event)
+		case agent.EventMessageStarted:
+			messageStarted++
+		}
+	}
+	if len(requestEvents) != 3 || len(retryEvents) != 2 || messageStarted != 1 {
+		t.Fatalf("request/retry/message-start Events = %d/%d/%d", len(requestEvents), len(retryEvents), messageStarted)
+	}
+	for index, event := range requestEvents {
+		if event.ProviderCall != index+1 || event.ProviderAttempt != index+1 {
+			t.Errorf("request Event %d call/attempt = %d/%d", index, event.ProviderCall, event.ProviderAttempt)
+		}
+	}
+	wantCodes := []providerbase.ErrorCode{providerbase.ErrorCodeRetryable, providerbase.ErrorCodeRateLimited}
+	wantDelays := []int64{3, 2}
+	for index, event := range retryEvents {
+		if event.ProviderRetry == nil || event.ProviderRetry.Error.Code != wantCodes[index] ||
+			event.ProviderRetry.NextAttempt != index+2 || event.ProviderRetry.DelayMilliseconds != wantDelays[index] {
+			t.Errorf("retry Event %d = %#v", index, event.ProviderRetry)
+		}
+	}
+	if retryEvents[0].ProviderRetry.Error.RetryAfterMilliseconds != 3 {
+		t.Errorf("server Retry-After = %dms, want 3ms", retryEvents[0].ProviderRetry.Error.RetryAfterMilliseconds)
+	}
+	snapshot, err := store.Snapshot(context.Background(), "retry-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistedRetries := 0
+	for _, event := range snapshot.Events {
+		if event.Type == agent.EventProviderRetry && event.ProviderRetry != nil {
+			persistedRetries++
+		}
+	}
+	if persistedRetries != 2 {
+		t.Fatalf("persisted retry Events = %d, want 2", persistedRetries)
+	}
+}
+
+func TestRuntimeRetriesStreamFailuresBeforeObservableOutput(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{
+		{streamErr: io.EOF},
+		{streamErr: &providerbase.APIError{Code: "server_is_overloaded", Message: "try later"}},
+		{message: agent.Message{Role: agent.RoleAssistant, Text: "done"}},
+	}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		ProviderRetry: agent.ProviderRetryPolicy{
+			MaxAttempts:    3,
+			InitialBackoff: time.Millisecond,
+			MaxBackoff:     time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, runErr := collectRun(handle)
+	if runErr != nil || result.ProviderCalls != 3 {
+		t.Fatalf("Run = %#v, %v", result, runErr)
+	}
+	messageStarted := 0
+	retries := 0
+	for _, event := range events {
+		if event.Type == agent.EventMessageStarted {
+			messageStarted++
+		}
+		if event.Type == agent.EventProviderRetry {
+			retries++
+		}
+	}
+	if messageStarted != 1 || retries != 2 {
+		t.Fatalf("message-start/retry Events = %d/%d, want 1/2", messageStarted, retries)
+	}
+}
+
+func TestRuntimeStopsAtProviderRetryAttemptLimit(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{
+		{err: &providerbase.HTTPError{StatusCode: 503}},
+		{err: &providerbase.HTTPError{StatusCode: 503}},
+	}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		ProviderRetry: agent.ProviderRetryPolicy{
+			MaxAttempts:    2,
+			InitialBackoff: time.Millisecond,
+			MaxBackoff:     time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, runErr := collectRun(handle)
+	if runErr == nil || result.ProviderCalls != 2 {
+		t.Fatalf("Run = %#v, %v", result, runErr)
+	}
+	retries := 0
+	for _, event := range events {
+		if event.Type == agent.EventProviderRetry {
+			retries++
+		}
+	}
+	terminal := events[len(events)-1]
+	if retries != 1 || terminal.ProviderError == nil ||
+		terminal.ProviderError.Code != providerbase.ErrorCodeRetryable || terminal.ProviderError.Attempt != 2 {
+		t.Fatalf("retry count/terminal Event = %d/%#v", retries, terminal)
+	}
+}
+
+func TestRuntimeDoesNotRetryAfterObservableProviderOutput(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{{
+		streamDeltas: []string{"partial"},
+		streamErr:    &providerbase.APIError{Code: "server_is_overloaded"},
+	}}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		ProviderRetry: agent.ProviderRetryPolicy{
+			MaxAttempts:    3,
+			InitialBackoff: time.Millisecond,
+			MaxBackoff:     time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, runErr := collectRun(handle)
+	if runErr == nil || result.ProviderCalls != 1 {
+		t.Fatalf("Run = %#v, %v", result, runErr)
+	}
+	for _, event := range events {
+		if event.Type == agent.EventProviderRetry {
+			t.Fatalf("retry was scheduled after observable output: %#v", events)
+		}
+	}
+	terminal := events[len(events)-1]
+	if terminal.Type != agent.EventRunFailed || terminal.ProviderError == nil ||
+		terminal.ProviderError.Code != providerbase.ErrorCodeRetryable || terminal.ProviderError.Attempt != 1 {
+		t.Fatalf("terminal Event = %#v", terminal)
+	}
+}
+
+func TestRuntimeCancellationInterruptsProviderRetryDelay(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{{err: &providerbase.HTTPError{StatusCode: 503}}}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		ProviderRetry: agent.ProviderRetryPolicy{
+			MaxAttempts:    2,
+			InitialBackoff: time.Minute,
+			MaxBackoff:     time.Minute,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for event := range handle.Events() {
+		if event.Type == agent.EventProviderRetry {
+			handle.Cancel()
+		}
+	}
+	result, runErr := handle.Wait()
+	if !errors.Is(runErr, context.Canceled) || result.Status != agent.RunStatusCanceled || result.ProviderCalls != 1 {
+		t.Fatalf("Run = %#v, %v", result, runErr)
+	}
+}
+
+func TestRuntimeDeadlineInterruptsProviderRetryDelay(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{{err: &providerbase.HTTPError{StatusCode: 503}}}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		ProviderRetry: agent.ProviderRetryPolicy{
+			MaxAttempts:    2,
+			InitialBackoff: time.Minute,
+			MaxBackoff:     time.Minute,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Deadline: time.Now().Add(250 * time.Millisecond),
+		Input:    []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, runErr := collectRun(handle)
+	if !errors.Is(runErr, context.DeadlineExceeded) || result.Status != agent.RunStatusCanceled || result.ProviderCalls != 1 {
+		t.Fatalf("Run = %#v, %v", result, runErr)
+	}
+}
+
+func TestRuntimeRetryDoesNotRepeatToolSideEffects(t *testing.T) {
+	t.Parallel()
+
+	tool := &countingTool{}
+	provider := &scriptedProvider{responses: []providerResponse{
+		{message: agent.Message{
+			Role:      agent.RoleAssistant,
+			ToolCalls: []agent.ToolCall{{ID: "call-1", Name: "count"}},
+		}},
+		{err: &providerbase.HTTPError{StatusCode: 503}},
+		{message: agent.Message{Role: agent.RoleAssistant, Text: "done"}},
+	}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		Tools:    []agent.Tool{tool},
+		ProviderRetry: agent.ProviderRetryPolicy{
+			MaxAttempts:    2,
+			InitialBackoff: time.Millisecond,
+			MaxBackoff:     time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, runErr := collectRun(handle)
+	if runErr != nil || result.ProviderCalls != 3 || result.ToolCalls != 1 || tool.Calls() != 1 {
+		t.Fatalf("Run = %#v, Tool calls = %d, error = %v", result, tool.Calls(), runErr)
+	}
+	var attempts []int
+	for _, event := range events {
+		if event.Type == agent.EventModelRequest {
+			attempts = append(attempts, event.ProviderAttempt)
+		}
+	}
+	if len(attempts) != 3 || attempts[0] != 1 || attempts[1] != 1 || attempts[2] != 2 {
+		t.Fatalf("Provider attempts = %#v, want [1 1 2]", attempts)
 	}
 }
 
@@ -1037,8 +1359,10 @@ func TestRuntimeResumesPersistedPendingToolWithoutRepeatingProviderCall(t *testi
 }
 
 type providerResponse struct {
-	message agent.Message
-	err     error
+	message      agent.Message
+	err          error
+	streamDeltas []string
+	streamErr    error
 }
 
 type scriptedProvider struct {
@@ -1056,25 +1380,31 @@ func (provider *scriptedProvider) ModelID() string {
 	return provider.model
 }
 
-func (provider *scriptedProvider) Complete(_ context.Context, request agent.ModelRequest) (agent.Message, error) {
+func (provider *scriptedProvider) Stream(_ context.Context, request agent.ModelRequest) (agent.ModelStream, error) {
 	provider.mu.Lock()
-	defer provider.mu.Unlock()
-
 	provider.requests = append(provider.requests, request)
 	index := len(provider.requests) - 1
 	if index >= len(provider.responses) {
-		return agent.Message{}, errors.New("scripted provider exhausted")
+		provider.mu.Unlock()
+		return nil, errors.New("scripted provider exhausted")
 	}
 	response := provider.responses[index]
-	return response.message, response.err
-}
-
-func (provider *scriptedProvider) Stream(ctx context.Context, request agent.ModelRequest) (agent.ModelStream, error) {
-	message, err := provider.Complete(ctx, request)
-	if err != nil {
-		return nil, err
+	provider.mu.Unlock()
+	if response.err != nil {
+		return nil, response.err
 	}
-	return agent.MessageStream(message), nil
+	if response.streamErr != nil {
+		index := 0
+		return &agent.ModelStreamFunc{NextFunc: func() (agent.ModelStreamEvent, error) {
+			if index < len(response.streamDeltas) {
+				delta := response.streamDeltas[index]
+				index++
+				return agent.ModelStreamEvent{Type: agent.ModelStreamTextDelta, TextDelta: delta}, nil
+			}
+			return agent.ModelStreamEvent{}, response.streamErr
+		}}, nil
+	}
+	return agent.MessageStream(response.message), nil
 }
 
 func (provider *scriptedProvider) Requests() []agent.ModelRequest {
@@ -1094,6 +1424,28 @@ func (compiler contextCompilerFunc) Compile(
 }
 
 type uppercaseTool struct{}
+
+type countingTool struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (tool *countingTool) Definition() agent.ToolDefinition {
+	return agent.ToolDefinition{Name: "count", InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (tool *countingTool) Execute(context.Context, agent.ToolCall) (agent.ToolResult, error) {
+	tool.mu.Lock()
+	tool.calls++
+	tool.mu.Unlock()
+	return agent.ToolResult{Output: "counted"}, nil
+}
+
+func (tool *countingTool) Calls() int {
+	tool.mu.Lock()
+	defer tool.mu.Unlock()
+	return tool.calls
+}
 
 func (uppercaseTool) Definition() agent.ToolDefinition {
 	return agent.ToolDefinition{

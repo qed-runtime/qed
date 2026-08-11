@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/qed-runtime/qed/agent"
+	providerbase "github.com/qed-runtime/qed/provider"
 	"github.com/qed-runtime/qed/provider/internal/httpjson"
 )
 
@@ -266,7 +267,14 @@ func (accumulator *chatStreamAccumulator) next() (agent.ModelStreamEvent, error)
 			return agent.ModelStreamEvent{}, fmt.Errorf("decode OpenAI Chat Completions stream event: %w", err)
 		}
 		if chunk.Error != nil {
-			return agent.ModelStreamEvent{}, fmt.Errorf("OpenAI Chat Completions stream failed: %s", chunk.Error.Message)
+			var code string
+			if err := json.Unmarshal(chunk.Error.Code, &code); err != nil {
+				code = string(chunk.Error.Code)
+			}
+			return agent.ModelStreamEvent{}, fmt.Errorf("OpenAI Chat Completions stream failed: %w", &providerbase.APIError{
+				Code:    code,
+				Message: chunk.Error.Message,
+			})
 		}
 		if chunk.ID != "" {
 			accumulator.id = chunk.ID

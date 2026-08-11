@@ -67,6 +67,11 @@ The format is used by `qed run`, `qed tui`, and `qed session resume`
       "provider": "primary",
       "profile": "coding",
       "instructions": "Use specialists when useful and return the final answer",
+      "provider_retry": {
+        "max_attempts": 3,
+        "initial_backoff": "1s",
+        "max_backoff": "8s"
+      },
       "context": {
         "max_input_bytes": 65536,
         "recent_messages": 12
@@ -322,6 +327,7 @@ selected `PATH` and does not fall back to the Host environment
 | `instructions` | no | Base instructions for this Agent |
 | `max_provider_calls` | no | Runtime-local Provider call limit |
 | `max_tool_calls` | no | Runtime-local Tool call limit |
+| `provider_retry` | no | Bounded retry policy for transient Provider failures |
 | `context` | no | Evidence-preserving context compression policy |
 | `cache` | no | Provider-neutral prompt-cache policy |
 | `delegations` | no | Subagent Tools exposed to this Agent |
@@ -344,6 +350,28 @@ prompt, not the parent's full conversation, Session ID, or Metadata
 
 Shared limits default to 16 Agent Runs, depth 4, and 64 Provider calls. Parent,
 candidate, and judge Runs count against the same top-level budget
+
+## Provider retry
+
+Provider retry is configured per Agent
+
+| Field | Required | Meaning and default |
+| --- | --- | --- |
+| `max_attempts` | no | Total attempts for one logical model request, default `3`; use `1` to disable retry |
+| `initial_backoff` | no | Positive Go duration used after the first failure, default `1s` |
+| `max_backoff` | no | Positive Go duration capping exponential fallback delay, default `8s` |
+
+QED retries only `retryable` and `rate_limited` failures. A valid
+`Retry-After` response header is a minimum delay and may exceed `max_backoff`
+All attempts consume the Runtime-local and shared Provider call budgets and
+respect Run cancellation and Deadline
+
+Automatic retry is limited to failures before the first observable
+`ModelStream` item. QED does not retry after a text delta or completed message,
+so retry cannot duplicate published output or Tool side effects. The ordered
+Event stream emits `provider.retry.scheduled` before each delay. See
+[Provider errors and retry](providers.md#provider-errors-and-retry) for the
+public error codes and Event fields
 
 ## Context compression and prompt caching
 

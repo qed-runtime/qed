@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/qed-runtime/qed/agent"
+	providerbase "github.com/qed-runtime/qed/provider"
 	"github.com/qed-runtime/qed/provider/internal/httpjson"
 )
 
@@ -100,7 +101,10 @@ func (accumulator *responsesStreamAccumulator) next() (agent.ModelStreamEvent, e
 				envelope.Code = envelope.Error.Code
 				envelope.Message = envelope.Error.Message
 			}
-			return agent.ModelStreamEvent{}, fmt.Errorf("OpenAI Codex Responses stream failed %s: %s", envelope.Code, envelope.Message)
+			return agent.ModelStreamEvent{}, fmt.Errorf("OpenAI Codex Responses stream failed: %w", &providerbase.APIError{
+				Code:    envelope.Code,
+				Message: envelope.Message,
+			})
 		default:
 			continue
 		}

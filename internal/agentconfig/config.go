@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -257,14 +258,21 @@ type providerProfile struct {
 }
 
 type agentProfile struct {
-	Provider         string              `json:"provider"`
-	Profile          string              `json:"profile,omitempty"`
-	Instructions     string              `json:"instructions,omitempty"`
-	MaxProviderCalls int                 `json:"max_provider_calls,omitempty"`
-	MaxToolCalls     int                 `json:"max_tool_calls,omitempty"`
-	Delegations      []delegationProfile `json:"delegations,omitempty"`
-	Context          *contextProfile     `json:"context,omitempty"`
-	Cache            *cacheProfile       `json:"cache,omitempty"`
+	Provider         string                `json:"provider"`
+	Profile          string                `json:"profile,omitempty"`
+	Instructions     string                `json:"instructions,omitempty"`
+	MaxProviderCalls int                   `json:"max_provider_calls,omitempty"`
+	MaxToolCalls     int                   `json:"max_tool_calls,omitempty"`
+	ProviderRetry    *providerRetryProfile `json:"provider_retry,omitempty"`
+	Delegations      []delegationProfile   `json:"delegations,omitempty"`
+	Context          *contextProfile       `json:"context,omitempty"`
+	Cache            *cacheProfile         `json:"cache,omitempty"`
+}
+
+type providerRetryProfile struct {
+	MaxAttempts    int    `json:"max_attempts,omitempty"`
+	InitialBackoff string `json:"initial_backoff,omitempty"`
+	MaxBackoff     string `json:"max_backoff,omitempty"`
 }
 
 type contextProfile struct {
@@ -1102,6 +1110,10 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 		cachePolicy.IsolationKey = specification.Cache.IsolationKey
 		cachePolicy.Family = specification.Cache.Family
 	}
+	providerRetry, err := buildProviderRetryPolicy(specification.ProviderRetry)
+	if err != nil {
+		return fmt.Errorf("agent %q Provider retry: %w", agentID, err)
+	}
 
 	for index, delegation := range specification.Delegations {
 		if delegation.Name == "" || strings.TrimSpace(delegation.Name) != delegation.Name {
@@ -1151,6 +1163,7 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 		SessionStore:     builder.sessions,
 		ContextCompiler:  contextCompiler,
 		CachePolicy:      cachePolicy,
+		ProviderRetry:    providerRetry,
 		Logger:           builder.logger,
 	})
 	if err != nil {
@@ -1165,6 +1178,27 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 	}
 	builder.states[agentID] = buildComplete
 	return nil
+}
+
+func buildProviderRetryPolicy(specification *providerRetryProfile) (agent.ProviderRetryPolicy, error) {
+	if specification == nil {
+		return agent.ProviderRetryPolicy{}, nil
+	}
+	policy := agent.ProviderRetryPolicy{MaxAttempts: specification.MaxAttempts}
+	var err error
+	if specification.InitialBackoff != "" {
+		policy.InitialBackoff, err = time.ParseDuration(specification.InitialBackoff)
+		if err != nil || policy.InitialBackoff <= 0 {
+			return agent.ProviderRetryPolicy{}, fmt.Errorf("initial_backoff %q must be a positive Go duration", specification.InitialBackoff)
+		}
+	}
+	if specification.MaxBackoff != "" {
+		policy.MaxBackoff, err = time.ParseDuration(specification.MaxBackoff)
+		if err != nil || policy.MaxBackoff <= 0 {
+			return agent.ProviderRetryPolicy{}, fmt.Errorf("max_backoff %q must be a positive Go duration", specification.MaxBackoff)
+		}
+	}
+	return policy, nil
 }
 
 func combineInstructions(first, second string) string {

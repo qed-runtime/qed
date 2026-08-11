@@ -52,6 +52,7 @@ func newCodexContractProvider(t *testing.T, scenario contracttest.Scenario) agen
 		response := httpResponse(status, contentType, body)
 		if scenario == contracttest.ScenarioHTTPError {
 			response.Header.Set("x-request-id", contracttest.FixtureRequestID)
+			response.Header.Set("retry-after", "2")
 		}
 		return response, nil
 	})

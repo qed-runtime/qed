@@ -10,7 +10,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	providerbase "github.com/qed-runtime/qed/provider"
 )
@@ -112,6 +114,7 @@ func decodeHTTPError(response *http.Response) error {
 	apiError := &providerbase.HTTPError{
 		StatusCode: response.StatusCode,
 		RequestID:  response.Header.Get("x-request-id"),
+		RetryAfter: parseRetryAfter(response.Header.Get("retry-after"), time.Now()),
 	}
 	if apiError.RequestID == "" {
 		apiError.RequestID = response.Header.Get("request-id")
@@ -137,6 +140,21 @@ func decodeHTTPError(response *http.Response) error {
 		apiError.Message = http.StatusText(response.StatusCode)
 	}
 	return apiError
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseUint(value, 10, 31); err == nil {
+		return time.Duration(seconds) * time.Second
+	}
+	when, err := http.ParseTime(value)
+	if err != nil || !when.After(now) {
+		return 0
+	}
+	return when.Sub(now)
 }
 
 func rawScalar(value json.RawMessage) string {

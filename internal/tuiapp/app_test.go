@@ -13,6 +13,7 @@ import (
 	"github.com/mayahiro/nagitui-go/tuitest"
 
 	"github.com/qed-runtime/qed/agent"
+	providerbase "github.com/qed-runtime/qed/provider"
 	"github.com/qed-runtime/qed/provider/echo"
 )
 
@@ -203,20 +204,28 @@ func TestAdapterMapsContentAndContentFreeDiagnostics(t *testing.T) {
 			RunID: "run-adapter", AgentID: "agent-event", SessionID: "session-event",
 		},
 		{Sequence: 2, Type: agent.EventModelRequest},
-		{Sequence: 3, Type: agent.EventMessageStarted},
-		{Sequence: 4, Type: agent.EventMessageDelta, Delta: "assistant-visible-content"},
 		{
-			Sequence: 5, Type: agent.EventToolStarted,
+			Sequence: 3, Type: agent.EventProviderRetry,
+			ProviderRetry: &agent.ProviderRetryInfo{
+				Error:             agent.ProviderErrorInfo{Code: providerbase.ErrorCodeRateLimited, Attempt: 1},
+				NextAttempt:       2,
+				DelayMilliseconds: 1000,
+			},
+		},
+		{Sequence: 4, Type: agent.EventMessageStarted},
+		{Sequence: 5, Type: agent.EventMessageDelta, Delta: "assistant-visible-content"},
+		{
+			Sequence: 6, Type: agent.EventToolStarted,
 			ToolCall: &agent.ToolCall{
 				ID: "call-1", Name: "read_file", Arguments: json.RawMessage(`{"path":"secret-input"}`),
 			},
 		},
 		{
-			Sequence: 6, Type: agent.EventToolCompleted,
+			Sequence: 7, Type: agent.EventToolCompleted,
 			ToolCall:   &agent.ToolCall{ID: "call-1", Name: "read_file"},
 			ToolResult: &agent.ToolResult{CallID: "call-1", Name: "read_file", Output: "secret-output"},
 		},
-		{Sequence: 7, Type: agent.EventRunFailed, Error: "secret-error"},
+		{Sequence: 8, Type: agent.EventRunFailed, Error: "secret-error"},
 	}
 	for _, event := range events {
 		view.Update(message{kind: runEventMessage, update: adaptRunEvent(event)})
@@ -250,6 +259,7 @@ func TestAdapterMapsContentAndContentFreeDiagnostics(t *testing.T) {
 	for _, expected := range []string{
 		"Agent: agent-event  Session: session-event  Run: run-adapter",
 		"Answer: assistant-visible-content",
+		"Model retry 2 in 1000ms (rate_limited) [waiting]",
 		"Tool read_file [completed]",
 		"Run failed [failed]",
 	} {

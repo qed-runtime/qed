@@ -60,6 +60,7 @@ func newOpenAIContractProvider(t *testing.T, api openai.API, scenario contractte
 		response := openAIContractHTTPResponse(status, contentType, body)
 		if scenario == contracttest.ScenarioHTTPError {
 			response.Header.Set("x-request-id", contracttest.FixtureRequestID)
+			response.Header.Set("retry-after", "2")
 		}
 		return response, nil
 	})

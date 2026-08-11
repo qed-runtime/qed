@@ -54,6 +54,11 @@ func TestLoadBuildsProviderProfilesAndAgentGraph(t *testing.T) {
 			"coordinator": {
 				"provider": "primary",
 				"instructions": "Coordinate the answer",
+				"provider_retry": {
+					"max_attempts": 2,
+					"initial_backoff": "1ms",
+					"max_backoff": "2ms"
+				},
 				"delegations": [{
 					"name": "consult_specialist",
 					"description": "Ask the specialist",
@@ -235,6 +240,33 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 				"agents": {"main": {"provider": "local"}}
 			}`,
 			want: "unsupported configuration version 2, want 1",
+		},
+		{
+			name: "invalid Provider retry duration",
+			document: `{
+				"version": 1,
+				"providers": {"local": {"protocol": "echo"}},
+				"agents": {"main": {
+					"provider": "local",
+					"provider_retry": {"initial_backoff": "soon"}
+				}}
+			}`,
+			want: `initial_backoff "soon" must be a positive Go duration`,
+		},
+		{
+			name: "Provider retry maximum below initial",
+			document: `{
+				"version": 1,
+				"providers": {"local": {"protocol": "echo"}},
+				"agents": {"main": {
+					"provider": "local",
+					"provider_retry": {
+						"initial_backoff": "2s",
+						"max_backoff": "1s"
+					}
+				}}
+			}`,
+			want: "Provider retry max backoff must not be shorter than initial backoff",
 		},
 		{
 			name: "context without evidence store",
