@@ -151,7 +151,7 @@ func (tool *runCommandTool) Execute(ctx context.Context, call agent.ToolCall) (a
 	if err != nil {
 		return agent.ToolResult{}, fmt.Errorf("encode run_command result: %w", err)
 	}
-	return agent.ToolResult{Output: string(encoded)}, nil
+	return agent.ToolResult{Output: string(encoded), IsError: !response.Success}, nil
 }
 
 type commandResponse struct {

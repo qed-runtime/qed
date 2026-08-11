@@ -217,6 +217,9 @@ reload中はoldとnew processも重複可能でlockを共有しません
 `run_command`はargv、optionalなworkspace-relative working directory、optional timeoutを受け取ります
 executableを直接起動し、stdoutとstderrを別々にcaptureして上限を適用し、exit codeを報告し、Unixではcancelまたはtimeout後にprocess groupを終了します
 
+非0終了またはtimeoutでもstructured command responseは保持し、Tool resultをerrorとして記録します
+これによりProviderとEvidence Bundleは失敗したcheckと成功したcommandを区別できます
+
 executable lookupはProfileで選択した`PATH`だけを使います
 ExtensionまたはHost process environmentへfallbackしません
 

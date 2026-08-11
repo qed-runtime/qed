@@ -228,6 +228,10 @@ and an optional timeout. It starts the executable directly, captures stdout and
 stderr separately, bounds both, reports exit code, and terminates the process
 group after cancellation or timeout on Unix
 
+A non-zero exit or timeout keeps the structured command response but marks the
+Tool result as an error. Providers and Evidence Bundles can therefore distinguish
+a failed check from a successful command
+
 Executable lookup uses only the Profile's selected `PATH`. It does not fall back
 to Extension or Host process environment
 

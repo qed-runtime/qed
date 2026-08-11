@@ -40,9 +40,9 @@ func TestRunCommandReturnsSeparatedBoundedOutput(t *testing.T) {
 	if err := json.Unmarshal([]byte(result.Output), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.ExitCode != 3 || response.Success || response.Stdout != "stdo" || response.Stderr != "stde" ||
+	if !result.IsError || response.ExitCode != 3 || response.Success || response.Stdout != "stdo" || response.Stderr != "stde" ||
 		!response.StdoutTruncated || !response.StderrTruncated {
-		t.Fatalf("response = %#v", response)
+		t.Fatalf("result/response = %#v / %#v", result, response)
 	}
 }
 
@@ -68,8 +68,8 @@ func TestRunCommandTimesOutAndRejectsEscapingCWD(t *testing.T) {
 	if err := json.Unmarshal([]byte(result.Output), &response); err != nil {
 		t.Fatal(err)
 	}
-	if !response.TimedOut || response.Success {
-		t.Fatalf("timeout response = %#v", response)
+	if !result.IsError || !response.TimedOut || response.Success {
+		t.Fatalf("timeout result/response = %#v / %#v", result, response)
 	}
 
 	escapeArguments, _ := json.Marshal(map[string]any{"argv": []string{executable}, "cwd": ".."})
