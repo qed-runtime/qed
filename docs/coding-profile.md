@@ -23,6 +23,13 @@ Official Tool arguments use strict bounded decoders that reject unknown fields,
 duplicate keys, trailing values, invalid types, and Tool-specific limit
 violations
 
+`apply_patch` accepts both `--- a/path` plus `+++ b/path` and equivalent
+workspace-relative `--- path` plus `+++ path` headers. The model-facing Tool
+schema and Coding Profile instructions recommend the prefixed canonical form,
+require `@@` unified diff hunks rather than `*** Begin Patch` markers, and tell
+the model to copy the complete `sha256:...` value returned by `read_file`
+without modification
+
 The QED `extensions.lock` selects these three for self-exec. Additional linked
 or external Extensions attached to the same Profile may contribute Tools and
 Hooks. A Run acquires all configured Extensions as one generation set
@@ -275,6 +282,64 @@ Verbose mode propagates from CLI or `coding.Options.Verbose` through every
 Extension Initialize request. Structured diagnostics omit project context,
 prompts, file names supplied as Tool arguments, command output, environment
 values, and credentials
+
+## Protected live model verification
+
+An opt-in integration test verifies the complete write path against a real
+ChatGPT Codex model
+
+```sh
+QED_LIVE_CODING_E2E=1 \
+QED_LIVE_CODING_AUTH_PROFILE=personal \
+QED_LIVE_CODING_MODEL=MODEL_ID \
+go test -mod=readonly -count=1 -v \
+  -run '^TestLiveCodingProfileWritesTemporaryWorkspace$' \
+  ./profile/coding
+```
+
+Log in with `qed auth login --auth-profile personal` before running the test
+and select a model available to that profile. The test is skipped unless the
+opt-in variable is exactly `1`; the profile and model variables have no implicit
+defaults. A live run can consume subscription quota and its success depends on
+the selected model and Provider service
+
+Verbose test output prints a content-free timeline for each Provider request,
+message boundary, Tool execution, and terminal Event. It includes sequential
+Provider Call numbers, elapsed time, Tool names from the fixed allowlist,
+Tool error flags, fixed Tool error classes, and token counts. Tool error classes
+distinguish protected Policy rejection, invalid arguments, invalid patch syntax,
+precondition failure, patch conflict, cancellation, and unclassified execution
+failure without reproducing the underlying output. The timeline excludes
+prompts, text deltas, model output, Tool arguments, Tool output, response IDs,
+and credential values. The final failure line retains the existing Runtime
+error, but the timeline does not duplicate its Provider error text. A failed Run
+also reports aggregate Provider and Tool Call counts, token usage, Evidence Tool
+count, and the last Event
+
+The test constructs a synthetic Git repository under the test runner's
+temporary directory. Model-facing Tools never read the QED worktree. The
+host-side Policy accepts only reads of four synthetic files, one preconditioned
+update of `calc.go`, the exact `go test ./...` command, and read-only
+`git_status` and `git_diff` calls. Before command execution, the host confirms
+that every source file has one of the known safe contents. The command
+environment disables Go module downloads, checksum service access, telemetry,
+VCS access, CGO, and toolchain downloads
+
+The model may recover from non-mutating `apply_patch` syntax and precondition
+failures within the Runtime budgets. Evidence validation retains every attempt,
+requires exactly one successful change plus successful command and Git
+inspection results, and checks that each failure occurred at a consistent
+validation or Policy stage. Attempts to change another path, perform an
+unsupported file operation, use an unexpected Tool, or continue after an
+unclassified failure still fail the test
+
+Only the configured model request and any authentication refresh use the
+network. Tool-driven network access, arbitrary commands, Git writes, additional
+files, absolute paths, and credential capabilities are denied. ChatGPT
+credentials stay in the Host and are not included in the complete child
+Extension environment. The test also confirms unchanged Git `HEAD`, the exact
+final worktree state, and a private Evidence Bundle save/load round trip in
+another temporary directory
 
 ## Current limitations
 

@@ -426,10 +426,10 @@ func newCodingE2EWorkspace(t *testing.T) (string, string) {
 		t.Skip("git executable is unavailable")
 	}
 	root := t.TempDir()
-	writeFile(t, root, "go.mod", "module example.com/codinge2e\n\ngo 1.25.0\n")
-	writeFile(t, root, "calc.go", "package codinge2e\n\nfunc Add(first, second int) int {\n\treturn first - second\n}\n")
-	writeFile(t, root, "calc_test.go", "package codinge2e\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(2, 3) != 5 {\n\t\tt.Fatal(\"unexpected sum\")\n\t}\n}\n")
-	writeFile(t, root, "AGENTS.md", "# Test instructions\n\nRun the Go test after editing\n")
+	writeFile(t, root, "go.mod", codingE2EGoModContent)
+	writeFile(t, root, "calc.go", codingE2ECalcBefore)
+	writeFile(t, root, "calc_test.go", codingE2ECalcTest)
+	writeFile(t, root, "AGENTS.md", codingE2EInstructions)
 	initializeRepository(t, root, []string{"AGENTS.md", "calc.go", "calc_test.go", "go.mod"})
 	return root, goExecutable
 }
