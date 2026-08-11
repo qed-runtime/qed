@@ -286,6 +286,19 @@ const (
 // EventType identifies a state change emitted by a Run
 type EventType string
 
+// UserMessageOrigin identifies how a user.message.added Event entered a Run
+type UserMessageOrigin string
+
+// User message origins
+const (
+	// UserMessageOriginRunInput identifies RunRequest input, including follow-up input
+	//
+	// It is the zero value so Events written before steering support remain compatible
+	UserMessageOriginRunInput UserMessageOrigin = ""
+	// UserMessageOriginSteering identifies input queued through RunHandle.Steer
+	UserMessageOriginSteering UserMessageOrigin = "steering"
+)
+
 // Event types emitted by the minimal runtime
 const (
 	EventRunStarted       EventType = "run.started"
@@ -387,6 +400,11 @@ type Event struct {
 	ContextCompaction *ContextCompactionReport `json:"context_compaction,omitempty"`
 	// Message is present for message events
 	Message *Message `json:"message,omitempty"`
+	// UserMessageOrigin distinguishes active-Run steering from RunRequest input
+	//
+	// It is only meaningful for user.message.added Events. An empty value means
+	// the Message came from RunRequest.Input, including a follow-up Run.
+	UserMessageOrigin UserMessageOrigin `json:"user_message_origin,omitempty"`
 	// Delta contains incremental assistant text for message.delta
 	Delta string `json:"delta,omitempty"`
 	// ToolCall is present for Tool events

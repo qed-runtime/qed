@@ -476,6 +476,15 @@ Runtimeはpublic Eventを追記し、message、pending wait、pending Tool call�
 永続waitには`qed session resume <id> --config <path>`を使います
 approval resumeは`--approval prompt|approve|deny`を受け取り、それ以外のwait kindには`--response-json`が必要です
 
+active Runのsteeringは既存の`user.message.added` Event typeを維持し、`Event.UserMessageOrigin`を`steering`に設定します
+queue受理はprocess localであり、このEventが永続Sessionへの反映境界です
+cancel、Deadline切れ、terminal Run failureでは、Event未発行のsteeringを破棄する場合があります
+
+follow-upは前のhandleがterminal resultへ達した後、同じSession IDで開始する新しいRunです
+Sessionをreplayしますが、新しいRun IDとRuntime localのProvider、Tool上限を持ちます
+Session Storeは`agent.Budget`を永続化しないため、複数follow-up Runで1つのbudgetを使う場合だけ同じ`*agent.Budget`を明示的に再利用します
+Session Storeが未設定の場合、Session IDはmessageを保持しないためcallerが過去contextを渡す必要があります
+
 ## Evidence Store
 
 ```json

@@ -150,11 +150,57 @@ outcome, err := host.Run(request.Context(), agent.RunRequest{
 `Host.Run` drains the ordered Event stream, returns the terminal Result and all
 Events, and saves an Evidence Bundle when configured. A handler error cancels
 the Run. The handler receives the low-level handle so an in-process approval
-adapter can resume a waiting Run
+adapter can resume a waiting Run or queue steering without blocking Event
+drain
 
 Use `Host.Start` instead when another request or worker must retain the handle,
 stream Events independently, or resume the Run later. A `Start` caller owns
 Event draining and `Wait`, and may call `Host.SaveRunEvidence` after completion
+
+Queue one plain, non-empty user Message for the active Run with
+`RunHandle.Steer`
+
+```go
+err := handle.Steer(agent.Message{
+    Role: agent.RoleUser,
+    Text: "Prioritize the failing package before broader checks",
+})
+```
+
+`Steer` is a non-blocking FIFO operation bounded by
+`agent.MaxPendingSteeringMessages`. A nil error means only that the queue
+accepted the Message. Invalid plain-user input, a full queue, and a closed Run
+return `agent.ErrInvalidSteeringMessage`, `agent.ErrSteeringQueueFull`, and
+`agent.ErrRunClosed`, respectively. The existing `user.message.added` Event,
+with `UserMessageOrigin` set to `steering`, confirms that the Message entered
+Session state. Runtime does not alter an in-flight Provider request or retry and
+does not interrupt an assistant Tool batch. It applies queued Messages after
+all Tool results in that batch, or after an end-turn response, and before
+compiling the next Provider request
+
+Once `run.waiting` is observable, `Steer` returns `agent.ErrRunWaiting`; use
+`RunHandle.Resume` with the matching request instead. Steering already queued
+before that wait remains pending until resume and Tool completion. Cancellation,
+deadline expiry, or terminal Run failure stops further application and may
+discard queued Messages without a `user.message.added` Event. The Event stream
+is the authoritative record of which Messages were applied
+
+The queue bound counts Messages, not bytes. An embedding application must
+enforce request-size and tenant memory limits before calling `Steer`
+
+Steering itself consumes no Budget. Subsequent Provider and Tool work uses the
+same active Run Budget. To send a follow-up, first drain Events and call `Wait`,
+then start a new Run with the same Session ID and configured Session Store. The
+follow-up receives a new Run ID and Runtime-local limits while replaying the
+persisted Session. Without a Store, the caller must provide prior context.
+Reuse the same `*agent.Budget` explicitly only when one shared limit must span
+both Runs
+
+Compatibility note: steering adds the optional `user_message_origin` field to
+Event JSON, and existing Hooks subscribed to `user.message.added` also observe
+steering Messages. External decoders must accept that optional field. The Go
+`agent.Event` struct gained an exported field, so external composite literals
+should use field names
 
 At shutdown, stop accepting new work, cancel or finish active Runs, and then
 call `Host.CloseContext` to drain and stop every owned Extension process

@@ -582,3 +582,79 @@ func TestMemoryStoreAllowsOnlyOneConcurrentExpectedRevision(t *testing.T) {
 		t.Fatalf("outcomes = success %d, conflict %d", success, conflict)
 	}
 }
+
+func TestSessionStoresReplaySteeringAndFollowUpBoundaries(t *testing.T) {
+	t.Parallel()
+
+	stores := map[string]func(*testing.T) agent.SessionStore{
+		"memory": func(*testing.T) agent.SessionStore { return session.NewMemoryStore() },
+		"jsonl": func(t *testing.T) agent.SessionStore {
+			store, err := session.NewJSONLStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	for name, construct := range stores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			store := construct(t)
+			initial := agent.Message{Role: agent.RoleUser, Text: "initial"}
+			first := agent.Message{Role: agent.RoleAssistant, Text: "first answer"}
+			steering := agent.Message{Role: agent.RoleUser, Text: "steering"}
+			second := agent.Message{Role: agent.RoleAssistant, Text: "second answer"}
+			followUp := agent.Message{Role: agent.RoleUser, Text: "follow up"}
+			third := agent.Message{Role: agent.RoleAssistant, Text: "third answer"}
+			events := []agent.Event{
+				{RunID: "run-first", Sequence: 1, Type: agent.EventRunStarted},
+				{RunID: "run-first", Sequence: 2, Type: agent.EventUserMessageAdded, Message: &initial},
+				{RunID: "run-first", Sequence: 3, Type: agent.EventMessageCompleted, Message: &first},
+				{
+					RunID: "run-first", Sequence: 4, Type: agent.EventUserMessageAdded,
+					UserMessageOrigin: agent.UserMessageOriginSteering,
+					Message:           &steering,
+				},
+				{RunID: "run-first", Sequence: 5, Type: agent.EventMessageCompleted, Message: &second},
+				{RunID: "run-first", Sequence: 6, Type: agent.EventRunCompleted},
+				{RunID: "run-follow-up", Sequence: 1, Type: agent.EventRunStarted},
+				{RunID: "run-follow-up", Sequence: 2, Type: agent.EventUserMessageAdded, Message: &followUp},
+				{RunID: "run-follow-up", Sequence: 3, Type: agent.EventMessageCompleted, Message: &third},
+				{RunID: "run-follow-up", Sequence: 4, Type: agent.EventRunCompleted},
+			}
+			revision, err := store.Append(context.Background(), "steering-replay", 0, events)
+			if err != nil || revision != uint64(len(events)) {
+				t.Fatalf("Append() = %d, %v", revision, err)
+			}
+			snapshot, err := store.Load(context.Background(), "steering-replay")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshot.Events) != len(events) || snapshot.Revision != uint64(len(events)) {
+				t.Fatalf("Snapshot identity = revision %d Events %d", snapshot.Revision, len(snapshot.Events))
+			}
+			for index, event := range snapshot.Events {
+				if event.SessionRevision != uint64(index+1) {
+					t.Fatalf("Event[%d] Session revision = %d", index, event.SessionRevision)
+				}
+			}
+			if got := snapshot.Events[3]; got.RunID != "run-first" || got.Sequence != 4 ||
+				got.UserMessageOrigin != agent.UserMessageOriginSteering || got.Message == nil || got.Message.Text != "steering" {
+				t.Fatalf("replayed steering Event = %#v", got)
+			}
+			if got := snapshot.Events[6]; got.RunID != "run-follow-up" || got.Sequence != 1 || got.Type != agent.EventRunStarted {
+				t.Fatalf("replayed follow-up boundary = %#v", got)
+			}
+			wantMessages := []string{"initial", "first answer", "steering", "second answer", "follow up", "third answer"}
+			if len(snapshot.Messages) != len(wantMessages) {
+				t.Fatalf("Snapshot Messages = %#v", snapshot.Messages)
+			}
+			for index, want := range wantMessages {
+				if snapshot.Messages[index].Text != want {
+					t.Fatalf("Message[%d] = %q, want %q", index, snapshot.Messages[index].Text, want)
+				}
+			}
+		})
+	}
+}

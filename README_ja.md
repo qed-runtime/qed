@@ -11,7 +11,7 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - 1つのAgent graphで利用できる複数Provider profile
 - collect、select、consensusに対応する並行サブエージェント
 - profile共有のProvider concurrency上限、cooldown、bounded retry
-- 永続Session、永続的な承認待ち、resume
+- active Runへのsteering、永続Session、terminal後のfollow-up、永続的な承認resume
 - process分離Extension内のcapability制御されたCoding Tool
 - 複数のRun固定Extension generation、Hook、Command、host所有state
 - manifest discoveryと開発時のatomic reload
@@ -257,7 +257,22 @@ Profileはworkspace相対pathを受け取り、編集時にdigestまたはabsenc
 
 詳細な境界は[Coding Profile](docs/coding-profile_ja.md)と[Extension process](docs/extensions_ja.md)を参照してください
 
-## 承認、Session resume、Evidence
+## steering、follow-up、承認resume、Evidence
+
+RuntimeとHost APIは後から与える入力を3種類に分けます
+
+- `RunHandle.Steer`はactive Runの次の安全なProvider境界へ1つのuser Messageをqueueする
+- follow-upは前のhandleがterminal resultへ達した後、設定済みSession Storeと同じSession IDで新しいRunを開始する
+- `RunHandle.Resume`はapprovalなど明示的な`run.waiting` requestへ応答する
+
+steeringは上限付きのnon-blocking queue操作です
+in-flight Provider request、retry、Tool batchは中断しません
+`UserMessageOrigin`が`steering`の`user.message.added` Eventが、MessageをSession stateへ反映した確定点です
+cancel、Deadline切れ、terminal Run failureでは、このEventへ到達していないsteeringを破棄する場合があります
+follow-upは新しいRun IDとRun local上限を持ち、Session Storeがない場合はcallerが過去contextを渡す必要があります
+複数Runで上限を共有する場合だけ同じ`*agent.Budget`を明示的に再利用します
+
+実験的TUIは引き続きsingle-turnで、steeringとfollow-upの操作はまだ公開しません
 
 Profileの`ask` listへcapabilityを置き、対話承認を有効にできます
 

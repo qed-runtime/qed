@@ -103,6 +103,11 @@ Hook handlers must honor context cancellation and should avoid long-running or
 irreversible side effects. A successful Hook can still be followed by a Session
 Store failure because Extension RPC and Store append are not one transaction
 
+Active-Run steering retains the `user.message.added` Event type and sets the
+optional `user_message_origin` field to `steering`. A Hook subscribed to that
+type receives both Run input and steering Messages, so strict protocol decoders
+must include the optional field
+
 ### Commands
 
 Commands declare a name, description, JSON input schema, and capabilities. They

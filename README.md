@@ -13,7 +13,8 @@ executable today
 - multiple Provider profiles in one Agent graph
 - concurrent subagents with collect, select, and consensus strategies
 - profile-shared Provider concurrency limits, cooldowns, and bounded retries
-- persistent Sessions, durable approval waits, and resume
+- active-Run steering, persistent Sessions, terminal follow-ups, and durable
+  approval resume
 - capability-controlled Coding Tools behind process-isolated Extensions
 - multiple Run-pinned Extension generations, Hooks, Commands, and host-owned state
 - manifest discovery and atomic development reload
@@ -274,7 +275,26 @@ is not an operating-system sandbox
 See [Coding Profile](docs/coding-profile.md) and
 [Extension processes](docs/extensions.md) for the detailed boundaries
 
-## Approval, Session resume, and Evidence
+## Steering, follow-up, approval resume, and Evidence
+
+The Runtime and Host APIs distinguish three forms of later input
+
+- `RunHandle.Steer` queues one user Message for the next safe Provider boundary
+  of the active Run
+- a follow-up starts a new Run with the same Session ID and configured Session
+  Store after the previous handle reaches a terminal result
+- `RunHandle.Resume` answers an explicit `run.waiting` request such as approval
+
+Steering is a bounded, non-blocking queue operation. It does not interrupt an
+in-flight Provider request, retry, or Tool batch. A `user.message.added` Event
+whose `UserMessageOrigin` is `steering` confirms that the Message entered
+Session state. Cancellation, deadline expiry, or terminal Run failure may
+discard steering that has not reached that Event. Follow-ups get a new Run ID
+and local limits; without a Session Store the caller must provide prior context
+itself. Reuse the same `*agent.Budget` explicitly when limits must span Runs
+
+The experimental TUI remains single-turn and does not expose steering or
+follow-up controls yet
 
 Put capabilities in a Profile's `ask` list and use interactive approval
 

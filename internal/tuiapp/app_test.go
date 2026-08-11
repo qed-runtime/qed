@@ -290,6 +290,37 @@ func TestAdapterMapsContentAndContentFreeDiagnostics(t *testing.T) {
 	}
 }
 
+func TestAdapterDistinguishesSteeringFromInitialRequest(t *testing.T) {
+	t.Parallel()
+
+	initial := adaptRunEvent(agent.Event{
+		Sequence: 1,
+		Type:     agent.EventUserMessageAdded,
+		Message:  &agent.Message{Role: agent.RoleUser, Text: "initial private request"},
+	})
+	steering := adaptRunEvent(agent.Event{
+		Sequence:          2,
+		Type:              agent.EventUserMessageAdded,
+		Message:           &agent.Message{Role: agent.RoleUser, Text: "private steering request"},
+		UserMessageOrigin: agent.UserMessageOriginSteering,
+	})
+
+	if initial.activity == nil || initial.activity.label != "Request added" {
+		t.Fatalf("initial activity = %#v", initial.activity)
+	}
+	if steering.activity == nil || steering.activity.label != "Steering added" {
+		t.Fatalf("steering activity = %#v", steering.activity)
+	}
+	for _, update := range []presentationUpdate{initial, steering} {
+		if update.activity == nil {
+			continue
+		}
+		if strings.Contains(update.activity.label, "private") {
+			t.Fatalf("activity label contains Message content: %q", update.activity.label)
+		}
+	}
+}
+
 func TestMalformedApprovalCannotBeAcceptedOrRendered(t *testing.T) {
 	t.Parallel()
 

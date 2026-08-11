@@ -33,11 +33,12 @@ CLI / TUI / embedded host
 
 ## Package boundaries
 
-`agent` owns provider-neutral Messages, model streams, Runs, budgets, ordered
-Events, Tool calls, waits, Hooks, Session contracts, cancellation, and local
-execution limits. A `ProviderRateLimitController` bounds active model streams
-and shares observed cooldowns without moving HTTP error parsing into Runtime.
-It has no filesystem, Git, CLI, TUI, or Provider wire-format behavior
+`agent` owns provider-neutral Messages, model streams, Runs, active-Run
+steering, budgets, ordered Events, Tool calls, waits, Hooks, Session contracts,
+cancellation, and local execution limits. A `ProviderRateLimitController`
+bounds active model streams and shares observed cooldowns without moving HTTP
+error parsing into Runtime. It has no filesystem, Git, CLI, TUI, or Provider
+wire-format behavior
 
 Before every Provider call, `agent.ContextCompiler` produces a canonical
 `ModelRequest` and logical Context Segments. Runtime persists a content-free
@@ -152,6 +153,31 @@ succeed
 `run.resumed` and continues the in-memory Run. A later process can load a
 persisted pending wait and resume its associated Tool call without repeating
 the completed Provider request
+
+`RunHandle.Steer` non-blockingly queues one plain, non-empty user Message in a
+bounded FIFO. Steering never changes an in-flight Provider request or retry and
+never interrupts a Tool batch. After the current assistant Message and all of
+its Tool results are complete, or after an end-turn response, Runtime appends
+queued steering as `user.message.added` Events before compiling the next
+Provider request. These Events set `UserMessageOrigin` to `steering`; Event
+publication is the observable point at which steering has entered Session
+state. A queue acceptance alone is not a persistence acknowledgement
+
+An observed `run.waiting` rejects new steering with `ErrRunWaiting`. Steering
+queued before the wait remains pending until the matching resume and Tool
+completion. Cancellation, deadline expiry, or a terminal Run failure
+stops further application and may discard queued steering without an Event.
+The Event stream is the authoritative applied-input record. Steering itself
+does not consume Budget, while its next Provider or Tool work continues to use
+the same Run Budget
+
+A follow-up is a new Run started only after the previous handle reaches a
+terminal result, using the same Session ID and configured Session Store. It
+receives a new Run ID and local Run limits while replaying the Session's
+messages. Without a Store, Session ID is identity only and the caller must
+supply any prior context. A Budget spans both Runs only when the caller
+explicitly reuses the same `*agent.Budget`. Resume, steering, and follow-up are
+therefore separate operations
 
 Before an outbound attempt, Runtime acquires Provider capacity, then charges
 the Runtime-local and shared Provider call budgets, and only then emits

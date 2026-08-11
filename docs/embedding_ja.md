@@ -138,10 +138,43 @@ outcome, err := host.Run(request.Context(), agent.RunRequest{
 
 `Host.Run`はordered Event streamをdrainし、terminal Resultと全Eventを返し、設定済みの場合はEvidence Bundleを保存します
 handler errorはRunをcancelします
-handlerはlow-level handleを受け取るため、process内のapproval Adapterからwaiting Runをresumeできます
+handlerはlow-level handleを受け取るため、process内のapproval Adapterからwaiting Runをresumeしたり、Event drainを止めずにsteeringをqueueしたりできます
 
 別requestやworkerがhandleを保持する場合、Eventを独立してstreamする場合、後からRunをresumeする場合は`Host.Start`を利用します
 `Start`のcallerがEvent drainと`Wait`を所有し、完了後に`Host.SaveRunEvidence`を呼べます
+
+active Runへplainかつnon-emptyなuser Messageを1つ追加する場合は`RunHandle.Steer`を使います
+
+```go
+err := handle.Steer(agent.Message{
+    Role: agent.RoleUser,
+    Text: "Prioritize the failing package before broader checks",
+})
+```
+
+`Steer`は`agent.MaxPendingSteeringMessages`を上限とするnon-blocking FIFO操作です
+nil errorはqueueがMessageを受理したことだけを表します
+plain user inputが不正な場合、queueが満杯の場合、Runがclose済みの場合は、それぞれ`agent.ErrInvalidSteeringMessage`、`agent.ErrSteeringQueueFull`、`agent.ErrRunClosed`を返します
+既存の`user.message.added` Eventで`UserMessageOrigin`が`steering`になった時点でSession stateへの反映が確定します
+Runtimeはin-flight Provider requestやretryを変更せず、assistantのTool batchも中断しません
+batch内の全Tool result完了後、またはend-turn response後、次のProvider requestをcompileする前にqueue済みMessageを適用します
+
+`run.waiting`を観測した後の`Steer`は`agent.ErrRunWaiting`を返すため、matching requestには`RunHandle.Resume`を使います
+wait前にqueue済みのsteeringはresumeとTool completionまで保留します
+cancel、Deadline切れ、terminal Run failureは後続の適用を停止し、`user.message.added` Eventを持たないqueue済みMessageを破棄する場合があります
+どのMessageが適用されたかはEvent streamを正とします
+
+queue上限はMessage件数でありbyte数ではありません
+組み込みapplicationは`Steer`を呼ぶ前にrequest sizeとtenant memory上限を適用する必要があります
+
+steering自体はBudgetを消費せず、後続のProviderとTool処理が同じactive Run Budgetを使います
+follow-upはEventをdrainして`Wait`を呼んだ後、設定済みSession Storeと同じSession IDで新しいRunとして開始します
+follow-upは永続Sessionをreplayしつつ新しいRun IDとRuntime local上限を持ちます
+Session Storeがない場合はcallerが過去contextを渡し、両方のRunで1つの共有上限が必要な場合だけ同じ`*agent.Budget`を明示的に再利用します
+
+互換性に関する注意として、steeringはEvent JSONへ任意fieldの`user_message_origin`を追加し、既存の`user.message.added` Hookもsteering Messageを観測します
+外部decoderはこの任意fieldを受理する必要があります
+Goの`agent.Event` structにはexported fieldが増えるため、外部のcomposite literalはfield名を指定してください
 
 shutdown時は新規workの受付を停止し、active Runをcancelまたは完了させてから`Host.CloseContext`で所有する全Extension processをdrainして停止します
 

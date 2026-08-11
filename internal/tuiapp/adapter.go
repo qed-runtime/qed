@@ -174,7 +174,11 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 		activity("Run started", "")
 	case agent.EventUserMessageAdded:
 		update.status = "running"
-		activity("Request added", "")
+		label := "Request added"
+		if event.UserMessageOrigin == agent.UserMessageOriginSteering {
+			label = "Steering added"
+		}
+		activity(label, "")
 	case agent.EventContextCompacted:
 		update.status = "preparing context"
 		activity("Context compacted", "")

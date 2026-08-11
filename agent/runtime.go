@@ -306,9 +306,10 @@ func (runtime *Runtime) Run(ctx context.Context, request RunRequest) (*RunHandle
 	}
 
 	handle := &RunHandle{
-		events: make(chan Event, runtime.eventBufferSize()),
-		done:   make(chan struct{}),
-		cancel: cancel,
+		events:       make(chan Event, runtime.eventBufferSize()),
+		done:         make(chan struct{}),
+		cancel:       cancel,
+		steeringOpen: true,
 	}
 
 	request.Input = cloneMessages(request.Input)
@@ -518,8 +519,32 @@ func (runtime *Runtime) execute(
 	handle.setWaiter(waiter)
 	defer waiter.close()
 	ctx = context.WithValue(ctx, runWaiterContextKey{}, runWaiter(waiter))
+	applySteering := func(pending []Message) error {
+		for index := range pending {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			message := cloneMessage(pending[index])
+			if err := emit(Event{
+				Type:              EventUserMessageAdded,
+				Message:           &message,
+				UserMessageOrigin: UserMessageOriginSteering,
+			}); err != nil {
+				return err
+			}
+			messages = append(messages, message)
+		}
+		if len(pending) != 0 {
+			runtime.debug("run.steering.applied",
+				"run_id", runID,
+				"message_count", len(pending),
+			)
+		}
+		return nil
+	}
 
 	finish := func(status RunStatus, eventType EventType, runErr error) {
+		handle.discardSteering()
 		event := Event{Type: eventType}
 		if runErr != nil {
 			event.Error = runErr.Error()
@@ -600,7 +625,11 @@ func (runtime *Runtime) execute(
 	}
 	for index := range request.Input {
 		input := cloneMessage(request.Input[index])
-		if err := emit(Event{Type: EventUserMessageAdded, Message: &input}); err != nil {
+		if err := emit(Event{
+			Type:              EventUserMessageAdded,
+			Message:           &input,
+			UserMessageOrigin: UserMessageOriginRunInput,
+		}); err != nil {
 			fail(err)
 			return
 		}
@@ -643,6 +672,19 @@ func (runtime *Runtime) execute(
 	for providerCalls < runtime.maxProviderCalls {
 		if err := ctx.Err(); err != nil {
 			fail(err)
+			return
+		}
+		pendingSteering, canceled := handle.takeSteering()
+		if canceled {
+			fail(context.Canceled)
+			return
+		}
+		if err := ctx.Err(); err != nil {
+			fail(err)
+			return
+		}
+		if err := applySteering(pendingSteering); err != nil {
+			fail(fmt.Errorf("apply steering input: %w", err))
 			return
 		}
 
@@ -933,8 +975,32 @@ func (runtime *Runtime) execute(
 		}
 
 		if len(message.ToolCalls) == 0 {
-			finish(RunStatusCompleted, EventRunCompleted, nil)
-			return
+			if err := ctx.Err(); err != nil {
+				fail(err)
+				return
+			}
+			pendingSteering, boundary := handle.resolveEndTurn()
+			switch boundary {
+			case steeringBoundaryCanceled:
+				fail(context.Canceled)
+				return
+			case steeringBoundaryComplete:
+				finish(RunStatusCompleted, EventRunCompleted, nil)
+				return
+			case steeringBoundaryContinue:
+				if err := ctx.Err(); err != nil {
+					fail(err)
+					return
+				}
+				if err := applySteering(pendingSteering); err != nil {
+					fail(fmt.Errorf("apply steering input: %w", err))
+					return
+				}
+				continue
+			default:
+				fail(errors.New("invalid steering boundary"))
+				return
+			}
 		}
 		if toolCalls+len(message.ToolCalls) > runtime.maxToolCalls {
 			fail(ErrToolCallLimit)
@@ -1336,16 +1402,20 @@ func (runtime *Runtime) executeToolWithDebug(ctx context.Context, runID string, 
 	return result
 }
 
-// RunHandle provides events, cancellation, and the terminal result of a Run
+// RunHandle provides Events, steering, wait resumption, cancellation, and the
+// terminal result of a Run
 type RunHandle struct {
 	events chan Event
 	done   chan struct{}
 	cancel context.CancelFunc
 
-	mu     sync.Mutex
-	result RunResult
-	err    error
-	waiter *waitBroker
+	mu              sync.Mutex
+	result          RunResult
+	err             error
+	waiter          *waitBroker
+	steering        []Message
+	steeringOpen    bool
+	cancelRequested bool
 }
 
 // Events returns the ordered event stream for the Run
@@ -1367,9 +1437,13 @@ func (handle *RunHandle) Wait() (RunResult, error) {
 	return cloneRunResult(handle.result), handle.err
 }
 
-// Cancel requests cancellation of the Run
+// Cancel requests cancellation while the Run is active
+//
+// It has no effect after the terminal transition has begun
 func (handle *RunHandle) Cancel() {
-	handle.cancel()
+	if handle != nil && handle.requestCancel() {
+		handle.cancel()
+	}
 }
 
 // Resume supplies external input to the Run's current waiting request
@@ -1402,6 +1476,8 @@ func (handle *RunHandle) setWaiter(waiter *waitBroker) {
 
 func (handle *RunHandle) complete(result RunResult, err error) {
 	handle.mu.Lock()
+	handle.steeringOpen = false
+	handle.steering = nil
 	handle.result = cloneRunResult(result)
 	handle.err = err
 	handle.mu.Unlock()

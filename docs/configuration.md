@@ -504,6 +504,19 @@ Events and reconstructs messages, pending waits, and pending Tool calls. Use
 accepts `--approval prompt|approve|deny`; other wait kinds require
 `--response-json`
 
+Active-Run steering keeps the existing `user.message.added` Event type and sets
+`Event.UserMessageOrigin` to `steering`. Queue acceptance is process-local; the
+Event is the durable Session boundary. Steering that has not emitted that Event
+may be discarded by cancellation, deadline expiry, or terminal Run
+failure
+
+A follow-up is a new Run started with the same Session ID only after the
+previous handle reaches a terminal result. It replays the Session but receives
+a new Run ID and new Runtime-local Provider and Tool limits. Session Stores do
+not persist `agent.Budget`; reuse the same `*agent.Budget` explicitly when one
+budget must span follow-up Runs. Without a configured Session Store, Session ID
+does not retain messages and the caller must supply prior context
+
 ## Evidence Store
 
 ```json

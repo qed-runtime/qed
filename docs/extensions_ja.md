@@ -90,6 +90,9 @@ ToolとHookは完全なRunに対して同じgeneration setからatomicに取得�
 Hook handlerはcontext cancellationに従い、長時間または不可逆なside effectを避ける必要があります
 Extension RPCとStore appendは単一transactionではないため、Hook成功後にSession Storeが失敗する可能性があります
 
+active Runのsteeringは`user.message.added` Event typeを維持し、任意fieldの`user_message_origin`を`steering`に設定します
+このtypeを購読するHookはRun inputとsteering Messageの両方を受け取るため、strict protocol decoderは任意fieldを含める必要があります
+
 ### Command
 
 Commandはname、description、JSON input schema、capabilityを宣言します
