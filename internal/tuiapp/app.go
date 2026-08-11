@@ -3,7 +3,6 @@ package tuiapp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -35,8 +34,7 @@ const (
 
 type message struct {
 	kind   messageKind
-	event  agent.Event
-	result agent.RunResult
+	update presentationUpdate
 	err    error
 }
 
@@ -50,20 +48,16 @@ type eventBridge struct {
 }
 
 type runView struct {
-	prompt       string
+	presentation runPresentation
 	messages     <-chan message
 	cancelRun    func()
-	resumeRun    func(agent.WaitResponse) error
-	events       []agent.Event
-	status       string
-	answer       string
+	resolveWait  func(string, bool) error
 	runErr       error
 	finished     bool
 	exiting      bool
 	canceled     bool
 	streamDone   chan struct{}
 	streamClosed sync.Once
-	pendingWait  *agent.WaitRequest
 }
 
 // StartFunc starts one Run for the TUI without coupling it to a concrete Harness
@@ -120,7 +114,19 @@ func RunWithStarterOutcome(ctx context.Context, start StartFunc, request agent.R
 
 	bridge := newEventBridge(handle)
 
-	view := newRunView(prompt, bridge.messages, handle.Cancel, handle.Resume)
+	view := newRunView(
+		prompt,
+		runIdentity{agentID: request.AgentID, sessionID: request.SessionID},
+		bridge.messages,
+		handle.Cancel,
+		func(requestID string, approved bool) error {
+			response, responseErr := approvalWaitResponse(requestID, approved)
+			if responseErr != nil {
+				return responseErr
+			}
+			return handle.Resume(response)
+		},
+	)
 	terminalErr := tui.RunTerminalContext(
 		ctx,
 		view,
@@ -166,11 +172,11 @@ func (bridge *eventBridge) consume(ctx context.Context, handle *agent.RunHandle)
 			if !ok {
 				result, err := handle.Wait()
 				bridge.recordResult(result)
-				bridge.send(ctx, message{kind: runResultMessage, result: result, err: err})
+				bridge.send(ctx, message{kind: runResultMessage, update: adaptRunResult(result, err), err: err})
 				return
 			}
 			bridge.recordEvent(event)
-			if !bridge.send(ctx, message{kind: runEventMessage, event: event}) {
+			if !bridge.send(ctx, message{kind: runEventMessage, update: adaptRunEvent(event)}) {
 				bridge.cancelAndDrain(handle)
 				return
 			}
@@ -227,17 +233,17 @@ func (bridge *eventBridge) Outcome() Outcome {
 
 func newRunView(
 	prompt string,
+	identity runIdentity,
 	messages <-chan message,
 	cancelRun func(),
-	resumeRun func(agent.WaitResponse) error,
+	resolveWait func(string, bool) error,
 ) *runView {
 	return &runView{
-		prompt:     prompt,
-		messages:   messages,
-		cancelRun:  cancelRun,
-		resumeRun:  resumeRun,
-		status:     "starting",
-		streamDone: make(chan struct{}),
+		presentation: newRunPresentation(prompt, identity),
+		messages:     messages,
+		cancelRun:    cancelRun,
+		resolveWait:  resolveWait,
+		streamDone:   make(chan struct{}),
 	}
 }
 
@@ -248,24 +254,11 @@ func (*runView) Init() tui.Effect[message] {
 func (view *runView) Update(value message) tui.Effect[message] {
 	switch value.kind {
 	case runEventMessage:
-		view.appendEvent(value.event)
-		view.status = string(value.event.Type)
-		if value.event.Type == agent.EventRunWaiting && value.event.WaitRequest != nil {
-			wait := *value.event.WaitRequest
-			wait.Payload = append(json.RawMessage(nil), value.event.WaitRequest.Payload...)
-			view.pendingWait = &wait
-		}
+		view.presentation.apply(value.update)
 	case runResultMessage:
+		view.presentation.apply(value.update)
 		view.finished = true
 		view.runErr = value.err
-		if value.err != nil {
-			view.status = "failed"
-		} else {
-			view.status = string(value.result.Status)
-			if answer, ok := lastAssistantMessage(value.result.Messages); ok {
-				view.answer = answer.Text
-			}
-		}
 	case quitMessage:
 		view.exiting = true
 		view.cancelRun()
@@ -310,77 +303,97 @@ func (view *runView) Subscriptions() tui.Subscription[message] {
 }
 
 func (view *runView) View(_ tui.ViewContext) tui.Node[message] {
-	eventNodes := make([]tui.Node[message], 0, max(len(view.events), 1))
-	if len(view.events) == 0 {
-		eventNodes = append(eventNodes, tui.Text[message]("Waiting for Run events..."))
+	activityNodes := make([]tui.Node[message], 0, max(len(view.presentation.activities), 1))
+	if len(view.presentation.activities) == 0 {
+		activityNodes = append(activityNodes, tui.Text[message]("Waiting for Run activity..."))
 	} else {
-		for _, event := range view.events {
-			eventNodes = append(eventNodes, tui.Text[message](fmt.Sprintf(
+		for _, activity := range view.presentation.activities {
+			label := activity.label
+			if activity.state != "" {
+				label += " [" + string(activity.state) + "]"
+			}
+			activityNodes = append(activityNodes, tui.Text[message](fmt.Sprintf(
 				"%03d  %s",
-				event.Sequence,
-				event.Type,
+				activity.sequence,
+				label,
 			)))
 		}
 	}
 
 	answer := "-"
-	if view.answer != "" {
-		answer = view.answer
+	if view.presentation.answer != "" {
+		answer = view.presentation.answer
 	}
 	help := "Q/Esc quit  Ctrl-C cancel"
-	if view.pendingWait != nil {
+	if view.presentation.pendingApproval != nil {
 		help = "Approval required  Y approve  N deny  Q/Esc quit"
+	} else if view.presentation.waitingUnsupported {
+		help = "Input cannot be handled here  Q/Esc quit"
 	}
 	if view.finished {
 		help = "Run finished  Q/Esc quit"
 	}
+	identity := fmt.Sprintf(
+		"Agent: %s  Session: %s  Run: %s",
+		displayIdentity(view.presentation.identity.agentID),
+		displayIdentity(view.presentation.identity.sessionID),
+		displayIdentity(view.presentation.identity.runID),
+	)
+	approval := ""
+	if view.presentation.pendingApproval != nil {
+		approval = "Approval: Tool " + view.presentation.pendingApproval.tool
+		if len(view.presentation.pendingApproval.capabilities) != 0 {
+			approval += " [" + strings.Join(view.presentation.pendingApproval.capabilities, ", ") + "]"
+		}
+	}
+	content := []tui.Node[message]{
+		tui.StyledText[message]("QED Runtime", vt.Style{Bold: true}).WithLength(tui.Fixed(1)),
+		tui.Text[message](identity).WithLength(tui.Fixed(1)),
+		tui.Text[message]("Prompt: " + view.presentation.prompt).WithLength(tui.Fixed(1)),
+		tui.Text[message]("Status: " + view.presentation.status).WithLength(tui.Fixed(1)),
+		tui.Text[message]("Answer: " + answer).WithLength(tui.Fixed(1)),
+	}
+	if approval != "" {
+		content = append(content, tui.Text[message](approval).WithLength(tui.Fixed(1)))
+	}
+	content = append(content,
+		tui.ScrollViewportWithOptions(
+			eventViewportID,
+			tui.Column(activityNodes...),
+			tui.ScrollViewportOptions[message]{
+				Axis:       tui.ScrollAxisVertical,
+				StickToEnd: true,
+			},
+		).WithLength(tui.Flex(1)),
+		tui.Text[message](help).WithLength(tui.Fixed(1)),
+	)
 
 	return tui.Panel(
-		tui.Column(
-			tui.StyledText[message]("QED Runtime", vt.Style{Bold: true}).WithLength(tui.Fixed(1)),
-			tui.Text[message]("Prompt: "+view.prompt).WithLength(tui.Fixed(1)),
-			tui.Text[message]("Status: "+view.status).WithLength(tui.Fixed(1)),
-			tui.Text[message]("Answer: "+answer).WithLength(tui.Fixed(1)),
-			tui.ScrollViewportWithOptions(
-				eventViewportID,
-				tui.Column(eventNodes...),
-				tui.ScrollViewportOptions[message]{
-					Axis:       tui.ScrollAxisVertical,
-					StickToEnd: true,
-				},
-			).WithLength(tui.Flex(1)),
-			tui.Text[message](help).WithLength(tui.Fixed(1)),
-		),
+		tui.Column(content...),
 		"Agent Run",
 	)
 }
 
-func (view *runView) appendEvent(event agent.Event) {
-	if len(view.events) == maximumEventHistory {
-		copy(view.events, view.events[1:])
-		view.events[len(view.events)-1] = event
-		return
+func displayIdentity(value string) string {
+	if value == "" {
+		return "-"
 	}
-	view.events = append(view.events, event)
+	return value
 }
 
 func (view *runView) resolveApproval(approved bool) {
-	if view.pendingWait == nil || view.pendingWait.Kind != agent.WaitKindApproval || view.resumeRun == nil {
+	if view.presentation.pendingApproval == nil || view.resolveWait == nil {
 		return
 	}
-	payload, err := json.Marshal(struct {
-		Approved bool `json:"approved"`
-	}{Approved: approved})
-	if err == nil {
-		err = view.resumeRun(agent.WaitResponse{RequestID: view.pendingWait.ID, Payload: payload})
-	}
+	requestID := view.presentation.pendingApproval.requestID
+	err := view.resolveWait(requestID, approved)
 	if err != nil {
 		view.runErr = err
-		view.status = "approval failed"
+		view.presentation.status = "approval failed"
 		return
 	}
-	view.pendingWait = nil
-	view.status = "resuming"
+	view.runErr = nil
+	view.presentation.resolveApproval(approved)
 }
 
 func mapEvent(event vt.Event) tui.EventAction[message] {

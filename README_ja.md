@@ -292,6 +292,9 @@ TUIは`--config`、`--agent`、`--workspace`、`--session-id`にも対応し、�
 Runが承認待ちになった場合は`Y`で許可、`N`で拒否します
 `Q`またはEscapeで終了し、Ctrl-Cはstatus 130のcancelとして扱います
 
+TUIはassistant textをstream表示し、Agent、Session、Run、Tool、approval Capabilityの本文なしactivityを表示します
+Tool引数、Tool出力、raw wait payload、raw Run errorはrendering用の表示状態へ保持しません
+
 ## 外部Extensionの開発
 
 外部Extension directoryには`qed-extension.json`を配置します

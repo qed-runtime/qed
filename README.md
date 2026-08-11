@@ -312,6 +312,11 @@ and uses the same configured Agent graph. When a Run waits for approval, press
 `Y` to approve or `N` to deny. Press `Q` or Escape to exit, or Ctrl-C to report
 cancellation with status 130
 
+The view streams assistant text and shows content-free Run activity with Agent,
+Session, Run, Tool, and approval capability metadata. Tool arguments, Tool
+output, raw wait payloads, and raw Run errors are not copied into the rendered
+view state
+
 ## Develop an external Extension
 
 An external Extension directory contains `qed-extension.json`. Start a
