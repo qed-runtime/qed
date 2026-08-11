@@ -26,8 +26,9 @@ Use the lowest layer that matches the containing application
 | `qed.Host` | Load a complete Agent graph and own Profile, Store, and Extension lifecycle |
 
 `qed.Host` is transport-neutral. It does not start a network listener or choose
-authentication, authorization, rate limiting, tenancy, or request schemas for
-the containing application
+authentication, authorization, inbound client or tenant rate limiting,
+tenancy, or request schemas for the containing application. QED separately
+enforces configured outbound Provider concurrency and cooldown policies
 
 ## Application-owned self-exec catalog
 
@@ -120,6 +121,11 @@ external executable
 ## Running from a server request
 
 `Host` is safe for concurrent Runs after loading
+
+All Runs loaded from one configuration share the limiter associated with each
+Provider profile. This bounds concurrent outbound model streams across server
+requests as well as subagents. The containing application must still apply its
+own admission, tenant, cost, and request-rate policies before starting a Run
 
 ```go
 outcome, err := host.Run(request.Context(), agent.RunRequest{

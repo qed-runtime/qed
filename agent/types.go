@@ -291,18 +291,20 @@ const (
 	EventRunStarted       EventType = "run.started"
 	EventUserMessageAdded EventType = "user.message.added"
 	EventContextCompacted EventType = "context.compacted"
-	EventModelRequest     EventType = "model.request.started"
-	EventProviderRetry    EventType = "provider.retry.scheduled"
-	EventMessageStarted   EventType = "message.started"
-	EventMessageDelta     EventType = "message.delta"
-	EventMessageCompleted EventType = "message.completed"
-	EventToolStarted      EventType = "tool.started"
-	EventToolCompleted    EventType = "tool.completed"
-	EventRunWaiting       EventType = "run.waiting"
-	EventRunResumed       EventType = "run.resumed"
-	EventRunCompleted     EventType = "run.completed"
-	EventRunFailed        EventType = "run.failed"
-	EventRunCanceled      EventType = "run.canceled"
+	// EventProviderRateLimitWait reports a queued outbound Provider attempt
+	EventProviderRateLimitWait EventType = "provider.rate_limit.waiting"
+	EventModelRequest          EventType = "model.request.started"
+	EventProviderRetry         EventType = "provider.retry.scheduled"
+	EventMessageStarted        EventType = "message.started"
+	EventMessageDelta          EventType = "message.delta"
+	EventMessageCompleted      EventType = "message.completed"
+	EventToolStarted           EventType = "tool.started"
+	EventToolCompleted         EventType = "tool.completed"
+	EventRunWaiting            EventType = "run.waiting"
+	EventRunResumed            EventType = "run.resumed"
+	EventRunCompleted          EventType = "run.completed"
+	EventRunFailed             EventType = "run.failed"
+	EventRunCanceled           EventType = "run.canceled"
 )
 
 // ProviderErrorInfo describes a Provider failure without response content
@@ -323,6 +325,27 @@ type ProviderRetryInfo struct {
 	NextAttempt int `json:"next_attempt"`
 	// DelayMilliseconds is the effective delay before NextAttempt
 	DelayMilliseconds int64 `json:"delay_ms"`
+}
+
+// ProviderRateLimitWaitReason identifies why a Provider attempt is waiting
+type ProviderRateLimitWaitReason string
+
+// Provider rate-limit wait reasons
+const (
+	// ProviderRateLimitWaitConcurrency means every active-stream permit is occupied
+	ProviderRateLimitWaitConcurrency ProviderRateLimitWaitReason = "concurrency"
+	// ProviderRateLimitWaitCooldown means an observed rate-limit delay is active
+	ProviderRateLimitWaitCooldown ProviderRateLimitWaitReason = "cooldown"
+)
+
+// ProviderRateLimitWaitInfo describes a wait before an outbound Provider attempt
+type ProviderRateLimitWaitInfo struct {
+	// Reason identifies the active concurrency or shared cooldown constraint
+	Reason ProviderRateLimitWaitReason `json:"reason"`
+	// MaxConcurrency is the active stream limit shared by the Provider pool
+	MaxConcurrency int `json:"max_concurrency"`
+	// RetryAfterMilliseconds is the remaining shared cooldown when known
+	RetryAfterMilliseconds int64 `json:"retry_after_ms,omitempty"`
 }
 
 // Event is one ordered state change emitted by a Run
@@ -356,6 +379,8 @@ type Event struct {
 	ProviderError *ProviderErrorInfo `json:"provider_error,omitempty"`
 	// ProviderRetry describes the transient failure and scheduled retry delay
 	ProviderRetry *ProviderRetryInfo `json:"provider_retry,omitempty"`
+	// ProviderRateLimitWait describes why an outbound Provider attempt is queued
+	ProviderRateLimitWait *ProviderRateLimitWaitInfo `json:"provider_rate_limit_wait,omitempty"`
 	// ContextCheckpoint is the newly published Checkpoint for context.compacted
 	ContextCheckpoint *ContextCheckpoint `json:"context_checkpoint,omitempty"`
 	// ContextCompaction describes the provider-neutral reduction for context.compacted

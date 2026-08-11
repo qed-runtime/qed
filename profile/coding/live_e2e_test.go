@@ -416,6 +416,25 @@ func TestLiveCodingEventTraceOmitsContent(t *testing.T) {
 	}
 }
 
+func TestLiveCodingEventTraceReportsProviderRateLimitWait(t *testing.T) {
+	trace := &liveCodingEventTrace{}
+	summary := trace.observe(agent.Event{
+		Sequence:        1,
+		Type:            agent.EventProviderRateLimitWait,
+		Time:            time.Unix(1_800_000_000, 0).UTC(),
+		ProviderAttempt: 2,
+		ProviderRateLimitWait: &agent.ProviderRateLimitWaitInfo{
+			Reason:                 agent.ProviderRateLimitWaitCooldown,
+			MaxConcurrency:         4,
+			RetryAfterMilliseconds: 750,
+		},
+	})
+	want := "live trace elapsed_ms=0 sequence=1 event=provider.rate_limit.waiting attempt=2 reason=cooldown max_concurrency=4 retry_after_ms=750"
+	if summary != want {
+		t.Fatalf("live trace = %q, want %q", summary, want)
+	}
+}
+
 func TestSafeLiveCodingToolErrorClass(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -1147,6 +1166,18 @@ func (trace *liveCodingEventTrace) observe(event agent.Event) string {
 	switch event.Type {
 	case agent.EventRunStarted, agent.EventContextCompacted:
 		return prefix
+	case agent.EventProviderRateLimitWait:
+		if event.ProviderRateLimitWait == nil {
+			return prefix
+		}
+		return fmt.Sprintf(
+			"%s attempt=%d reason=%s max_concurrency=%d retry_after_ms=%d",
+			prefix,
+			event.ProviderAttempt,
+			event.ProviderRateLimitWait.Reason,
+			event.ProviderRateLimitWait.MaxConcurrency,
+			event.ProviderRateLimitWait.RetryAfterMilliseconds,
+		)
 	case agent.EventModelRequest:
 		if event.ProviderCall > 0 {
 			trace.providerCall = event.ProviderCall

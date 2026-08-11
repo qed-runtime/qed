@@ -269,6 +269,82 @@ func TestRunTeamExecutesCandidatesConcurrentlyAndKeepsOrder(t *testing.T) {
 	}
 }
 
+func TestRunTeamRespectsSharedProviderConcurrencyLimit(t *testing.T) {
+	t.Parallel()
+
+	limiter, err := agent.NewProviderRateLimiter(agent.ProviderRateLimitPolicy{MaxConcurrency: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan string, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	newRuntime := func(name string) *agent.Runtime {
+		runtime, runtimeErr := agent.NewRuntime(agent.Options{
+			Provider: gatedProvider{
+				name: name, output: name, entered: entered, release: release,
+			},
+			ProviderRateLimiter: limiter,
+		})
+		if runtimeErr != nil {
+			t.Fatal(runtimeErr)
+		}
+		return runtime
+	}
+	registry := newTestRegistry(t, orchestration.AgentRegistryOptions{
+		Agents: []orchestration.AgentDefinition{
+			{ID: "first", Runtime: newRuntime("first")},
+			{ID: "second", Runtime: newRuntime("second")},
+		},
+		MaxProviderCalls: 2,
+	})
+
+	type teamResponse struct {
+		result orchestration.TeamResult
+		err    error
+	}
+	response := make(chan teamResponse, 1)
+	go func() {
+		result, runErr := registry.RunTeam(context.Background(), orchestration.TeamRequest{
+			Strategy: orchestration.TeamStrategyCollect,
+			AgentIDs: []string{"first", "second"},
+			Input:    []agent.Message{{Role: agent.RoleUser, Text: "compare"}},
+		})
+		response <- teamResponse{result: result, err: runErr}
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first candidate Provider did not start")
+	}
+	select {
+	case name := <-entered:
+		t.Fatalf("Provider %q exceeded the shared concurrency limit", name)
+	case <-time.After(25 * time.Millisecond):
+	}
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("queued candidate Provider did not start")
+	}
+
+	team := <-response
+	if team.err != nil {
+		t.Fatalf("RunTeam() error = %v", team.err)
+	}
+	if len(team.result.Candidates) != 2 {
+		t.Fatalf("candidate count = %d, want 2", len(team.result.Candidates))
+	}
+	for _, candidate := range team.result.Candidates {
+		if candidate.Result.ProviderCalls != 1 {
+			t.Fatalf("candidate %q Provider calls = %d, want 1", candidate.AgentID, candidate.Result.ProviderCalls)
+		}
+	}
+}
+
 func TestRunTeamSelectReturnsChosenCandidateOriginalOutput(t *testing.T) {
 	t.Parallel()
 

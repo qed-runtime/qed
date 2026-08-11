@@ -64,6 +64,10 @@ type Options struct {
 	CachePolicy CachePolicy
 	// ProviderRetry controls bounded retries before Provider output becomes observable
 	ProviderRetry ProviderRetryPolicy
+	// ProviderRateLimiter bounds active streams and coordinates rate-limit cooldowns
+	//
+	// Share one limiter between Runtimes backed by the same Provider rate-limit pool
+	ProviderRateLimiter ProviderRateLimitController
 	// Logger receives safe structured debug diagnostics without message content,
 	// Tool arguments, Tool output, metadata values, or Provider-private state
 	Logger *slog.Logger
@@ -85,6 +89,7 @@ type Runtime struct {
 	cachePlanner     CachePlanner
 	cachePolicy      CachePolicy
 	providerRetry    ProviderRetryPolicy
+	providerLimiter  ProviderRateLimitController
 	logger           *slog.Logger
 	sessionMu        sync.Mutex
 	sessionLocks     map[string]*runtimeSessionLock
@@ -154,6 +159,17 @@ func NewRuntime(options Options) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("configure Provider retry: %w", err)
 	}
+	providerLimiter := options.ProviderRateLimiter
+	if providerLimiter == nil {
+		providerLimiter = &ProviderRateLimiter{}
+	}
+	providerMaxConcurrency := providerLimiter.MaxConcurrency()
+	if providerMaxConcurrency <= 0 || providerMaxConcurrency > maximumProviderConcurrency {
+		return nil, fmt.Errorf(
+			"Provider rate limiter max concurrency must be between 1 and %d",
+			maximumProviderConcurrency,
+		)
+	}
 
 	return &Runtime{
 		provider:         options.Provider,
@@ -168,6 +184,7 @@ func NewRuntime(options Options) (*Runtime, error) {
 		cachePlanner:     cachePlanner,
 		cachePolicy:      cachePolicy,
 		providerRetry:    providerRetry,
+		providerLimiter:  providerLimiter,
 		logger:           options.Logger,
 		sessionLocks:     make(map[string]*runtimeSessionLock),
 	}, nil
@@ -695,7 +712,53 @@ func (runtime *Runtime) execute(
 				fail(ErrProviderCallLimit)
 				return
 			}
+			releaseProvider, waitDuration, err := runtime.providerLimiter.Acquire(
+				ctx,
+				func(wait ProviderRateLimitWaitInfo) error {
+					if err := validateProviderRateLimitWait(
+						wait,
+						runtime.providerLimiter.MaxConcurrency(),
+					); err != nil {
+						return err
+					}
+					runtime.debug("provider.rate_limit.waiting",
+						"run_id", runID,
+						"provider", runtime.provider.Name(),
+						"attempt", providerAttempt+1,
+						"reason", wait.Reason,
+						"max_concurrency", wait.MaxConcurrency,
+						"retry_after_ms", wait.RetryAfterMilliseconds,
+					)
+					return emit(Event{
+						Type:                  EventProviderRateLimitWait,
+						ProviderAttempt:       providerAttempt + 1,
+						ProviderRateLimitWait: &wait,
+					})
+				},
+			)
+			if err != nil {
+				fail(err)
+				return
+			}
+			if releaseProvider == nil {
+				fail(errors.New("Provider rate limiter returned a nil release function"))
+				return
+			}
+			if err := ctx.Err(); err != nil {
+				releaseProvider()
+				fail(err)
+				return
+			}
+			if waitDuration > 0 {
+				runtime.debug("provider.rate_limit.acquired",
+					"run_id", runID,
+					"provider", runtime.provider.Name(),
+					"attempt", providerAttempt+1,
+					"wait_ms", waitDuration.Milliseconds(),
+				)
+			}
 			if err := request.Budget.consumeProviderCall(); err != nil {
+				releaseProvider()
 				fail(err)
 				return
 			}
@@ -718,6 +781,7 @@ func (runtime *Runtime) execute(
 				ProviderCall:    providerCalls,
 				ProviderAttempt: providerAttempt,
 			}); err != nil {
+				releaseProvider()
 				fail(err)
 				return
 			}
@@ -736,6 +800,27 @@ func (runtime *Runtime) execute(
 					func(delta string) error { return emit(Event{Type: EventMessageDelta, Delta: delta}) },
 				)
 			}
+			var errorInfo providerbase.ErrorInfo
+			var retryDelay time.Duration
+			if providerErr != nil && providerFailure {
+				errorInfo = providerbase.ClassifyError(providerErr)
+				retryDelay = providerRetryDelayWithJitter(
+					runtime.providerRetry,
+					providerAttempt,
+					errorInfo.RetryAfter,
+					runID,
+				)
+				if errorInfo.Code == providerbase.ErrorCodeRateLimited {
+					runtime.providerLimiter.ObserveRateLimit(retryDelay)
+					runtime.debug("provider.rate_limit.updated",
+						"run_id", runID,
+						"provider", runtime.provider.Name(),
+						"attempt", providerAttempt,
+						"cooldown_ms", retryDelay.Milliseconds(),
+					)
+				}
+			}
+			releaseProvider()
 			if providerErr == nil {
 				runtime.debug("provider.stream.completed",
 					"run_id", runID,
@@ -752,7 +837,6 @@ func (runtime *Runtime) execute(
 				return
 			}
 
-			errorInfo := providerbase.ClassifyError(providerErr)
 			classifiedError := &runtimeProviderError{
 				providerName: runtime.provider.Name(),
 				phase:        phase,
@@ -779,11 +863,10 @@ func (runtime *Runtime) execute(
 				return
 			}
 
-			delay := providerRetryDelay(runtime.providerRetry, providerAttempt, errorInfo.RetryAfter)
 			retry := ProviderRetryInfo{
 				Error:             classifiedError.eventInfo(),
 				NextAttempt:       providerAttempt + 1,
-				DelayMilliseconds: delay.Milliseconds(),
+				DelayMilliseconds: retryDelay.Milliseconds(),
 			}
 			if err := emit(Event{
 				Type:            EventProviderRetry,
@@ -800,10 +883,10 @@ func (runtime *Runtime) execute(
 				"call", providerCalls,
 				"attempt", providerAttempt,
 				"next_attempt", providerAttempt+1,
-				"delay_ms", delay.Milliseconds(),
+				"delay_ms", retryDelay.Milliseconds(),
 				"error_code", errorInfo.Code,
 			)
-			if err := waitForProviderRetry(ctx, delay); err != nil {
+			if err := waitForProviderRetry(ctx, retryDelay); err != nil {
 				fail(err)
 				return
 			}
@@ -1425,6 +1508,10 @@ func cloneEvent(event Event) Event {
 	if event.ProviderRetry != nil {
 		providerRetry := *event.ProviderRetry
 		event.ProviderRetry = &providerRetry
+	}
+	if event.ProviderRateLimitWait != nil {
+		providerWait := *event.ProviderRateLimitWait
+		event.ProviderRateLimitWait = &providerWait
 	}
 	event.ContextCheckpoint = cloneContextCheckpointPointer(event.ContextCheckpoint)
 	event.ContextCompaction = cloneContextCompactionReport(event.ContextCompaction)

@@ -25,7 +25,8 @@ QED rootの`extensions.lock`は公式`qed` executableへ組み込むExtensionだ
 | `qed.Host` | 完全なAgent graphを読み込み、Profile、Store、Extension lifecycleを所有する |
 
 `qed.Host`はtransport-neutralです
-network listener、authentication、authorization、rate limit、tenant、request schemaは組み込み先applicationが所有します
+network listener、authentication、authorization、inbound clientまたはtenant rate limit、tenant、request schemaは組み込み先applicationが所有します
+QEDはこれとは別に、設定済みoutbound Provider concurrencyとcooldown policyを適用します
 
 ## application所有のself-exec catalog
 
@@ -113,6 +114,10 @@ defer host.Close()
 ## server requestから実行する
 
 読み込み後の`Host`は複数Runから並行利用できます
+
+1つの設定からloadした全RunはProvider profileごとのlimiterを共有します
+これによりserver requestとsubagentを横断して並行outbound model streamを制限します
+組み込み先applicationはRun開始前のadmission、tenant、cost、request rate policyを引き続き所有します
 
 ```go
 outcome, err := host.Run(request.Context(), agent.RunRequest{

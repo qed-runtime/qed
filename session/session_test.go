@@ -294,6 +294,55 @@ func TestSessionStoresIsolateCachePlans(t *testing.T) {
 	}
 }
 
+func TestSessionStoresPreserveProviderRateLimitWait(t *testing.T) {
+	t.Parallel()
+
+	stores := map[string]func(*testing.T) agent.SessionStore{
+		"memory": func(*testing.T) agent.SessionStore { return session.NewMemoryStore() },
+		"jsonl": func(t *testing.T) agent.SessionStore {
+			store, err := session.NewJSONLStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	for name, construct := range stores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := construct(t)
+			wait := &agent.ProviderRateLimitWaitInfo{
+				Reason:                 agent.ProviderRateLimitWaitCooldown,
+				MaxConcurrency:         2,
+				RetryAfterMilliseconds: 1250,
+			}
+			if _, err := store.Append(context.Background(), "provider-wait", 0, []agent.Event{{
+				Type:                  agent.EventProviderRateLimitWait,
+				ProviderAttempt:       2,
+				ProviderRateLimitWait: wait,
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			wait.Reason = agent.ProviderRateLimitWaitConcurrency
+			wait.MaxConcurrency = 99
+
+			snapshot, err := store.Load(context.Background(), "provider-wait")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshot.Events) != 1 || snapshot.Events[0].ProviderRateLimitWait == nil {
+				t.Fatalf("Snapshot Events = %#v", snapshot.Events)
+			}
+			stored := snapshot.Events[0].ProviderRateLimitWait
+			if snapshot.Events[0].ProviderAttempt != 2 ||
+				stored.Reason != agent.ProviderRateLimitWaitCooldown ||
+				stored.MaxConcurrency != 2 || stored.RetryAfterMilliseconds != 1250 {
+				t.Fatalf("stored Provider wait = %#v", snapshot.Events[0])
+			}
+		})
+	}
+}
+
 func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 	t.Parallel()
 

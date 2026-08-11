@@ -246,15 +246,20 @@ type registryLimits struct {
 }
 
 type providerProfile struct {
-	Protocol          string                   `json:"protocol"`
-	BaseURL           string                   `json:"base_url,omitempty"`
-	Model             string                   `json:"model,omitempty"`
-	TokenEnv          string                   `json:"token_env,omitempty"`
-	AuthProfile       string                   `json:"auth_profile,omitempty"`
-	MaxOutputTokens   int                      `json:"max_output_tokens,omitempty"`
-	APIVersion        string                   `json:"api_version,omitempty"`
-	Pricing           *cachePricingProfile     `json:"pricing,omitempty"`
-	CacheCapabilities *agent.CacheCapabilities `json:"cache_capabilities,omitempty"`
+	Protocol          string                    `json:"protocol"`
+	BaseURL           string                    `json:"base_url,omitempty"`
+	Model             string                    `json:"model,omitempty"`
+	TokenEnv          string                    `json:"token_env,omitempty"`
+	AuthProfile       string                    `json:"auth_profile,omitempty"`
+	MaxOutputTokens   int                       `json:"max_output_tokens,omitempty"`
+	APIVersion        string                    `json:"api_version,omitempty"`
+	Pricing           *cachePricingProfile      `json:"pricing,omitempty"`
+	CacheCapabilities *agent.CacheCapabilities  `json:"cache_capabilities,omitempty"`
+	RateLimit         *providerRateLimitProfile `json:"rate_limit,omitempty"`
+}
+
+type providerRateLimitProfile struct {
+	MaxConcurrency int `json:"max_concurrency,omitempty"`
 }
 
 type agentProfile struct {
@@ -356,7 +361,7 @@ func build(document fileConfig, options LoadOptions, configurationDirectory stri
 		return nil, errors.New("at least one agent is required")
 	}
 
-	providers, err := buildProviders(document.Providers, options)
+	providers, providerLimiters, err := buildProviders(document.Providers, options)
 	if err != nil {
 		return nil, err
 	}
@@ -415,6 +420,7 @@ func build(document fileConfig, options LoadOptions, configurationDirectory stri
 	builder := graphBuilder{
 		agents:    document.Agents,
 		providers: providers,
+		limiters:  providerLimiters,
 		profiles:  profiles,
 		registry:  registry,
 		sessions:  sessions,
@@ -843,19 +849,36 @@ func selectedEnvironment(names []string, lookupEnv LookupEnv) (map[string]string
 	return result, nil
 }
 
-func buildProviders(profiles map[string]providerProfile, options LoadOptions) (map[string]agent.Provider, error) {
+func buildProviders(
+	profiles map[string]providerProfile,
+	options LoadOptions,
+) (map[string]agent.Provider, map[string]*agent.ProviderRateLimiter, error) {
 	providers := make(map[string]agent.Provider, len(profiles))
+	limiters := make(map[string]*agent.ProviderRateLimiter, len(profiles))
 	for _, profileID := range sortedKeys(profiles) {
 		if err := validateID("provider profile ID", profileID); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		configured, err := buildProvider(profileID, profiles[profileID], options)
 		if err != nil {
-			return nil, fmt.Errorf("provider profile %q: %w", profileID, err)
+			return nil, nil, fmt.Errorf("provider profile %q: %w", profileID, err)
+		}
+		limiter, err := buildProviderRateLimiter(profiles[profileID].RateLimit)
+		if err != nil {
+			return nil, nil, fmt.Errorf("provider profile %q rate limit: %w", profileID, err)
 		}
 		providers[profileID] = configured
+		limiters[profileID] = limiter
 	}
-	return providers, nil
+	return providers, limiters, nil
+}
+
+func buildProviderRateLimiter(specification *providerRateLimitProfile) (*agent.ProviderRateLimiter, error) {
+	policy := agent.ProviderRateLimitPolicy{}
+	if specification != nil {
+		policy.MaxConcurrency = specification.MaxConcurrency
+	}
+	return agent.NewProviderRateLimiter(policy)
 }
 
 func buildProvider(profileID string, profile providerProfile, options LoadOptions) (agent.Provider, error) {
@@ -924,7 +947,7 @@ func buildProvider(profileID string, profile providerProfile, options LoadOption
 		}
 		if profile.BaseURL != "" || profile.TokenEnv != "" || profile.MaxOutputTokens != 0 || profile.APIVersion != "" ||
 			profile.CacheCapabilities != nil {
-			return nil, errors.New("openai-codex profile accepts only protocol, model, auth_profile, and pricing")
+			return nil, errors.New("openai-codex profile accepts only protocol, model, auth_profile, pricing, and rate_limit")
 		}
 		var authService *chatauth.Service
 		var err error
@@ -1032,6 +1055,7 @@ const (
 type graphBuilder struct {
 	agents    map[string]agentProfile
 	providers map[string]agent.Provider
+	limiters  map[string]*agent.ProviderRateLimiter
 	profiles  map[string]*coding.Profile
 	registry  *orchestration.AgentRegistry
 	sessions  agent.SessionStore
@@ -1155,16 +1179,17 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 	}
 
 	runtime, err := agent.NewRuntime(agent.Options{
-		Provider:         modelProvider,
-		Tools:            tools,
-		ComponentSource:  componentSource,
-		MaxProviderCalls: specification.MaxProviderCalls,
-		MaxToolCalls:     specification.MaxToolCalls,
-		SessionStore:     builder.sessions,
-		ContextCompiler:  contextCompiler,
-		CachePolicy:      cachePolicy,
-		ProviderRetry:    providerRetry,
-		Logger:           builder.logger,
+		Provider:            modelProvider,
+		ProviderRateLimiter: builder.limiters[specification.Provider],
+		Tools:               tools,
+		ComponentSource:     componentSource,
+		MaxProviderCalls:    specification.MaxProviderCalls,
+		MaxToolCalls:        specification.MaxToolCalls,
+		SessionStore:        builder.sessions,
+		ContextCompiler:     contextCompiler,
+		CachePolicy:         cachePolicy,
+		ProviderRetry:       providerRetry,
+		Logger:              builder.logger,
 	})
 	if err != nil {
 		return fmt.Errorf("agent %q runtime: %w", agentID, err)

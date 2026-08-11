@@ -35,8 +35,9 @@ CLI / TUI / embedded host
 
 `agent` owns provider-neutral Messages, model streams, Runs, budgets, ordered
 Events, Tool calls, waits, Hooks, Session contracts, cancellation, and local
-execution limits. It has no filesystem, Git, CLI, TUI, or Provider wire-format
-behavior
+execution limits. A `ProviderRateLimitController` bounds active model streams
+and shares observed cooldowns without moving HTTP error parsing into Runtime.
+It has no filesystem, Git, CLI, TUI, or Provider wire-format behavior
 
 Before every Provider call, `agent.ContextCompiler` produces a canonical
 `ModelRequest` and logical Context Segments. Runtime persists a content-free
@@ -66,7 +67,9 @@ tokens and retries only once after an authorization rejection
 
 `orchestration` composes named Runtimes above `agent`. Each Runtime remains
 bound to one Provider, so a parent and its subagents may use different endpoint,
-credential, model, and protocol combinations without converting private state
+credential, model, and protocol combinations without converting private state.
+Declarative configuration shares one outbound rate controller between every
+Runtime that references the same Provider profile
 
 `session` implements the `agent.SessionStore` contract in memory and as an
 append-only JSONL Event Log. Runtime serializes concurrent Runs for one Session
@@ -113,8 +116,9 @@ child processes into an operating-system sandbox
 The root `qed.Host` API is the transport-neutral embedding facade. It loads a
 declarative Agent graph, owns configured Extension lifecycles, starts concurrent
 Runs, drains Events, and persists Evidence when configured. HTTP, gRPC, queue,
-authentication, and rate limiting remain responsibilities of the embedding
-application
+authentication, and inbound client or tenant rate limiting remain
+responsibilities of the embedding application. Outbound Provider concurrency
+and observed cooldowns remain Runtime controls
 
 `cmd/qed` and `internal/tuiapp` are adapters. `cmd/qed-extension-gen` is the
 dependency-light downstream catalog generator. Nagi remains inside the QED CLI
@@ -147,10 +151,19 @@ succeed
 persisted pending wait and resume its associated Tool call without repeating
 the completed Provider request
 
+Before an outbound attempt, Runtime acquires Provider capacity, then charges
+the Runtime-local and shared Provider call budgets, and only then emits
+`model.request.started`. A queued attempt emits
+`provider.rate_limit.waiting` without consuming call budget. A rate-limit
+failure updates the shared cooldown before its active-stream permit is
+released, preventing another waiting Run from racing through the observed
+limit
+
 ## Configuration ownership
 
 A Provider profile owns protocol, endpoint, model, output limit, credential
-source, optional cache capability overrides, and optional host-supplied pricing
+source, optional cache capability overrides, optional host-supplied pricing,
+and an outbound rate-limit policy
 An Extension definition owns its process startup. An execution Profile
 references one or more Extensions and owns capability rules plus the selected
 Tool-process environment. An Agent independently references a Provider, an

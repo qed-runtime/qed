@@ -10,6 +10,7 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - OpenAI Responses、OpenAI Chat Completions、Anthropic Messages、ChatGPT認証のCodex Responses Provider
 - 1つのAgent graphで利用できる複数Provider profile
 - collect、select、consensusに対応する並行サブエージェント
+- profile共有のProvider concurrency上限、cooldown、bounded retry
 - 永続Session、永続的な承認待ち、resume
 - process分離Extension内のcapability制御されたCoding Tool
 - 複数のRun固定Extension generation、Hook、Command、host所有state
@@ -184,6 +185,8 @@ go run ./cmd/qed run --config ./qed.json --prompt "Review this plan"
 `--agent <id>`で`default_agent`を1回の実行だけ上書きできます
 設定にはtoken valueではなくcredential environment名またはauth profile名を記載します
 完全なschemaは[Agent設定](docs/configuration_ja.md)を参照してください
+同じProvider profileを参照するAgentは既定のoutbound 4 stream上限と観測したrate limit cooldownを共有します
+必要な場合はそのprofileの`rate_limit.max_concurrency`を設定します
 
 ## Coding Profileの実行
 
@@ -368,7 +371,7 @@ outcome, err := host.Run(ctx, agent.RunRequest{
 ```
 
 `Host`はtransport-neutralで、複数Runから並行利用できます
-HTTPまたはgRPC schema、authentication、authorization、rate limit、shutdown順序は組み込み先applicationが引き続き所有します
+HTTPまたはgRPC schema、authentication、authorization、inbound clientまたはtenant rate limit、shutdown順序は組み込み先applicationが引き続き所有します
 [QEDの組み込み](docs/embedding_ja.md)と[標準library server example](examples/embedded-server/README.md)を参照してください
 
 より小さいprogrammatic integrationでは`agent.Runtime`を直接利用します
@@ -460,6 +463,7 @@ if err := registry.Register(orchestration.AgentDefinition{
 `delegate`は1つのcandidateを実行し、`collect`は全outcomeを返し、`select`はjudgeにcandidateを選択させ、`consensus`はjudgeに結果を統合させます
 candidateは並行実行され、異なるProvider protocolを利用できます
 共有既定上限はAgent Run 16、depth 4、Provider call 64です
+設定済みProvider profileごとにactive Provider stream 4つの既定上限と、観測したrate limit cooldownも共有します
 
 ## 主なimport path
 

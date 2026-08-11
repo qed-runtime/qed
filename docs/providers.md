@@ -43,11 +43,12 @@ that later emits a structured API error returns a wrapped `*provider.APIError`
 Unknown errors are terminal. In particular, billing and quota error codes stay
 terminal even when their HTTP status is 429
 
-Runtime retries transient failures with bounded exponential backoff. It uses a
-server delay as the minimum, respects cancellation and Deadline, and charges
-every attempt to Provider call budgets. Retry is permitted only before the
-first observable stream item. Once a delta or completed message is published,
-the Run fails instead of risking duplicate output or Tool side effects
+Runtime retries transient failures with bounded exponential backoff and small
+bounded per-Run jitter. It uses a server delay as the minimum, respects
+cancellation and Deadline, and charges every attempt to Provider call budgets.
+Retry is permitted only before the first observable stream item. Once a delta
+or completed message is published, the Run fails instead of risking duplicate
+output or Tool side effects
 
 Each actual attempt emits `model.request.started` with `provider_call` and
 `provider_attempt`. A retry emits `provider.retry.scheduled` with
@@ -58,6 +59,55 @@ effective delay. A terminal Provider failure adds `provider_error` to the
 These classifications follow the current [OpenAI API error guidance](https://developers.openai.com/api/docs/guides/error-codes),
 [OpenAI rate-limit guidance](https://developers.openai.com/api/docs/guides/rate-limits),
 and [Anthropic API error guidance](https://platform.claude.com/docs/en/api/errors)
+
+## Provider rate control
+
+Every Runtime has a `ProviderRateLimiter` that defaults to four active streams.
+The limiter permit is held until the Provider stream is consumed and closed,
+not only until `Provider.Stream` returns. Declarative configuration creates one
+limiter per Provider profile and shares it between all Agents that reference
+that profile. Direct API users can create one with `NewProviderRateLimiter` and
+pass the same pointer through `agent.Options.ProviderRateLimiter`
+
+```go
+limiter, err := agent.NewProviderRateLimiter(agent.ProviderRateLimitPolicy{
+    MaxConcurrency: 2,
+})
+if err != nil {
+    return err
+}
+
+first, err := agent.NewRuntime(agent.Options{
+    Provider:            firstProvider,
+    ProviderRateLimiter: limiter,
+})
+if err != nil {
+    return err
+}
+// Construct every Runtime in the same upstream pool with limiter
+```
+
+Embedders that need a different local or distributed implementation can supply
+the public `ProviderRateLimitController` contract
+
+When a `rate_limited` failure occurs, the effective retry delay also becomes a
+shared profile cooldown. A valid `Retry-After` is the minimum; otherwise the
+retry policy's exponential fallback applies. This keeps a second Run from
+immediately sending into a limit already observed by the first Run
+
+Waiting for active capacity or cooldown emits
+`provider.rate_limit.waiting`. Its `provider_rate_limit_wait` field contains a
+content-free `reason` (`concurrency` or `cooldown`), `max_concurrency`, and the
+remaining `retry_after_ms` when available. A waiting Run respects cancellation
+and Deadline. It consumes no Runtime-local or shared Provider call budget until
+the permit is acquired; the following `model.request.started` identifies the
+actual charged attempt
+
+The limiter is a local safety bound rather than a complete RPM, input-token, or
+output-token scheduler. Separate profiles intentionally remain independent
+because upstream shared buckets cannot be inferred from endpoint and model
+strings alone. This behavior follows the current [OpenAI rate-limit guidance](https://developers.openai.com/api/docs/guides/rate-limits)
+and [Anthropic rate-limit guidance](https://platform.claude.com/docs/en/api/rate-limits)
 
 ## Contract test kit
 

@@ -19,7 +19,8 @@ QEDは1つのstrictなJSON documentからProvider profile、process分離Extensi
     "primary": {
       "protocol": "openai-responses",
       "model": "<openai-model-id>",
-      "token_env": "PRIMARY_API_TOKEN"
+      "token_env": "PRIMARY_API_TOKEN",
+      "rate_limit": {"max_concurrency": 4}
     },
     "review": {
       "protocol": "anthropic",
@@ -155,8 +156,10 @@ Provider profileはprotocol、endpoint、model、credential source、Provider op
 | `api_version` | no | Anthropic API version override専用 |
 | `pricing` | no | forecastとUsage cost estimate用のhost supplied rate |
 | `cache_capabilities` | no | 設定endpointとmodelに対するtrusted override |
+| `rate_limit` | no | このprofileに対するQED側のoutbound concurrency policy |
 
 `echo`はendpoint、model、credential、API optionを受け取りません
+決定的なconcurrency testではQED側の`rate_limit` policyを利用できます
 
 custom endpointは認証不要のlocal service向けに`token_env`を省略できます
 設定経路は`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`QED_API_KEY`へfallbackしません
@@ -165,7 +168,7 @@ custom endpointは認証不要のlocal service向けに`token_env`を省略で�
 Provider profile IDはProvider identityとopaque continuation stateに含まれ、別endpointまたは別profileへのstate再利用を防ぎます
 
 `openai-codex`は別途保存したChatGPT OAuth profileを読み、固定のChatGPT Codex backendを使います
-`protocol`、`model`、`auth_profile`、任意の`pricing`を受け取り、`base_url`、`token_env`、`max_output_tokens`、`api_version`、`cache_capabilities`を拒否します
+`protocol`、`model`、`auth_profile`、任意の`pricing`と`rate_limit`を受け取り、`base_url`、`token_env`、`max_output_tokens`、`api_version`、`cache_capabilities`を拒否します
 設定をloadする時点で名前付きprofileが存在する必要があります
 
 ```json
@@ -191,6 +194,26 @@ qed run --config qed.json --prompt "Reply with a short greeting"
 ```
 
 credential保存、refresh、protocol制限は[ChatGPT subscription認証](chatgpt-auth_ja.md)を参照してください
+
+### Outbound Provider rate制御
+
+`rate_limit`はProvider profile単位で設定します
+
+| Field | 必須 | 意味と既定値 |
+| --- | --- | --- |
+| `max_concurrency` | no | activeなProvider streamの最大数、`0`または省略時は`4`、それ以外の範囲は`1`から`1024` |
+
+同じprofileを参照する全Agentは1つのlimiterを共有します
+この共有範囲には並行top-level `Host` Runと並行subagentも含まれます
+同じaccountまたはendpointを対象にしていても、異なるprofile間ではcapacityとcooldown stateを共有しません
+QEDがupstreamのshared-limit bucketを安全に推測できないためです
+
+`rate_limited` responseは実効retry delayでprofile全体のcooldownを更新します
+`Retry-After`を最小値とし、fallback exponential backoffと小さなbounded per-Run jitterで集中retryを防ぎます
+queueされたRunはcancelとDeadlineに従い、capacityを取得してactual attemptを開始できるまでProvider call budgetを消費しません
+
+`max_concurrency`はlocalな保護上限であり、RPMやtoken rateを保証するものではありません
+Runtime local call上限とorchestration全体のAgent RunおよびProvider call上限は独立したhard boundとして維持されます
 
 ## Extension定義
 
@@ -348,6 +371,7 @@ Provider retryはAgent単位で設定します
 
 QEDは`retryable`と`rate_limited`だけをretryします
 有効な`Retry-After` response headerは最小delayとして扱い、`max_backoff`を超える場合があります
+QEDは実効delayへ小さなbounded per-Run jitterを加えます
 すべてのattemptはRuntime localと共有Provider call budgetを消費し、Run cancelとDeadlineに従います
 
 automatic retryは最初の観測可能な`ModelStream` itemより前のfailureだけに限定されます

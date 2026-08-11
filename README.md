@@ -12,6 +12,7 @@ executable today
   ChatGPT-authenticated Codex Responses Providers
 - multiple Provider profiles in one Agent graph
 - concurrent subagents with collect, select, and consensus strategies
+- profile-shared Provider concurrency limits, cooldowns, and bounded retries
 - persistent Sessions, durable approval waits, and resume
 - capability-controlled Coding Tools behind process-isolated Extensions
 - multiple Run-pinned Extension generations, Hooks, Commands, and host-owned state
@@ -195,7 +196,10 @@ go run ./cmd/qed run --config ./qed.json --prompt "Review this plan"
 
 Use `--agent <id>` to override `default_agent`. Configuration contains
 credential environment or auth profile names, never token values. See
-[Agent configuration](docs/configuration.md) for the complete schema
+[Agent configuration](docs/configuration.md) for the complete schema. Agents
+that reference one Provider profile share its default four-stream outbound
+limit and observed rate-limit cooldown; configure
+`rate_limit.max_concurrency` on that profile when needed
 
 ## Run the Coding Profile
 
@@ -398,7 +402,7 @@ outcome, err := host.Run(ctx, agent.RunRequest{
 
 `Host` is transport-neutral and safe for concurrent Runs. The embedding
 application continues to own HTTP or gRPC schemas, authentication,
-authorization, rate limiting, and shutdown ordering. See
+authorization, inbound client or tenant rate limiting, and shutdown ordering. See
 [Embedding QED](docs/embedding.md) and the
 [standard-library server example](examples/embedded-server/README.md)
 
@@ -493,7 +497,8 @@ if err := registry.Register(orchestration.AgentDefinition{
 `select` asks a judge to select a candidate, and `consensus` asks a judge to
 synthesize a result. Candidates run concurrently and may use different
 Provider protocols. Shared default limits are 16 Agent Runs, depth 4, and 64
-Provider calls
+Provider calls. Each configured Provider profile also shares a default limit
+of four active Provider streams and any observed rate-limit cooldown
 
 ## Main import paths
 

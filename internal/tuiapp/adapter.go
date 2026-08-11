@@ -178,6 +178,24 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 	case agent.EventContextCompacted:
 		update.status = "preparing context"
 		activity("Context compacted", "")
+	case agent.EventProviderRateLimitWait:
+		update.status = "waiting for model capacity"
+		label := "Model request queued"
+		if event.ProviderRateLimitWait != nil {
+			switch event.ProviderRateLimitWait.Reason {
+			case agent.ProviderRateLimitWaitCooldown:
+				label = fmt.Sprintf(
+					"Model rate limit cooldown %dms",
+					event.ProviderRateLimitWait.RetryAfterMilliseconds,
+				)
+			case agent.ProviderRateLimitWaitConcurrency:
+				label = fmt.Sprintf(
+					"Waiting for model capacity (limit %d)",
+					event.ProviderRateLimitWait.MaxConcurrency,
+				)
+			}
+		}
+		activity(label, activityStateWaiting)
 	case agent.EventModelRequest:
 		update.status = "thinking"
 		activity("Model request", "")

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"time"
@@ -13,6 +15,7 @@ const (
 	defaultProviderRetryMaxAttempts    = 3
 	defaultProviderRetryInitialBackoff = time.Second
 	defaultProviderRetryMaxBackoff     = 8 * time.Second
+	maximumProviderRetryJitter         = 250 * time.Millisecond
 )
 
 // ProviderRetryPolicy controls retry attempts for transient Provider failures
@@ -70,6 +73,28 @@ func providerRetryDelay(policy ProviderRetryPolicy, failedAttempt int, serverHin
 		return serverHint
 	}
 	return delay
+}
+
+func providerRetryDelayWithJitter(
+	policy ProviderRetryPolicy,
+	failedAttempt int,
+	serverHint time.Duration,
+	runID string,
+) time.Duration {
+	delay := providerRetryDelay(policy, failedAttempt, serverHint)
+	jitterLimit := delay / 4
+	if jitterLimit > maximumProviderRetryJitter {
+		jitterLimit = maximumProviderRetryJitter
+	}
+	if jitterLimit <= 0 {
+		return delay
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", runID, failedAttempt)))
+	jitter := time.Duration(binary.BigEndian.Uint64(digest[:8]) % uint64(jitterLimit+1))
+	if delay > time.Duration(1<<63-1)-jitter {
+		return delay
+	}
+	return delay + jitter
 }
 
 func waitForProviderRetry(ctx context.Context, delay time.Duration) error {

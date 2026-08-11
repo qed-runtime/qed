@@ -20,7 +20,8 @@ The format is used by `qed run`, `qed tui`, and `qed session resume`
     "primary": {
       "protocol": "openai-responses",
       "model": "<openai-model-id>",
-      "token_env": "PRIMARY_API_TOKEN"
+      "token_env": "PRIMARY_API_TOKEN",
+      "rate_limit": {"max_concurrency": 4}
     },
     "review": {
       "protocol": "anthropic",
@@ -158,8 +159,10 @@ different endpoints of the same dialect
 | `api_version` | no | Anthropic API version override only |
 | `pricing` | no | Host-supplied rates for forecasting and usage-cost estimates |
 | `cache_capabilities` | no | Trusted override for the configured endpoint and model |
+| `rate_limit` | no | QED-side outbound concurrency policy for this profile |
 
-`echo` accepts no endpoint, model, credential, or API options
+`echo` accepts no endpoint, model, credential, or API options. It may use the
+QED-side `rate_limit` policy for deterministic concurrency tests
 
 A custom endpoint may omit `token_env` for an unauthenticated local service.
 Configuration never falls back to `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
@@ -171,9 +174,9 @@ state, preventing state from one endpoint/profile from being reused by another
 
 `openai-codex` reads a separately stored ChatGPT OAuth profile and uses the
 fixed ChatGPT Codex backend. It accepts `protocol`, `model`, `auth_profile`, and
-optional `pricing`; `base_url`, `token_env`, `max_output_tokens`, `api_version`,
-and `cache_capabilities` are rejected. The named profile must already exist
-when configuration is loaded
+optional `pricing` and `rate_limit`; `base_url`, `token_env`,
+`max_output_tokens`, `api_version`, and `cache_capabilities` are rejected. The
+named profile must already exist when configuration is loaded
 
 ```json
 {
@@ -199,6 +202,29 @@ qed run --config qed.json --prompt "Reply with a short greeting"
 
 See [ChatGPT subscription authentication](chatgpt-auth.md) for credential
 storage, refresh, and protocol limitations
+
+### Outbound Provider rate control
+
+`rate_limit` is configured per Provider profile
+
+| Field | Required | Meaning and default |
+| --- | --- | --- |
+| `max_concurrency` | no | Maximum active Provider streams; `0` or omission selects `4`, otherwise range `1` through `1024` |
+
+Every Agent that references the same profile shares one limiter, including
+concurrent top-level `Host` Runs and parallel subagents. Different profiles do
+not share capacity or cooldown state, even when they target the same account or
+endpoint, because QED cannot infer an upstream shared-limit bucket safely
+
+A `rate_limited` response updates the profile-wide cooldown with the effective
+retry delay. `Retry-After` remains the minimum; fallback exponential backoff
+and a small bounded per-Run jitter prevent concentrated retries. A queued Run
+honors cancellation and Deadline and does not consume a Provider call budget
+until it acquires capacity and is ready to start an actual attempt
+
+`max_concurrency` is a local protective bound, not an RPM or token-rate
+guarantee. The Runtime-local call limit and the orchestration-wide Agent Run
+and Provider call limits remain independent hard bounds
 
 ## Extension definitions
 
@@ -362,9 +388,10 @@ Provider retry is configured per Agent
 | `max_backoff` | no | Positive Go duration capping exponential fallback delay, default `8s` |
 
 QED retries only `retryable` and `rate_limited` failures. A valid
-`Retry-After` response header is a minimum delay and may exceed `max_backoff`
-All attempts consume the Runtime-local and shared Provider call budgets and
-respect Run cancellation and Deadline
+`Retry-After` response header is a minimum delay and may exceed `max_backoff`.
+QED adds a small bounded per-Run jitter to the effective delay. All attempts
+consume the Runtime-local and shared Provider call budgets and respect Run
+cancellation and Deadline
 
 Automatic retry is limited to failures before the first observable
 `ModelStream` item. QED does not retry after a text delta or completed message,
