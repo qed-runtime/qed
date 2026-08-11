@@ -130,9 +130,21 @@ func (budget *Budget) recordUsage(usage *Usage) error {
 	}
 	budget.mu.Lock()
 	defer budget.mu.Unlock()
-	budget.inputTokens += usage.InputTokens
-	budget.outputTokens += usage.OutputTokens
-	budget.costMicros += usage.CostMicros
+	inputTokens, err := addUsageValue(budget.inputTokens, usage.InputTokens)
+	if err != nil {
+		return err
+	}
+	outputTokens, err := addUsageValue(budget.outputTokens, usage.OutputTokens)
+	if err != nil {
+		return err
+	}
+	costMicros, err := addUsageValue(budget.costMicros, usage.CostMicros)
+	if err != nil {
+		return err
+	}
+	budget.inputTokens = inputTokens
+	budget.outputTokens = outputTokens
+	budget.costMicros = costMicros
 	if budget.limits.MaxInputTokens > 0 && budget.inputTokens > budget.limits.MaxInputTokens {
 		return ErrBudgetInputTokens
 	}

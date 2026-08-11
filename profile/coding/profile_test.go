@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/qed-runtime/qed/agent"
 	"github.com/qed-runtime/qed/capability"
@@ -24,6 +25,20 @@ import (
 )
 
 func TestMain(testingMain *testing.M) {
+	if len(os.Args) >= 2 && os.Args[1] == codingE2EBlockArgument {
+		marker := os.Getenv(codingE2EMarkerEnvironment)
+		if marker == "" {
+			_, _ = fmt.Fprintln(os.Stderr, "coding E2E marker path is required")
+			os.Exit(2)
+		}
+		if err := os.WriteFile(marker, []byte("started\n"), 0o600); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	if len(os.Args) >= 2 && os.Args[1] == selfexec.ChildArgument {
 		handled, err := extensionregistry.Catalog.Dispatch(context.Background(), selfexec.DispatchOptions{
 			Arguments: os.Args[1:],
@@ -137,7 +152,9 @@ func TestCodingProfileRunsCompleteSixToolLoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for range handle.Events() {
+	var events []agent.Event
+	for event := range handle.Events() {
+		events = append(events, event)
 	}
 	result, err := handle.Wait()
 	if err != nil {
@@ -178,6 +195,12 @@ func TestCodingProfileRunsCompleteSixToolLoop(t *testing.T) {
 			t.Errorf("Evidence[%d] = %#v", index, invocation)
 		}
 	}
+	bundle := roundTripCodingEvidence(t, result, events, invocations)
+	if bundle.Run.Status != agent.RunStatusCompleted || len(bundle.Commands) != 1 || len(bundle.Checks) != 1 ||
+		len(bundle.Changes) != 1 || !bundle.Commands[0].Succeeded || !bundle.Checks[0].Succeeded ||
+		!bundle.Changes[0].Succeeded || len(bundle.ToolTrace) != len(wantTools) {
+		t.Fatalf("Evidence Bundle = %#v", bundle)
+	}
 }
 
 type codingLoopProvider struct {
@@ -211,7 +234,7 @@ func (provider *codingLoopProvider) Complete(ctx context.Context, request agent.
 
 	switch step {
 	case 0:
-		want := []string{"git_status", "git_diff", "run_command", "search_text", "read_file", "apply_patch"}
+		want := []string{"apply_patch", "git_diff", "git_status", "read_file", "run_command", "search_text"}
 		if len(request.Tools) != len(want) {
 			return agent.Message{}, fmt.Errorf("Tool count = %d, want %d", len(request.Tools), len(want))
 		}

@@ -173,7 +173,9 @@ func TestMessagesToolLoopPreservesBlocksAndGroupsResults(t *testing.T) {
 	if last.Text != "HELLO" || last.StopReason != agent.StopReasonEndTurn {
 		t.Errorf("last message = %#v", last)
 	}
-	if last.Usage == nil || last.Usage.InputTokens != 10 || last.Usage.TotalTokens != 14 {
+	if last.Usage == nil || last.Usage.InputTokens != 10 || last.Usage.TotalTokens != 14 ||
+		!last.Usage.InputTokenDetailsReported || last.Usage.UncachedInputTokens != 3 ||
+		last.Usage.CacheReadInputTokens != 5 || last.Usage.CacheWriteInputTokens != 2 {
 		t.Errorf("usage = %#v", last.Usage)
 	}
 

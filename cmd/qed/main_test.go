@@ -312,6 +312,130 @@ func TestRunInspectReadsEvidenceBundle(t *testing.T) {
 	}
 }
 
+func TestEvidenceFetchReadsContentAddressedObject(t *testing.T) {
+	t.Parallel()
+
+	storeRoot := filepath.Join(t.TempDir(), "evidence")
+	store, err := evidence.NewJSONStore(storeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err := store.PutObject(context.Background(), "text/plain", []byte("exact object content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run(context.Background(), []string{
+		"evidence", "fetch", reference.Digest, "--store", storeRoot,
+	}, &stdout, &stderr)
+	if exitCode != 0 || stdout.String() != "exact object content" {
+		t.Fatalf("exit/stdout/stderr = %d/%q/%q", exitCode, stdout.String(), stderr.String())
+	}
+}
+
+func TestCacheStatusReadsPlanUsageAndCost(t *testing.T) {
+	t.Parallel()
+
+	storeRoot := filepath.Join(t.TempDir(), "evidence")
+	store, err := evidence.NewJSONStore(storeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pricing := &agent.CachePricing{
+		Currency:                      "USD",
+		UncachedInputMicrosPerMillion: 2_000_000,
+		CacheReadMicrosPerMillion:     200_000,
+		CacheWriteMicrosPerMillion:    2_500_000,
+		OutputMicrosPerMillion:        10_000_000,
+	}
+	forecast, err := agent.ForecastCacheCost(*pricing, 2000, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := agent.PrefixManifest{
+		Version:     1,
+		Provider:    "openai/responses:primary",
+		Model:       "gpt-5.6-luna",
+		CacheFamily: "cache_" + strings.Repeat("a", 64),
+		Epoch:       "epoch-1",
+		Segments: []agent.SegmentFingerprint{{
+			ID:          "instructions",
+			Kind:        agent.SegmentKindInstructions,
+			Version:     "1",
+			ContentHash: "sha256:" + strings.Repeat("b", 64),
+			Bytes:       8000,
+			Stability:   agent.StabilityProject,
+		}},
+	}
+	plan := agent.CachePlan{
+		Version:            1,
+		FamilyID:           manifest.CacheFamily,
+		Mode:               agent.CacheModeExplicit,
+		TTL:                agent.CacheTTLThirtyMinutes,
+		ExpectedReuse:      3,
+		InputTokenEstimate: 2000,
+		TokenEstimateKind:  "canonical_bytes_div_4",
+		Pricing:            pricing,
+		Forecast:           &forecast,
+		Breakpoints: []agent.CacheBreakpoint{{
+			AfterSegmentID:      "message/0000000000",
+			MessageIndex:        0,
+			Write:               true,
+			PrefixTokenEstimate: 2000,
+		}},
+	}
+	usage := agent.Usage{
+		InputTokens:               100,
+		OutputTokens:              10,
+		TotalTokens:               110,
+		InputTokenDetailsReported: true,
+		UncachedInputTokens:       20,
+		CacheReadInputTokens:      70,
+		CacheWriteInputTokens:     10,
+	}
+	bundle, err := evidence.NewBundle(agent.RunResult{
+		RunID:  "run_cache_status",
+		Status: agent.RunStatusCompleted,
+		Messages: []agent.Message{{
+			Role:  agent.RoleAssistant,
+			Model: "gpt-5.6-luna",
+		}},
+		Usage: usage,
+	}, evidence.BundleOptions{Events: []agent.Event{{
+		Type:           agent.EventModelRequest,
+		RunID:          "run_cache_status",
+		PrefixManifest: &manifest,
+		CachePlan:      &plan,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(context.Background(), bundle); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run(context.Background(), []string{
+		"cache", "status", "run_cache_status", "--store", storeRoot,
+	}, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("exit/stderr = %d/%q", exitCode, stderr.String())
+	}
+	for _, want := range []string{
+		"Provider: openai/responses:primary",
+		"Mode: explicit",
+		"cache_read_ratio=70.00%",
+		"Forecast: currency=USD",
+		"Estimated actual cost: currency=USD",
+		"First divergence: none",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("cache status output %q does not contain %q", stdout.String(), want)
+		}
+	}
+}
+
 func TestRunJSONLOutput(t *testing.T) {
 	t.Parallel()
 
@@ -332,6 +456,7 @@ func TestRunJSONLOutput(t *testing.T) {
 	}
 
 	var eventTypes []agent.EventType
+	var prefixManifest *agent.PrefixManifest
 	scanner := bufio.NewScanner(strings.NewReader(stdout.String()))
 	for scanner.Scan() {
 		var event agent.Event
@@ -339,6 +464,9 @@ func TestRunJSONLOutput(t *testing.T) {
 			t.Fatalf("decode event %q: %v", scanner.Text(), err)
 		}
 		eventTypes = append(eventTypes, event.Type)
+		if event.Type == agent.EventModelRequest {
+			prefixManifest = event.PrefixManifest
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		t.Fatalf("scan output: %v", err)
@@ -360,6 +488,9 @@ func TestRunJSONLOutput(t *testing.T) {
 		if eventTypes[index] != want[index] {
 			t.Errorf("eventTypes[%d] = %q, want %q", index, eventTypes[index], want[index])
 		}
+	}
+	if prefixManifest == nil || prefixManifest.Provider != "echo" || prefixManifest.Epoch == "" || len(prefixManifest.Segments) != 3 {
+		t.Fatalf("Prefix Manifest = %#v", prefixManifest)
 	}
 }
 
@@ -799,7 +930,7 @@ func TestRunConfiguredCodingProfileAgainstOpenAIProtocol(t *testing.T) {
 			writer.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		wantTools := []string{"git_status", "git_diff", "run_command", "search_text", "read_file", "apply_patch"}
+		wantTools := []string{"apply_patch", "git_diff", "git_status", "read_file", "run_command", "search_text"}
 		if len(body.Tools) != len(wantTools) {
 			t.Errorf("Tool count = %d, want %d", len(body.Tools), len(wantTools))
 		} else {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/qed-runtime/qed/agent"
@@ -16,6 +17,27 @@ import (
 	"github.com/qed-runtime/qed/extensions/edit"
 	"github.com/qed-runtime/qed/workspace"
 )
+
+func TestApplyPatchDefinitionExplainsFormatAndPreconditions(t *testing.T) {
+	t.Parallel()
+
+	definition := newTool(t, t.TempDir()).Definition()
+	for _, expected := range []string{"--- a/path", "+++ b/path", "@@", "*** Begin Patch", "sha256:", "absent:true"} {
+		if !strings.Contains(definition.Description, expected) {
+			t.Errorf("Description %q does not contain %q", definition.Description, expected)
+		}
+	}
+	schema := string(definition.InputSchema)
+	for _, expected := range []string{
+		"Unified diff text with --- a/path, +++ b/path, and @@ hunk headers",
+		"Full sha256:... digest returned by read_file",
+		"Set true only when adding a path that does not exist",
+	} {
+		if !strings.Contains(schema, expected) {
+			t.Errorf("InputSchema does not contain %q", expected)
+		}
+	}
+}
 
 func TestApplyPatchUpdatesFileWithDigestPrecondition(t *testing.T) {
 	t.Parallel()
@@ -60,6 +82,29 @@ func TestApplyPatchUpdatesFileWithDigestPrecondition(t *testing.T) {
 	}
 	if len(response.Changes) != 1 || response.Changes[0].Path != "source.txt" || response.Changes[0].Kind != "update" {
 		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestApplyPatchAcceptsWorkspaceRelativeHeaders(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "source.txt")
+	before := "before\n"
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tool := newTool(t, root)
+	result := execute(t, tool, map[string]any{
+		"patch":         "--- source.txt\n+++ source.txt\n@@ -1 +1 @@\n-before\n+after\n",
+		"preconditions": []map[string]any{{"path": "source.txt", "sha256": digest(before)}},
+	})
+	if result.IsError {
+		t.Fatalf("result = %#v", result)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != "after\n" {
+		t.Fatalf("file = %q, %v", content, err)
 	}
 }
 

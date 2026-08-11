@@ -127,6 +127,75 @@ server must provide exactly one of `Initialize` or `InitializeComponents`
 Protocol stdout must contain frames only. Human or safe debug diagnostics go to
 stderr through `Options.DebugWriter`
 
+## Contract test kit
+
+`extension/contracttest` provides one reference Extension and a reusable suite
+for checking launcher and Protocol behavior. Pass a command that serves a fresh
+`contracttest.ServerOptions()` fixture on every process start
+
+The same suite verifies:
+
+- Handshake, Initialize payload propagation, Describe, and HealthCheck
+- Tool invocation, dynamic capabilities, Hook delivery, and Command invocation
+- Snapshot, Restore, Drain, Cancel, and graceful Shutdown
+- child-process crash isolation
+
+Use `RunLifecycle` against an actual Extension executable, including one written
+in a non-Go language. It validates the supplied declaration through Handshake,
+Initialize, Describe, HealthCheck, Snapshot, Restore, Drain, and Shutdown
+
+```go
+contracttest.RunLifecycle(t, contracttest.LifecycleOptions{
+	Command:     command,
+	Declaration: declaration,
+	Initialize:  initializeRequest,
+})
+```
+
+Component semantics and intentional crash behavior differ between Extensions,
+so the complete `Run` suite uses the standard reference fixture
+
+An external executable test can dispatch the fixture from `TestMain` and pass
+that executable back to the suite
+
+```go
+func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == contracttest.ExternalChildArgument {
+		options := contracttest.ServerOptions()
+		if err := server.Serve(context.Background(), os.Stdin, os.Stdout, options); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func TestExternalContract(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contracttest.Run(t, contracttest.SuiteOptions{
+		Command: host.Command{
+			Path: executable,
+			Args: []string{contracttest.ExternalChildArgument},
+		},
+	})
+}
+```
+
+For self-exec, register `contracttest.Declaration()` and
+`contracttest.ServerOptions` in a `selfexec.Definition`, dispatch that Catalog
+from `TestMain`, build its command with `Definition.Command`, and pass the
+command to the same `contracttest.Run` call. See the
+[package contract test](../extension/contracttest/contracttest_test.go) for
+both launcher paths
+
+The fixture includes an intentional process-exit probe, so serve it only from a
+dedicated test child. The suite checks the common process and Protocol contract.
+Extension-specific business behavior, Policy decisions, and OS sandboxing need
+separate tests
+
 ## External manifest
 
 The conventional filename is `qed-extension.json`

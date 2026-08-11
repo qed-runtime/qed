@@ -7,12 +7,14 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/qed-runtime/qed/agent"
+	"github.com/qed-runtime/qed/evidence"
 	"github.com/qed-runtime/qed/session"
 )
 
@@ -272,6 +274,261 @@ func TestRuntimeExecutesToolAndContinues(t *testing.T) {
 	assertEventTypes(t, events, wantEvents)
 }
 
+func TestRuntimeEmitsAppendOnlyPrefixManifests(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{
+		model: "test-model",
+		responses: []providerResponse{
+			{message: agent.Message{
+				Role:      agent.RoleAssistant,
+				ToolCalls: []agent.ToolCall{{ID: "call-1", Name: "missing", Arguments: json.RawMessage(`{}`)}},
+			}},
+			{message: agent.Message{Role: agent.RoleAssistant, Text: "done"}},
+		},
+	}
+	runtime, err := agent.NewRuntime(agent.Options{Provider: provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, _, err := collectRun(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifests []agent.PrefixManifest
+	for _, event := range events {
+		if event.Type == agent.EventModelRequest {
+			if event.PrefixManifest == nil {
+				t.Fatal("model.request.started is missing Prefix Manifest")
+			}
+			manifests = append(manifests, *event.PrefixManifest)
+		}
+	}
+	if len(manifests) != 2 {
+		t.Fatalf("Prefix Manifest count = %d, want 2", len(manifests))
+	}
+	if manifests[0].Provider != "scripted" || manifests[0].Model != "test-model" || manifests[0].Epoch == "" {
+		t.Fatalf("first Prefix Manifest = %#v", manifests[0])
+	}
+	if len(manifests[0].Segments) != 3 || len(manifests[1].Segments) != 5 {
+		t.Fatalf("Prefix Segment counts = %d/%d, want 3/5", len(manifests[0].Segments), len(manifests[1].Segments))
+	}
+	for index := range manifests[0].Segments {
+		if manifests[0].Segments[index] != manifests[1].Segments[index] {
+			t.Fatalf("append-only Prefix diverged at Segment %d: %#v / %#v", index, manifests[0], manifests[1])
+		}
+	}
+}
+
+func TestRuntimeAggregatesCompleteInputTokenDetails(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{
+		{message: agent.Message{
+			Role:      agent.RoleAssistant,
+			ToolCalls: []agent.ToolCall{{ID: "call-1", Name: "missing"}},
+			Usage: &agent.Usage{
+				InputTokens:               10,
+				OutputTokens:              2,
+				TotalTokens:               12,
+				InputTokenDetailsReported: true,
+				UncachedInputTokens:       6,
+				CacheReadInputTokens:      3,
+				CacheWriteInputTokens:     1,
+			},
+		}},
+		{message: agent.Message{
+			Role: agent.RoleAssistant,
+			Text: "done",
+			Usage: &agent.Usage{
+				InputTokens:               20,
+				OutputTokens:              4,
+				TotalTokens:               24,
+				InputTokenDetailsReported: true,
+				UncachedInputTokens:       12,
+				CacheReadInputTokens:      5,
+				CacheWriteInputTokens:     3,
+			},
+		}},
+	}}
+	runtime, err := agent.NewRuntime(agent.Options{Provider: provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, err := collectRun(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := result.Usage
+	if usage.InputTokens != 30 || usage.OutputTokens != 6 || usage.TotalTokens != 36 ||
+		!usage.InputTokenDetailsReported || usage.UncachedInputTokens != 18 ||
+		usage.CacheReadInputTokens != 8 || usage.CacheWriteInputTokens != 4 {
+		t.Fatalf("aggregated Usage = %#v", usage)
+	}
+}
+
+func TestRuntimeDoesNotPublishPartialInputTokenDetails(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{
+		{message: agent.Message{
+			Role:      agent.RoleAssistant,
+			ToolCalls: []agent.ToolCall{{ID: "call-1", Name: "missing"}},
+			Usage: &agent.Usage{
+				InputTokens:               10,
+				OutputTokens:              2,
+				TotalTokens:               12,
+				InputTokenDetailsReported: true,
+				UncachedInputTokens:       6,
+				CacheReadInputTokens:      3,
+				CacheWriteInputTokens:     1,
+			},
+		}},
+		{message: agent.Message{
+			Role:  agent.RoleAssistant,
+			Text:  "done",
+			Usage: &agent.Usage{InputTokens: 20, OutputTokens: 4, TotalTokens: 24},
+		}},
+	}}
+	runtime, err := agent.NewRuntime(agent.Options{Provider: provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, err := collectRun(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := result.Usage
+	if usage.InputTokens != 30 || usage.OutputTokens != 6 || usage.TotalTokens != 36 ||
+		usage.InputTokenDetailsReported || usage.UncachedInputTokens != 0 ||
+		usage.CacheReadInputTokens != 0 || usage.CacheWriteInputTokens != 0 {
+		t.Fatalf("aggregated Usage = %#v", usage)
+	}
+	var firstMessageUsage *agent.Usage
+	for _, event := range events {
+		if event.Type == agent.EventMessageCompleted && event.Message != nil && event.Message.Usage != nil {
+			firstMessageUsage = event.Message.Usage
+			break
+		}
+	}
+	if firstMessageUsage == nil || !firstMessageUsage.InputTokenDetailsReported ||
+		firstMessageUsage.CacheReadInputTokens != 3 {
+		t.Fatalf("first message Usage = %#v", firstMessageUsage)
+	}
+}
+
+func TestRuntimeRejectsInconsistentInputTokenDetails(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{{message: agent.Message{
+		Role: agent.RoleAssistant,
+		Text: "invalid",
+		Usage: &agent.Usage{
+			InputTokens:               10,
+			OutputTokens:              2,
+			TotalTokens:               12,
+			InputTokenDetailsReported: true,
+			UncachedInputTokens:       5,
+			CacheReadInputTokens:      4,
+			CacheWriteInputTokens:     2,
+		},
+	}}}}
+	runtime, err := agent.NewRuntime(agent.Options{Provider: provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, runErr := collectRun(handle)
+	if runErr == nil || !strings.Contains(runErr.Error(), "input token categories total 11, want 10") {
+		t.Fatalf("Run error = %v", runErr)
+	}
+}
+
+func TestRuntimeRejectsUsageAggregationOverflow(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{
+		{message: agent.Message{
+			Role:      agent.RoleAssistant,
+			ToolCalls: []agent.ToolCall{{ID: "call-1", Name: "missing"}},
+			Usage:     &agent.Usage{InputTokens: math.MaxInt64, TotalTokens: math.MaxInt64},
+		}},
+		{message: agent.Message{
+			Role:  agent.RoleAssistant,
+			Text:  "done",
+			Usage: &agent.Usage{InputTokens: 1, TotalTokens: 1},
+		}},
+	}}
+	runtime, err := agent.NewRuntime(agent.Options{Provider: provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, runErr := collectRun(handle)
+	if runErr == nil || result.Status != agent.RunStatusFailed || !strings.Contains(runErr.Error(), "usage value overflow") {
+		t.Fatalf("Run = %#v, error = %v", result, runErr)
+	}
+}
+
+func TestRuntimeFailsBeforeProviderCallWhenContextCompilationFails(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{{message: agent.Message{Role: agent.RoleAssistant, Text: "unused"}}}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		ContextCompiler: contextCompilerFunc(func(context.Context, agent.ContextCompileRequest) (agent.CompiledContext, error) {
+			return agent.CompiledContext{}, errors.New("compiler unavailable")
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, runErr := collectRun(handle)
+	if runErr == nil || !strings.Contains(runErr.Error(), "compiler unavailable") {
+		t.Fatalf("Run error = %v", runErr)
+	}
+	if result.ProviderCalls != 0 || len(provider.Requests()) != 0 {
+		t.Fatalf("Provider calls = %d/%d", result.ProviderCalls, len(provider.Requests()))
+	}
+	if len(events) != 3 || events[2].Type != agent.EventRunFailed {
+		t.Fatalf("Events = %#v", events)
+	}
+}
+
 func TestRuntimeReturnsToolErrorsToProvider(t *testing.T) {
 	t.Parallel()
 
@@ -423,7 +680,7 @@ func TestRuntimePinsToolSourceForRunAndReleasesLease(t *testing.T) {
 	}
 	requests := provider.Requests()
 	if len(requests) != 1 || len(requests[0].Tools) != 2 ||
-		requests[0].Tools[0].Name != "sourced" || requests[0].Tools[1].Name != "fixed" {
+		requests[0].Tools[0].Name != "fixed" || requests[0].Tools[1].Name != "sourced" {
 		t.Fatalf("Provider Tools = %#v", requests)
 	}
 }
@@ -519,6 +776,92 @@ func TestRuntimePersistsAndContinuesSession(t *testing.T) {
 	}
 	if snapshot.Revision != 14 || len(snapshot.Messages) != 4 {
 		t.Fatalf("Session Snapshot = revision %d, messages %#v", snapshot.Revision, snapshot.Messages)
+	}
+}
+
+func TestRuntimePublishesAndReusesContextCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewMemoryStore()
+	objects := evidence.NewMemoryObjectStore()
+	compiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
+		MaxInputBytes:          2200,
+		RecentMessages:         1,
+		EvidenceThresholdBytes: 4096,
+		EvidenceExcerptBytes:   256,
+		CheckpointMaxBytes:     1000,
+	}, objects, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{responses: []providerResponse{
+		{message: agent.Message{Role: agent.RoleAssistant, Text: "first done"}},
+		{message: agent.Message{Role: agent.RoleAssistant, Text: "second done"}},
+	}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider:        provider,
+		SessionStore:    store,
+		ContextCompiler: compiler,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := make([]agent.Message, 10)
+	for index := range inputs {
+		inputs[index] = agent.Message{Role: agent.RoleUser, Text: strings.Repeat(string(rune('a'+index)), 500)}
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{SessionID: "compacted", Input: inputs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, err := collectRun(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextIndex := -1
+	modelIndex := -1
+	for index, event := range events {
+		switch event.Type {
+		case agent.EventContextCompacted:
+			contextIndex = index
+			if event.ContextCheckpoint == nil || event.ContextCompaction == nil {
+				t.Fatalf("context.compacted Event = %#v", event)
+			}
+		case agent.EventModelRequest:
+			if modelIndex == -1 {
+				modelIndex = index
+			}
+		}
+	}
+	if contextIndex < 0 || modelIndex < 0 || contextIndex >= modelIndex || result.ContextCheckpoint == nil {
+		t.Fatalf("Context event/model/result = %d/%d/%#v", contextIndex, modelIndex, result.ContextCheckpoint)
+	}
+
+	handle, err = runtime.Run(context.Background(), agent.RunRequest{
+		SessionID: "compacted",
+		Input:     []agent.Message{{Role: agent.RoleUser, Text: "continue"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secondResult, err := collectRun(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondResult.ContextCompaction == nil || secondResult.ContextCompaction.Reason != "reuse_checkpoint" {
+		t.Fatalf("second Context Compaction = %#v", secondResult.ContextCompaction)
+	}
+	requests := provider.Requests()
+	if len(requests) != 2 || len(requests[1].Messages) == 0 ||
+		!strings.Contains(requests[1].Messages[0].Text, "<qed_context_checkpoint>") {
+		t.Fatalf("second Provider request = %#v", requests)
+	}
+	snapshot, err := store.Load(context.Background(), "compacted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Checkpoint == nil || len(snapshot.EvidenceObjects) == 0 || len(snapshot.Messages) != 13 {
+		t.Fatalf("compacted Session Snapshot = %#v", snapshot)
 	}
 }
 
@@ -700,12 +1043,17 @@ type providerResponse struct {
 
 type scriptedProvider struct {
 	mu        sync.Mutex
+	model     string
 	responses []providerResponse
 	requests  []agent.ModelRequest
 }
 
 func (provider *scriptedProvider) Name() string {
 	return "scripted"
+}
+
+func (provider *scriptedProvider) ModelID() string {
+	return provider.model
 }
 
 func (provider *scriptedProvider) Complete(_ context.Context, request agent.ModelRequest) (agent.Message, error) {
@@ -734,6 +1082,15 @@ func (provider *scriptedProvider) Requests() []agent.ModelRequest {
 	defer provider.mu.Unlock()
 
 	return append([]agent.ModelRequest(nil), provider.requests...)
+}
+
+type contextCompilerFunc func(context.Context, agent.ContextCompileRequest) (agent.CompiledContext, error)
+
+func (compiler contextCompilerFunc) Compile(
+	ctx context.Context,
+	request agent.ContextCompileRequest,
+) (agent.CompiledContext, error) {
+	return compiler(ctx, request)
 }
 
 type uppercaseTool struct{}

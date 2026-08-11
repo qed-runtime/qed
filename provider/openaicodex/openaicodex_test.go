@@ -64,7 +64,7 @@ func TestStreamUsesCodexContractAndPreservesState(t *testing.T) {
 		}
 
 		bodyText := "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n" +
-			"event: response.done\ndata: {\"type\":\"response.done\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"encrypted_content\":\"opaque\"},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n"
+			"event: response.done\ndata: {\"type\":\"response.done\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"encrypted_content\":\"opaque\"},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5,\"input_tokens_details\":{\"cached_tokens\":1,\"cache_write_tokens\":1}}}}\n\n"
 		return httpResponse(http.StatusOK, "text/event-stream", bodyText), nil
 	})
 
@@ -101,7 +101,9 @@ func TestStreamUsesCodexContractAndPreservesState(t *testing.T) {
 		!strings.Contains(string(message.ProviderState.Data), "opaque") {
 		t.Fatalf("ProviderState = %#v", message.ProviderState)
 	}
-	if message.Usage == nil || message.Usage.TotalTokens != 5 {
+	if message.Usage == nil || message.Usage.TotalTokens != 5 ||
+		!message.Usage.InputTokenDetailsReported || message.Usage.UncachedInputTokens != 1 ||
+		message.Usage.CacheReadInputTokens != 1 || message.Usage.CacheWriteInputTokens != 1 {
 		t.Fatalf("usage = %#v", message.Usage)
 	}
 }

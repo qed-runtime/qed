@@ -82,9 +82,11 @@ type applyPatchTool struct {
 
 func (tool *applyPatchTool) Definition() agent.ToolDefinition {
 	return agent.ToolDefinition{
-		Name:         ApplyPatchToolName,
-		Description:  "Apply a bounded unified diff after verifying explicit file digests or absence",
-		InputSchema:  json.RawMessage(`{"type":"object","properties":{"patch":{"type":"string"},"preconditions":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"sha256":{"type":"string"},"absent":{"type":"boolean"}},"required":["path"],"additionalProperties":false}}},"required":["patch","preconditions"],"additionalProperties":false}`),
+		Name: ApplyPatchToolName,
+		Description: "Apply a bounded unified diff using --- a/path, +++ b/path, and @@ hunks; " +
+			"do not use *** Begin Patch markers. Provide one precondition per changed path, copying " +
+			"read_file's full sha256:... digest for existing files or using absent:true for new files",
+		InputSchema:  json.RawMessage(`{"type":"object","properties":{"patch":{"type":"string","description":"Unified diff text with --- a/path, +++ b/path, and @@ hunk headers; *** Begin Patch format is not supported"},"preconditions":{"type":"array","description":"Exactly one current-state precondition for every changed path","items":{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path matching the diff target"},"sha256":{"type":"string","description":"Full sha256:... digest returned by read_file for an existing path"},"absent":{"type":"boolean","description":"Set true only when adding a path that does not exist"}},"required":["path"],"additionalProperties":false}}},"required":["patch","preconditions"],"additionalProperties":false}`),
 		Capabilities: []string{string(capability.FilesystemWrite)},
 	}
 }

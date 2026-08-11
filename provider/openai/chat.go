@@ -14,11 +14,13 @@ import (
 )
 
 type chatRequest struct {
-	Model               string        `json:"model"`
-	Messages            []chatMessage `json:"messages"`
-	Tools               []chatTool    `json:"tools,omitempty"`
-	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
-	Stream              bool          `json:"stream,omitempty"`
+	Model               string                    `json:"model"`
+	Messages            []chatMessage             `json:"messages"`
+	Tools               []chatTool                `json:"tools,omitempty"`
+	MaxCompletionTokens int                       `json:"max_completion_tokens,omitempty"`
+	PromptCacheKey      string                    `json:"prompt_cache_key,omitempty"`
+	PromptCacheOptions  *openAIPromptCacheOptions `json:"prompt_cache_options,omitempty"`
+	Stream              bool                      `json:"stream,omitempty"`
 	StreamOptions       *struct {
 		IncludeUsage bool `json:"include_usage"`
 	} `json:"stream_options,omitempty"`
@@ -26,9 +28,15 @@ type chatRequest struct {
 
 type chatMessage struct {
 	Role       string         `json:"role"`
-	Content    *string        `json:"content,omitempty"`
+	Content    any            `json:"content,omitempty"`
 	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+type chatContentBlock struct {
+	Type                  string                       `json:"type"`
+	Text                  string                       `json:"text"`
+	PromptCacheBreakpoint *openAIPromptCacheBreakpoint `json:"prompt_cache_breakpoint,omitempty"`
 }
 
 type chatTool struct {
@@ -67,9 +75,10 @@ type chatResponse struct {
 		} `json:"message"`
 	} `json:"choices"`
 	Usage struct {
-		PromptTokens     int64 `json:"prompt_tokens"`
-		CompletionTokens int64 `json:"completion_tokens"`
-		TotalTokens      int64 `json:"total_tokens"`
+		PromptTokens        int64              `json:"prompt_tokens"`
+		CompletionTokens    int64              `json:"completion_tokens"`
+		TotalTokens         int64              `json:"total_tokens"`
+		PromptTokensDetails *inputTokenDetails `json:"prompt_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -136,6 +145,7 @@ func messageFromChatResponse(response chatResponse) (agent.Message, error) {
 			response.Usage.PromptTokens,
 			response.Usage.CompletionTokens,
 			response.Usage.TotalTokens,
+			response.Usage.PromptTokensDetails,
 		),
 		ResponseID: response.ID,
 		Model:      response.Model,
@@ -181,9 +191,10 @@ type chatStreamAccumulator struct {
 	refusal      strings.Builder
 	finishReason string
 	usage        struct {
-		PromptTokens     int64 `json:"prompt_tokens"`
-		CompletionTokens int64 `json:"completion_tokens"`
-		TotalTokens      int64 `json:"total_tokens"`
+		PromptTokens        int64              `json:"prompt_tokens"`
+		CompletionTokens    int64              `json:"completion_tokens"`
+		TotalTokens         int64              `json:"total_tokens"`
+		PromptTokensDetails *inputTokenDetails `json:"prompt_tokens_details"`
 	}
 	calls     map[int]*chatStreamToolCall
 	completed bool
@@ -245,9 +256,10 @@ func (accumulator *chatStreamAccumulator) next() (agent.ModelStreamEvent, error)
 				} `json:"delta"`
 			} `json:"choices"`
 			Usage struct {
-				PromptTokens     int64 `json:"prompt_tokens"`
-				CompletionTokens int64 `json:"completion_tokens"`
-				TotalTokens      int64 `json:"total_tokens"`
+				PromptTokens        int64              `json:"prompt_tokens"`
+				CompletionTokens    int64              `json:"completion_tokens"`
+				TotalTokens         int64              `json:"total_tokens"`
+				PromptTokensDetails *inputTokenDetails `json:"prompt_tokens_details"`
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal(event.Data, &chunk); err != nil {
@@ -343,17 +355,35 @@ func (accumulator *chatStreamAccumulator) complete() (agent.ModelStreamEvent, er
 }
 
 func (provider *Provider) chatRequest(request agent.ModelRequest) (chatRequest, error) {
+	cachePlan, err := provider.validatedCachePlan(request)
+	if err != nil {
+		return chatRequest{}, err
+	}
 	messages := make([]chatMessage, 0, len(request.Messages)+1)
 	if request.Instructions != "" {
 		instructions := request.Instructions
 		messages = append(messages, chatMessage{Role: "system", Content: &instructions})
 	}
 
-	for _, message := range request.Messages {
+	breakpoints := make(map[int]struct{})
+	if cachePlan != nil && cachePlan.Mode == agent.CacheModeExplicit {
+		for _, breakpoint := range cachePlan.Breakpoints {
+			breakpoints[breakpoint.MessageIndex] = struct{}{}
+		}
+	}
+	for messageIndex, message := range request.Messages {
 		switch message.Role {
 		case agent.RoleUser:
 			text := message.Text
-			messages = append(messages, chatMessage{Role: "user", Content: &text})
+			content := any(&text)
+			if _, marked := breakpoints[messageIndex]; marked {
+				content = []chatContentBlock{{
+					Type:                  "text",
+					Text:                  text,
+					PromptCacheBreakpoint: &openAIPromptCacheBreakpoint{Mode: "explicit"},
+				}}
+			}
+			messages = append(messages, chatMessage{Role: "user", Content: content})
 		case agent.RoleAssistant:
 			converted := chatMessage{Role: "assistant"}
 			if message.Text != "" || len(message.ToolCalls) == 0 {
@@ -408,10 +438,17 @@ func (provider *Provider) chatRequest(request agent.ModelRequest) (chatRequest, 
 		})
 	}
 
-	return chatRequest{
+	payload := chatRequest{
 		Model:               provider.model,
 		Messages:            messages,
 		Tools:               tools,
 		MaxCompletionTokens: provider.maxOutputTokens,
-	}, nil
+	}
+	if cachePlan != nil && provider.CacheCapabilities().SupportsCacheKey {
+		payload.PromptCacheKey = cachePlan.FamilyID
+	}
+	if cachePlan != nil && cachePlan.Mode == agent.CacheModeExplicit {
+		payload.PromptCacheOptions = &openAIPromptCacheOptions{Mode: "explicit", TTL: cachePlan.TTL}
+	}
+	return payload, nil
 }

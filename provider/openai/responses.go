@@ -12,12 +12,23 @@ import (
 )
 
 type responsesRequest struct {
-	Model           string            `json:"model"`
-	Instructions    string            `json:"instructions,omitempty"`
-	Input           []json.RawMessage `json:"input"`
-	Tools           []responsesTool   `json:"tools,omitempty"`
-	MaxOutputTokens int               `json:"max_output_tokens,omitempty"`
-	Stream          bool              `json:"stream,omitempty"`
+	Model              string                    `json:"model"`
+	Instructions       string                    `json:"instructions,omitempty"`
+	Input              []json.RawMessage         `json:"input"`
+	Tools              []responsesTool           `json:"tools,omitempty"`
+	MaxOutputTokens    int                       `json:"max_output_tokens,omitempty"`
+	PromptCacheKey     string                    `json:"prompt_cache_key,omitempty"`
+	PromptCacheOptions *openAIPromptCacheOptions `json:"prompt_cache_options,omitempty"`
+	Stream             bool                      `json:"stream,omitempty"`
+}
+
+type openAIPromptCacheOptions struct {
+	Mode string         `json:"mode"`
+	TTL  agent.CacheTTL `json:"ttl,omitempty"`
+}
+
+type openAIPromptCacheBreakpoint struct {
+	Mode string `json:"mode"`
 }
 
 type responsesTool struct {
@@ -40,9 +51,10 @@ type responsesResponse struct {
 		Message string `json:"message"`
 	} `json:"error"`
 	Usage struct {
-		InputTokens  int64 `json:"input_tokens"`
-		OutputTokens int64 `json:"output_tokens"`
-		TotalTokens  int64 `json:"total_tokens"`
+		InputTokens        int64              `json:"input_tokens"`
+		OutputTokens       int64              `json:"output_tokens"`
+		TotalTokens        int64              `json:"total_tokens"`
+		InputTokensDetails *inputTokenDetails `json:"input_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -151,6 +163,7 @@ func (provider *Provider) messageFromResponsesResponse(response responsesRespons
 			response.Usage.InputTokens,
 			response.Usage.OutputTokens,
 			response.Usage.TotalTokens,
+			response.Usage.InputTokensDetails,
 		),
 		ResponseID: response.ID,
 		Model:      response.Model,
@@ -162,8 +175,18 @@ func (provider *Provider) messageFromResponsesResponse(response responsesRespons
 }
 
 func (provider *Provider) responsesRequest(request agent.ModelRequest) (responsesRequest, error) {
+	cachePlan, err := provider.validatedCachePlan(request)
+	if err != nil {
+		return responsesRequest{}, err
+	}
+	breakpoints := make(map[int]struct{})
+	if cachePlan != nil && cachePlan.Mode == agent.CacheModeExplicit {
+		for _, breakpoint := range cachePlan.Breakpoints {
+			breakpoints[breakpoint.MessageIndex] = struct{}{}
+		}
+	}
 	input := make([]json.RawMessage, 0, len(request.Messages))
-	for _, message := range request.Messages {
+	for messageIndex, message := range request.Messages {
 		if message.Role == agent.RoleAssistant {
 			if rawState, ok := stateData(message, provider.Name()); ok {
 				var items []json.RawMessage
@@ -177,22 +200,15 @@ func (provider *Provider) responsesRequest(request agent.ModelRequest) (response
 
 		switch message.Role {
 		case agent.RoleUser:
-			raw, err := json.Marshal(struct {
-				Type    string `json:"type"`
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			}{Type: "message", Role: "user", Content: message.Text})
+			_, marked := breakpoints[messageIndex]
+			raw, err := responsesInputMessage("user", "input_text", message.Text, marked)
 			if err != nil {
 				return responsesRequest{}, err
 			}
 			input = append(input, raw)
 		case agent.RoleAssistant:
 			if message.Text != "" || len(message.ToolCalls) == 0 {
-				raw, err := json.Marshal(struct {
-					Type    string `json:"type"`
-					Role    string `json:"role"`
-					Content string `json:"content"`
-				}{Type: "message", Role: "assistant", Content: message.Text})
+				raw, err := responsesInputMessage("assistant", "output_text", message.Text, false)
 				if err != nil {
 					return responsesRequest{}, err
 				}
@@ -253,11 +269,49 @@ func (provider *Provider) responsesRequest(request agent.ModelRequest) (response
 		})
 	}
 
-	return responsesRequest{
+	payload := responsesRequest{
 		Model:           provider.model,
 		Instructions:    request.Instructions,
 		Input:           input,
 		Tools:           tools,
 		MaxOutputTokens: provider.maxOutputTokens,
-	}, nil
+	}
+	if cachePlan != nil && provider.CacheCapabilities().SupportsCacheKey {
+		payload.PromptCacheKey = cachePlan.FamilyID
+	}
+	if cachePlan != nil && cachePlan.Mode == agent.CacheModeExplicit {
+		payload.PromptCacheOptions = &openAIPromptCacheOptions{Mode: "explicit", TTL: cachePlan.TTL}
+	}
+	return payload, nil
+}
+
+func responsesInputMessage(role, contentType, text string, breakpoint bool) (json.RawMessage, error) {
+	if !breakpoint {
+		return json.Marshal(struct {
+			Type    string `json:"type"`
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}{Type: "message", Role: role, Content: text})
+	}
+	return json.Marshal(struct {
+		Type    string `json:"type"`
+		Role    string `json:"role"`
+		Content []struct {
+			Type                  string                       `json:"type"`
+			Text                  string                       `json:"text"`
+			PromptCacheBreakpoint *openAIPromptCacheBreakpoint `json:"prompt_cache_breakpoint,omitempty"`
+		} `json:"content"`
+	}{
+		Type: "message",
+		Role: role,
+		Content: []struct {
+			Type                  string                       `json:"type"`
+			Text                  string                       `json:"text"`
+			PromptCacheBreakpoint *openAIPromptCacheBreakpoint `json:"prompt_cache_breakpoint,omitempty"`
+		}{{
+			Type:                  contentType,
+			Text:                  text,
+			PromptCacheBreakpoint: &openAIPromptCacheBreakpoint{Mode: "explicit"},
+		}},
+	})
 }

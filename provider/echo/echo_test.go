@@ -22,7 +22,7 @@ func TestProviderReturnsMostRecentUserMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
-	if message.Role != agent.RoleAssistant || message.Text != "second" {
+	if message.Role != agent.RoleAssistant || message.Text != "second" || message.StopReason != agent.StopReasonEndTurn {
 		t.Errorf("Complete() = %#v", message)
 	}
 }

@@ -207,7 +207,7 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 				},
 				"agents": {"main": {"provider": "primary"}}
 			}`,
-			want: `accepts only protocol, model, and auth_profile`,
+			want: `accepts only protocol, model, auth_profile, and pricing`,
 		},
 		{
 			name: "delegation cycle",
@@ -235,6 +235,49 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 				"agents": {"main": {"provider": "local"}}
 			}`,
 			want: "unsupported configuration version 2, want 1",
+		},
+		{
+			name: "context without evidence store",
+			document: `{
+				"version": 1,
+				"providers": {"local": {"protocol": "echo"}},
+				"agents": {"main": {"provider": "local", "context": {"max_input_bytes": 4096}}}
+			}`,
+			want: "context compaction requires a JSON Evidence Store",
+		},
+		{
+			name: "incomplete cache pricing",
+			document: `{
+				"version": 1,
+				"providers": {"local": {
+					"protocol": "echo",
+					"pricing": {
+						"currency": "USD",
+						"uncached_input_micros_per_million": 1,
+						"cache_read_micros_per_million": 0,
+						"cache_write_micros_per_million": 1
+					}
+				}},
+				"agents": {"main": {"provider": "local"}}
+			}`,
+			want: "cache read and write prices are required",
+		},
+		{
+			name: "invalid cache capability override",
+			document: `{
+				"version": 1,
+				"providers": {"local": {
+					"protocol": "openai-responses",
+					"base_url": "https://example.invalid/v1",
+					"model": "custom-model",
+					"cache_capabilities": {
+						"supports_explicit": true,
+						"max_write_breakpoints": 0
+					}
+				}},
+				"agents": {"main": {"provider": "local"}}
+			}`,
+			want: "explicit Cache Capability requires at least one breakpoint",
 		},
 	}
 
@@ -314,6 +357,69 @@ func TestLoadAllowsUnauthenticatedCustomEndpoint(t *testing.T) {
 	}
 	if _, err := configuration.ResolveAgent(""); err == nil || !strings.Contains(err.Error(), "default_agent") {
 		t.Errorf("ResolveAgent(default) error = %v", err)
+	}
+}
+
+func TestLoadBuildsContextAndCacheConfiguration(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfig(t, `{
+		"version": 1,
+		"providers": {
+			"local": {
+				"protocol": "echo",
+				"pricing": {
+					"currency": "USD",
+					"uncached_input_micros_per_million": 2000000,
+					"cache_read_micros_per_million": 200000,
+					"cache_write_micros_per_million": 2500000,
+					"output_micros_per_million": 10000000
+				}
+			}
+		},
+		"evidence": {"store": "json", "path": "evidence"},
+		"agents": {
+			"main": {
+				"provider": "local",
+				"context": {
+					"max_input_bytes": 2200,
+					"recent_messages": 2,
+					"checkpoint_max_bytes": 1000
+				},
+				"cache": {
+					"mode": "adaptive",
+					"expected_reuse": 3,
+					"isolation_key": "tenant-a",
+					"family": "project-a"
+				}
+			}
+		}
+	}`)
+	configuration, err := agentconfig.Load(path, agentconfig.LoadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer configuration.Close()
+	inputs := make([]agent.Message, 10)
+	for index := range inputs {
+		inputs[index] = agent.Message{Role: agent.RoleUser, Text: strings.Repeat("x", 500)}
+	}
+	result, err := configuration.Registry.Run(context.Background(), agent.RunRequest{
+		AgentID: "main",
+		Input:   inputs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ContextCheckpoint == nil || result.CachePlan == nil || result.CachePlan.Mode != agent.CacheModeDisabled {
+		t.Fatalf("configured Run result = %#v", result)
+	}
+	objects, ok := configuration.EvidenceStore.(agent.EvidenceObjectStore)
+	if !ok || len(result.ContextCheckpoint.Evidence) == 0 {
+		t.Fatal("configuration did not expose Checkpoint Evidence Objects")
+	}
+	if _, err := objects.GetObject(context.Background(), result.ContextCheckpoint.Evidence[0]); err != nil {
+		t.Fatalf("load Checkpoint source Evidence: %v", err)
 	}
 }
 

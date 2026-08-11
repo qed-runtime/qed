@@ -59,6 +59,7 @@ const (
 	responseJSONValueID      = "response-json"
 	evidenceStoreValueID     = "evidence-store"
 	runIDArgumentID          = "run-id"
+	evidenceDigestArgumentID = "evidence-digest"
 	verboseValueID           = "verbose"
 	extensionTargetID        = "extension-target"
 	buildProgramValueID      = "build-program"
@@ -278,6 +279,7 @@ func application(dependencies commandDependencies) *cli.Command {
 		Subcommand(authCommand(dependencies)).
 		Subcommand(sessionCommand(dependencies)).
 		Subcommand(evidenceCommand()).
+		Subcommand(cacheCommand()).
 		Subcommand(extensionCommand())
 }
 
@@ -1187,10 +1189,41 @@ func sessionCommand(dependencies commandDependencies) *cli.Command {
 
 func evidenceCommand() *cli.Command {
 	return cli.NewCommand("evidence").
-		About("Inspect and export persisted Run Evidence Bundles").
+		About("Inspect persisted Run Evidence and content-addressed objects").
 		RequireSubcommand().
 		Subcommand(inspectEvidenceCommand()).
-		Subcommand(exportEvidenceCommand())
+		Subcommand(exportEvidenceCommand()).
+		Subcommand(fetchEvidenceCommand())
+}
+
+func fetchEvidenceCommand() *cli.Command {
+	return cli.NewCommand("fetch").
+		About("Fetch one content-addressed Evidence Object").
+		Argument(
+			cli.Positional(evidenceDigestArgumentID).
+				Parser(cli.StringParser()).
+				Required().
+				Help("Evidence Object sha256 digest"),
+		).
+		Option(evidenceStoreOption()).
+		Handle(func(commandContext *cli.Context, invocation *cli.Invocation) (cli.Outcome, error) {
+			digest, diagnostic := requiredString(invocation, evidenceDigestArgumentID)
+			if diagnostic != nil {
+				return cli.Outcome{}, diagnostic
+			}
+			store, diagnostic := openEvidenceStore(commandContext, invocation)
+			if diagnostic != nil {
+				return cli.Outcome{}, diagnostic
+			}
+			content, err := store.GetObject(commandContext.Cancellation(), agent.EvidenceObjectRef{Digest: digest})
+			if err != nil {
+				return cli.Outcome{}, cli.NewDiagnostic(cli.CodeHandlerError, fmt.Sprintf("fetch Evidence Object: %v", err))
+			}
+			if _, err := commandContext.Stdout().Write(content); err != nil {
+				return cli.Outcome{}, cli.NewDiagnostic(cli.CodeIOError, fmt.Sprintf("write Evidence Object: %v", err))
+			}
+			return cli.Success(), nil
+		})
 }
 
 func inspectEvidenceCommand() *cli.Command {
@@ -1240,28 +1273,15 @@ func evidenceReadCommand(
 				Required().
 				Help("Run ID"),
 		).
-		Option(
-			cli.ValueOption(evidenceStoreValueID).
-				Long("store").
-				Parser(cli.StringParser()).
-				Default(".qed/evidence").
-				Help("Evidence Store directory"),
-		).
+		Option(evidenceStoreOption()).
 		Handle(func(commandContext *cli.Context, invocation *cli.Invocation) (cli.Outcome, error) {
 			runID, diagnostic := requiredString(invocation, runIDArgumentID)
 			if diagnostic != nil {
 				return cli.Outcome{}, diagnostic
 			}
-			storePath, diagnostic := requiredString(invocation, evidenceStoreValueID)
+			store, diagnostic := openEvidenceStore(commandContext, invocation)
 			if diagnostic != nil {
 				return cli.Outcome{}, diagnostic
-			}
-			if !filepath.IsAbs(storePath) {
-				storePath = filepath.Join(commandContext.CurrentDirectory(), storePath)
-			}
-			store, err := evidence.NewJSONStore(storePath)
-			if err != nil {
-				return cli.Outcome{}, cli.NewDiagnostic(cli.CodeHandlerError, fmt.Sprintf("open Evidence Store: %v", err))
 			}
 			bundle, err := store.Load(commandContext.Cancellation(), runID)
 			if err != nil {
@@ -1272,6 +1292,300 @@ func evidenceReadCommand(
 			}
 			return cli.Success(), nil
 		})
+}
+
+func cacheCommand() *cli.Command {
+	return cli.NewCommand("cache").
+		About("Inspect Provider prompt cache plans and usage").
+		RequireSubcommand().
+		Subcommand(cacheStatusCommand())
+}
+
+func cacheStatusCommand() *cli.Command {
+	return cli.NewCommand("status").
+		About("Show cache planning and usage for one stored Run").
+		Argument(
+			cli.Positional(runIDArgumentID).
+				Parser(cli.StringParser()).
+				Help("Run ID, defaulting to the newest stored Bundle"),
+		).
+		Option(evidenceStoreOption()).
+		Handle(func(commandContext *cli.Context, invocation *cli.Invocation) (cli.Outcome, error) {
+			store, diagnostic := openEvidenceStore(commandContext, invocation)
+			if diagnostic != nil {
+				return cli.Outcome{}, diagnostic
+			}
+			bundle, err := loadCacheStatusBundle(
+				commandContext.Cancellation(),
+				store,
+				optionalString(invocation, runIDArgumentID),
+			)
+			if err != nil {
+				return cli.Outcome{}, cli.NewDiagnostic(cli.CodeHandlerError, fmt.Sprintf("load cache status: %v", err))
+			}
+			if err := writeCacheStatus(commandContext, store, bundle); err != nil {
+				return cli.Outcome{}, cli.NewDiagnostic(cli.CodeIOError, fmt.Sprintf("write cache status: %v", err))
+			}
+			return cli.Success(), nil
+		})
+}
+
+func evidenceStoreOption() *cli.OptionSpec {
+	return cli.ValueOption(evidenceStoreValueID).
+		Long("store").
+		Parser(cli.StringParser()).
+		Default(".qed/evidence").
+		Help("Evidence Store directory")
+}
+
+func openEvidenceStore(
+	commandContext *cli.Context,
+	invocation *cli.Invocation,
+) (*evidence.JSONStore, *cli.Diagnostic) {
+	storePath, diagnostic := requiredString(invocation, evidenceStoreValueID)
+	if diagnostic != nil {
+		return nil, diagnostic
+	}
+	if !filepath.IsAbs(storePath) {
+		storePath = filepath.Join(commandContext.CurrentDirectory(), storePath)
+	}
+	store, err := evidence.NewJSONStore(storePath)
+	if err != nil {
+		return nil, cli.NewDiagnostic(cli.CodeHandlerError, fmt.Sprintf("open Evidence Store: %v", err))
+	}
+	return store, nil
+}
+
+func loadCacheStatusBundle(ctx context.Context, store *evidence.JSONStore, runID string) (evidence.Bundle, error) {
+	if runID != "" {
+		return store.Load(ctx, runID)
+	}
+	descriptors, err := store.List(ctx)
+	if err != nil {
+		return evidence.Bundle{}, err
+	}
+	if len(descriptors) == 0 {
+		return evidence.Bundle{}, errors.New("Evidence Store has no Run Bundles")
+	}
+	var newest evidence.Bundle
+	for _, descriptor := range descriptors {
+		bundle, err := store.Load(ctx, descriptor.ID)
+		if err != nil {
+			return evidence.Bundle{}, err
+		}
+		if newest.Run.ID == "" || bundle.CreatedAt.After(newest.CreatedAt) ||
+			(bundle.CreatedAt.Equal(newest.CreatedAt) && bundle.Run.ID > newest.Run.ID) {
+			newest = bundle
+		}
+	}
+	return newest, nil
+}
+
+func writeCacheStatus(commandContext *cli.Context, store *evidence.JSONStore, bundle evidence.Bundle) error {
+	currentEvent, currentIndex := latestCacheEvent(bundle.Events)
+	if currentEvent == nil || currentEvent.CachePlan == nil {
+		_, err := fmt.Fprintf(
+			commandContext.Stdout(),
+			"Run: %s\nCache plan: unavailable\nUsage: input=%d output=%d total=%d\n",
+			bundle.Run.ID,
+			bundle.Usage.InputTokens,
+			bundle.Usage.OutputTokens,
+			bundle.Usage.TotalTokens,
+		)
+		return err
+	}
+	plan := currentEvent.CachePlan
+	manifest := currentEvent.PrefixManifest
+	providerName := ""
+	model := bundle.Model.Name
+	if manifest != nil {
+		providerName = manifest.Provider
+		if manifest.Model != "" {
+			model = manifest.Model
+		}
+	}
+	if _, err := fmt.Fprintf(
+		commandContext.Stdout(),
+		"Run: %s\nProvider: %s\nModel: %s\nMode: %s\nCache family: %s\nTTL: %s\nBreakpoints: %d\nInput estimate: %d tokens (%s)\n",
+		bundle.Run.ID,
+		providerName,
+		model,
+		plan.Mode,
+		plan.FamilyID,
+		plan.TTL,
+		len(plan.Breakpoints),
+		plan.InputTokenEstimate,
+		plan.TokenEstimateKind,
+	); err != nil {
+		return err
+	}
+	if plan.FallbackReason != "" {
+		if _, err := fmt.Fprintf(commandContext.Stdout(), "Fallback: %s\n", plan.FallbackReason); err != nil {
+			return err
+		}
+	}
+	if bundle.Usage.InputTokenDetailsReported {
+		ratio := float64(0)
+		if bundle.Usage.InputTokens > 0 {
+			ratio = 100 * float64(bundle.Usage.CacheReadInputTokens) / float64(bundle.Usage.InputTokens)
+		}
+		if _, err := fmt.Fprintf(
+			commandContext.Stdout(),
+			"Usage: uncached=%d cache_read=%d cache_write=%d output=%d cache_read_ratio=%.2f%%\n",
+			bundle.Usage.UncachedInputTokens,
+			bundle.Usage.CacheReadInputTokens,
+			bundle.Usage.CacheWriteInputTokens,
+			bundle.Usage.OutputTokens,
+			ratio,
+		); err != nil {
+			return err
+		}
+	} else if _, err := fmt.Fprintf(
+		commandContext.Stdout(),
+		"Usage: input=%d output=%d total=%d cache_details=unreported\n",
+		bundle.Usage.InputTokens,
+		bundle.Usage.OutputTokens,
+		bundle.Usage.TotalTokens,
+	); err != nil {
+		return err
+	}
+	if plan.Forecast != nil {
+		if _, err := fmt.Fprintf(
+			commandContext.Stdout(),
+			"Forecast: currency=%s without_cache_micros=%d with_cache_micros=%d savings_micros=%d expected_uses=%d\n",
+			plan.Forecast.Currency,
+			plan.Forecast.WithoutCacheMicros,
+			plan.Forecast.WithCacheMicros,
+			plan.Forecast.SavingsMicros,
+			plan.Forecast.ExpectedUses,
+		); err != nil {
+			return err
+		}
+	}
+	if plan.Pricing != nil {
+		cost, err := agent.EstimateUsageCost(*plan.Pricing, bundle.Usage)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(
+			commandContext.Stdout(),
+			"Estimated actual cost: currency=%s input_micros=%d output_micros=%d total_micros=%d\n",
+			cost.Currency,
+			cost.InputMicros,
+			cost.OutputMicros,
+			cost.TotalMicros,
+		); err != nil {
+			return err
+		}
+	}
+	previous := previousManifestInEvents(bundle.Events, currentIndex)
+	if previous == nil && manifest != nil {
+		var err error
+		previous, err = previousStoredManifest(commandContext.Cancellation(), store, bundle, *manifest)
+		if err != nil {
+			return err
+		}
+	}
+	if manifest != nil {
+		divergence := firstManifestDivergence(previous, manifest)
+		if _, err := fmt.Fprintf(commandContext.Stdout(), "First divergence: %s\n", divergence); err != nil {
+			return err
+		}
+	}
+	for index := len(bundle.Events) - 1; index >= 0; index-- {
+		report := bundle.Events[index].ContextCompaction
+		if report == nil {
+			continue
+		}
+		_, err := fmt.Fprintf(
+			commandContext.Stdout(),
+			"Compaction: reason=%s original_bytes=%d compiled_bytes=%d source_messages=%d recent_messages=%d\n",
+			report.Reason,
+			report.OriginalBytes,
+			report.CompiledBytes,
+			report.SourceMessageCount,
+			report.RecentMessageCount,
+		)
+		return err
+	}
+	return nil
+}
+
+func latestCacheEvent(events []agent.Event) (*agent.Event, int) {
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Type == agent.EventModelRequest && events[index].CachePlan != nil {
+			event := events[index]
+			return &event, index
+		}
+	}
+	return nil, -1
+}
+
+func previousManifestInEvents(events []agent.Event, before int) *agent.PrefixManifest {
+	for index := before - 1; index >= 0; index-- {
+		if events[index].PrefixManifest != nil {
+			return events[index].PrefixManifest
+		}
+	}
+	return nil
+}
+
+func previousStoredManifest(
+	ctx context.Context,
+	store *evidence.JSONStore,
+	current evidence.Bundle,
+	manifest agent.PrefixManifest,
+) (*agent.PrefixManifest, error) {
+	descriptors, err := store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var selected evidence.Bundle
+	var selectedManifest *agent.PrefixManifest
+	for _, descriptor := range descriptors {
+		if descriptor.ID == current.Run.ID {
+			continue
+		}
+		bundle, err := store.Load(ctx, descriptor.ID)
+		if err != nil {
+			return nil, err
+		}
+		earlier := bundle.CreatedAt.Before(current.CreatedAt) ||
+			(bundle.CreatedAt.Equal(current.CreatedAt) && bundle.Run.ID < current.Run.ID)
+		if !earlier {
+			continue
+		}
+		event, _ := latestCacheEvent(bundle.Events)
+		if event == nil || event.PrefixManifest == nil || event.PrefixManifest.Provider != manifest.Provider ||
+			event.PrefixManifest.Model != manifest.Model || event.PrefixManifest.CacheFamily != manifest.CacheFamily {
+			continue
+		}
+		if selected.Run.ID == "" || bundle.CreatedAt.After(selected.CreatedAt) ||
+			(bundle.CreatedAt.Equal(selected.CreatedAt) && bundle.Run.ID > selected.Run.ID) {
+			selected = bundle
+			selectedManifest = event.PrefixManifest
+		}
+	}
+	return selectedManifest, nil
+}
+
+func firstManifestDivergence(previous, current *agent.PrefixManifest) string {
+	if previous == nil {
+		return "none (no earlier manifest in this cache family)"
+	}
+	maximum := min(len(previous.Segments), len(current.Segments))
+	for index := 0; index < maximum; index++ {
+		if previous.Segments[index] != current.Segments[index] {
+			return current.Segments[index].ID
+		}
+	}
+	if len(previous.Segments) == len(current.Segments) {
+		return "none"
+	}
+	if len(current.Segments) > maximum {
+		return current.Segments[maximum].ID + " (append-only)"
+	}
+	return previous.Segments[maximum].ID + " (removed)"
 }
 
 func resumeSessionCommand(dependencies commandDependencies) *cli.Command {

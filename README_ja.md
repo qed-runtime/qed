@@ -16,6 +16,7 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - manifest discoveryと開発時のatomic reload
 - fork不要でapplicationが所有する`extensions.lock` catalogとlive manifest validation
 - host所有Evidence Bundle
+- Evidence preservingなContext圧縮、Prefix Manifest、prompt cache Plan、正規化cache Usage
 - NagiベースのCLIと単一turn TUI
 - 末端のExtension processまで伝搬する安全な構造化diagnostics
 
@@ -47,6 +48,18 @@ go run ./cmd/qed run --prompt "hello" --output jsonl
 ```
 
 echo Providerは`run.started`、userとmodelのEvent、text delta、`run.completed`を含む完全なlifecycleを出力します
+
+`model.request.started`は本文を含まないPrefix ManifestとCache Planを出力します
+QED側のcache制御は設定するまで無効ですが、Provider側のimplicit behaviorは適用される場合があります
+prompt cache usageを返すProviderではcache read、write、uncached inputの正規化された内訳も記録します
+設定済みJSON Evidence Storeはcompactされたcontextの正確なobjectも保持します
+
+```sh
+qed cache status --store .qed/evidence
+qed evidence fetch sha256:<digest> --store .qed/evidence
+```
+
+[Context compilation、圧縮、prompt cache](docs/context-caching_ja.md)を参照してください
 
 root flagでstderrへの安全な構造化diagnosticsを有効にできます
 
@@ -98,6 +111,8 @@ go run ./cmd/qed run \
 
 custom base URLへ既定のOpenAIまたはAnthropic credentialを送りません
 信頼でき、認証が必要なcustom endpointに限り`QED_API_KEY`を設定します
+
+Provider adapterの実装者は実APIを呼ばずに[`provider/contracttest`](docs/providers_ja.md)の再利用可能な決定的suiteを適用できます
 
 ### ChatGPT subscriptionの利用
 

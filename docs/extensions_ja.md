@@ -119,6 +119,67 @@ serverは`Initialize`または`InitializeComponents`のどちらか一方だけ�
 Protocol stdoutにはframeだけを出力します
 humanまたはsafe debug diagnosticsは`Options.DebugWriter`経由でstderrへ出力します
 
+## Contract test kit
+
+`extension/contracttest`はlauncherとProtocol behaviorを確認するreference Extensionと再利用可能なsuiteを提供します
+process起動ごとに新しい`contracttest.ServerOptions()` fixtureをserveするcommandを渡します
+
+同じsuiteが次を検証します
+
+- Handshake、Initialize payload伝搬、Describe、HealthCheck
+- Tool invocation、dynamic capability、Hook delivery、Command invocation
+- Snapshot、Restore、Drain、Cancel、graceful Shutdown
+- child process crash isolation
+
+実際のExtension executableには`RunLifecycle`を使います
+Go以外の言語で実装したexecutableも対象にでき、指定したdeclarationをHandshake、Initialize、Describe、HealthCheck、Snapshot、Restore、Drain、Shutdownまで検証します
+
+```go
+contracttest.RunLifecycle(t, contracttest.LifecycleOptions{
+	Command:     command,
+	Declaration: declaration,
+	Initialize:  initializeRequest,
+})
+```
+
+Component semanticsと意図的なcrash behaviorはExtensionごとに異なるため、完全な`Run` suiteは標準reference fixtureを使います
+
+external executable testでは`TestMain`からfixtureをdispatchし、そのexecutableをsuiteへ渡せます
+
+```go
+func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == contracttest.ExternalChildArgument {
+		options := contracttest.ServerOptions()
+		if err := server.Serve(context.Background(), os.Stdin, os.Stdout, options); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func TestExternalContract(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contracttest.Run(t, contracttest.SuiteOptions{
+		Command: host.Command{
+			Path: executable,
+			Args: []string{contracttest.ExternalChildArgument},
+		},
+	})
+}
+```
+
+self-execでは`contracttest.Declaration()`と`contracttest.ServerOptions`を`selfexec.Definition`へ登録します
+そのCatalogを`TestMain`からdispatchし、`Definition.Command`で生成したcommandを同じ`contracttest.Run`へ渡します
+両launcherの実装例は[package contract test](../extension/contracttest/contracttest_test.go)を参照してください
+
+fixtureには意図的なprocess exit probeが含まれるため、専用のtest child processだけでserveします
+suiteが検証するのは共通processとProtocol contractです
+Extension固有の業務behavior、Policy decision、OS sandboxは個別にtestします
+
 ## External manifest
 
 conventional filenameは`qed-extension.json`です

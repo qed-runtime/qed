@@ -30,7 +30,9 @@ type ModelStreamEvent struct {
 // ModelStream yields Provider output until io.EOF
 //
 // Implementations must be safe to close concurrently with Next and must honor
-// the Context supplied to Provider.Stream.
+// the Context supplied to Provider.Stream. After one completed Message, Next
+// must return io.EOF on every subsequent call. Close must interrupt a blocked
+// Next call and release stream resources.
 type ModelStream interface {
 	Next() (ModelStreamEvent, error)
 	Close() error

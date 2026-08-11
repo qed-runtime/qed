@@ -1,10 +1,14 @@
 package session_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -167,6 +171,331 @@ func TestJSONLStorePreservesPrivateProviderContinuationState(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "opaque-secret-marker") {
 		t.Fatalf("public Event exposed private Provider state: %s", encoded)
+	}
+}
+
+func TestSessionStoresPreservePrefixManifest(t *testing.T) {
+	t.Parallel()
+
+	compiled, err := (agent.DefaultContextCompiler{}).Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: []agent.Message{{Role: agent.RoleUser, Text: "hello"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := agent.BuildPrefixManifest(
+		agent.PrefixManifestOptions{Provider: "test", Model: "test-model"},
+		compiled.Segments,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEpoch := manifest.Epoch
+	wantHash := manifest.Segments[0].ContentHash
+
+	stores := map[string]func(*testing.T) agent.SessionStore{
+		"memory": func(*testing.T) agent.SessionStore { return session.NewMemoryStore() },
+		"jsonl": func(t *testing.T) agent.SessionStore {
+			store, err := session.NewJSONLStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	for name, construct := range stores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := construct(t)
+			eventManifest := manifest
+			eventManifest.Segments = append([]agent.SegmentFingerprint(nil), manifest.Segments...)
+			if _, err := store.Append(context.Background(), "manifest", 0, []agent.Event{{
+				Type:           agent.EventModelRequest,
+				PrefixManifest: &eventManifest,
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			eventManifest.Epoch = "changed"
+			eventManifest.Segments[0].ContentHash = "changed"
+
+			snapshot, err := store.Load(context.Background(), "manifest")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshot.Events) != 1 || snapshot.Events[0].PrefixManifest == nil {
+				t.Fatalf("Snapshot Events = %#v", snapshot.Events)
+			}
+			stored := snapshot.Events[0].PrefixManifest
+			if stored.Epoch != wantEpoch || stored.Segments[0].ContentHash != wantHash {
+				t.Fatalf("stored Prefix Manifest = %#v", stored)
+			}
+		})
+	}
+}
+
+func TestSessionStoresIsolateCachePlans(t *testing.T) {
+	t.Parallel()
+
+	stores := map[string]func(*testing.T) agent.SessionStore{
+		"memory": func(*testing.T) agent.SessionStore { return session.NewMemoryStore() },
+		"jsonl": func(t *testing.T) agent.SessionStore {
+			store, err := session.NewJSONLStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	for name, construct := range stores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := construct(t)
+			plan := &agent.CachePlan{
+				Version:  1,
+				FamilyID: "cache_" + strings.Repeat("a", 64),
+				Mode:     agent.CacheModeExplicit,
+				Breakpoints: []agent.CacheBreakpoint{{
+					AfterSegmentID: "message/0000000000",
+				}},
+				Pricing:  &agent.CachePricing{Currency: "USD"},
+				Forecast: &agent.CostForecast{Currency: "USD"},
+			}
+			if _, err := store.Append(context.Background(), "cache-plan", 0, []agent.Event{{
+				Type:      agent.EventModelRequest,
+				CachePlan: plan,
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			plan.Breakpoints[0].AfterSegmentID = "changed"
+			plan.Pricing.Currency = "changed"
+			plan.Forecast.Currency = "changed"
+
+			first, err := store.Load(context.Background(), "cache-plan")
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored := first.Events[0].CachePlan
+			if stored == nil || stored.Breakpoints[0].AfterSegmentID != "message/0000000000" ||
+				stored.Pricing.Currency != "USD" || stored.Forecast.Currency != "USD" {
+				t.Fatalf("stored Cache Plan = %#v", stored)
+			}
+			stored.Breakpoints[0].AfterSegmentID = "mutated snapshot"
+			stored.Pricing.Currency = "mutated snapshot"
+
+			second, err := store.Load(context.Background(), "cache-plan")
+			if err != nil {
+				t.Fatal(err)
+			}
+			reloaded := second.Events[0].CachePlan
+			if reloaded.Breakpoints[0].AfterSegmentID != "message/0000000000" || reloaded.Pricing.Currency != "USD" {
+				t.Fatalf("reloaded Cache Plan = %#v", reloaded)
+			}
+		})
+	}
+}
+
+func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	stores := map[string]func(*testing.T) agent.SessionStore{
+		"memory": func(*testing.T) agent.SessionStore { return session.NewMemoryStore() },
+		"jsonl": func(t *testing.T) agent.SessionStore {
+			store, err := session.NewJSONLStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	for name, construct := range stores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			checkpoint := agent.ContextCheckpoint{
+				Version:            1,
+				Generation:         2,
+				SourceMessageCount: 3,
+				SourceHash:         "sha256:" + strings.Repeat("1", 64),
+				Narrative:          "checkpoint",
+				Evidence: []agent.EvidenceObjectRef{{
+					Digest:    "sha256:" + strings.Repeat("2", 64),
+					Bytes:     10,
+					MediaType: "application/json",
+				}},
+			}
+			report := agent.ContextCompactionReport{
+				Applied:       true,
+				Reason:        "input_limit",
+				OriginalBytes: 100,
+				CompiledBytes: 40,
+				Externalized:  append([]agent.EvidenceObjectRef(nil), checkpoint.Evidence...),
+			}
+			store := construct(t)
+			if _, err := store.Append(context.Background(), "checkpoint", 0, []agent.Event{{
+				Type:              agent.EventContextCompacted,
+				ContextCheckpoint: &checkpoint,
+				ContextCompaction: &report,
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			checkpoint.Narrative = "mutated"
+			report.Externalized[0].Digest = "mutated"
+			snapshot, err := store.Load(context.Background(), "checkpoint")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Checkpoint == nil || snapshot.Checkpoint.Narrative != "checkpoint" ||
+				len(snapshot.EvidenceObjects) != 1 || snapshot.EvidenceObjects[0].Digest == "mutated" {
+				t.Fatalf("Checkpoint Snapshot = %#v", snapshot)
+			}
+		})
+	}
+}
+
+func TestJSONLStoreUsesDeltaPrefixManifestRecords(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := session.NewJSONLStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments := make([]agent.SegmentFingerprint, 64)
+	for index := range segments {
+		segments[index] = agent.SegmentFingerprint{
+			ID:          fmt.Sprintf("stable/%04d", index),
+			Kind:        agent.SegmentKindMessage,
+			Version:     "1",
+			ContentHash: "sha256:" + strings.Repeat(fmt.Sprintf("%x", index%16), 64),
+			Bytes:       128,
+			Stability:   agent.StabilityAppendOnly,
+		}
+	}
+	var full bytes.Buffer
+	fullEncoder := json.NewEncoder(&full)
+	revision := uint64(0)
+	for turn := 0; turn < 80; turn++ {
+		segments = append(segments, agent.SegmentFingerprint{
+			ID:          fmt.Sprintf("message/%04d", turn),
+			Kind:        agent.SegmentKindMessage,
+			Version:     "1",
+			ContentHash: "sha256:" + strings.Repeat(fmt.Sprintf("%x", (turn+1)%16), 64),
+			Bytes:       128,
+			Stability:   agent.StabilityAppendOnly,
+		})
+		manifest := agent.PrefixManifest{
+			Version:  1,
+			Provider: "test",
+			Model:    "model",
+			Epoch:    fmt.Sprintf("epoch-%d", turn),
+			Segments: append([]agent.SegmentFingerprint(nil), segments...),
+		}
+		event := agent.Event{Type: agent.EventModelRequest, PrefixManifest: &manifest}
+		if _, err := store.Append(context.Background(), "delta", revision, []agent.Event{event}); err != nil {
+			t.Fatal(err)
+		}
+		revision++
+		if err := fullEncoder.Encode(struct {
+			Event agent.Event `json:"event"`
+		}{Event: event}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted []byte
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".jsonl") {
+			persisted, err = os.ReadFile(root + string(os.PathSeparator) + entry.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if len(persisted) == 0 || !bytes.Contains(persisted, []byte(`"prefix_manifest_delta"`)) {
+		t.Fatalf("persisted JSONL does not contain Prefix Manifest deltas: %s", persisted)
+	}
+	if len(persisted)*3 >= full.Len() {
+		t.Fatalf("delta JSONL size = %d, full records = %d", len(persisted), full.Len())
+	}
+	snapshot, err := store.Load(context.Background(), "delta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := snapshot.Events[len(snapshot.Events)-1].PrefixManifest
+	if last == nil || len(last.Segments) != len(segments) || last.Epoch != "epoch-79" {
+		t.Fatalf("restored final Prefix Manifest = %#v", last)
+	}
+}
+
+func TestJSONLStoreReadsFullPrefixManifestThenAppendsDelta(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := session.NewJSONLStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "legacy-manifest"
+	first := agent.PrefixManifest{
+		Version:  1,
+		Provider: "test",
+		Model:    "model",
+		Epoch:    "epoch-1",
+		Segments: []agent.SegmentFingerprint{{
+			ID:          "instructions",
+			Kind:        agent.SegmentKindInstructions,
+			Version:     "1",
+			ContentHash: "sha256:" + strings.Repeat("1", 64),
+			Bytes:       10,
+			Stability:   agent.StabilityProject,
+		}},
+	}
+	legacyRecord := struct {
+		Event agent.Event `json:"event"`
+	}{Event: agent.Event{
+		Type:            agent.EventModelRequest,
+		SessionID:       sessionID,
+		SessionRevision: 1,
+		PrefixManifest:  &first,
+	}}
+	encoded, err := json.Marshal(legacyRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(sessionID))
+	path := filepath.Join(root, fmt.Sprintf("%x.jsonl", digest))
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	second := first
+	second.Epoch = "epoch-2"
+	second.Segments = append(append([]agent.SegmentFingerprint(nil), first.Segments...), agent.SegmentFingerprint{
+		ID:          "message/0000000000",
+		Kind:        agent.SegmentKindMessage,
+		Version:     "1",
+		ContentHash: "sha256:" + strings.Repeat("2", 64),
+		Bytes:       20,
+		Stability:   agent.StabilityAppendOnly,
+	})
+	if _, err := store.Append(context.Background(), sessionID, 1, []agent.Event{{
+		Type:           agent.EventModelRequest,
+		PrefixManifest: &second,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Revision != 2 || len(snapshot.Events) != 2 ||
+		snapshot.Events[0].PrefixManifest == nil || snapshot.Events[0].PrefixManifest.Epoch != "epoch-1" ||
+		snapshot.Events[1].PrefixManifest == nil || snapshot.Events[1].PrefixManifest.Epoch != "epoch-2" ||
+		len(snapshot.Events[1].PrefixManifest.Segments) != 2 {
+		t.Fatalf("restored legacy and delta Manifests = %#v", snapshot.Events)
 	}
 }
 

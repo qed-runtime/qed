@@ -19,6 +19,9 @@ bounded project context、1つのcapability Policy、host所有Evidence、1つ�
 `apply_patch`での削除には`filesystem.delete`も必要です
 公式Tool argumentはunknown field、duplicate key、trailing value、invalid type、Tool固有limit violationを拒否するstrictかつboundedなdecoderを使います
 
+`apply_patch`は`--- a/path`と`+++ b/path`、および同じ意味のworkspace-relativeな`--- path`と`+++ path` headerを受理します
+model-facing Tool schemaとCoding Profile instructionはprefix付きcanonical形式を推奨し、`*** Begin Patch` markerではなく`@@` unified diff hunkを要求し、`read_file`が返した完全な`sha256:...` valueを変更せず使うようmodelへ伝えます
+
 QEDの`extensions.lock`はこの3つをself-exec向けに選択します
 同じProfileへ接続した追加の組み込みまたは外部ExtensionはToolとHookを提供できます
 Runはすべての設定Extensionを1つのgeneration setとして取得します
@@ -217,6 +220,9 @@ reload中はoldとnew processも重複可能でlockを共有しません
 `run_command`はargv、optionalなworkspace-relative working directory、optional timeoutを受け取ります
 executableを直接起動し、stdoutとstderrを別々にcaptureして上限を適用し、exit codeを報告し、Unixではcancelまたはtimeout後にprocess groupを終了します
 
+非0終了またはtimeoutでもstructured command responseは保持し、Tool resultをerrorとして記録します
+これによりProviderとEvidence Bundleは失敗したcheckと成功したcommandを区別できます
+
 executable lookupはProfileで選択した`PATH`だけを使います
 ExtensionまたはHost process environmentへfallbackしません
 
@@ -253,6 +259,44 @@ host所有Tool traceがdigestを使っていてもEvidence storageはcontent-bea
 
 verbose modeはCLIまたは`coding.Options.Verbose`からすべてのExtension Initialize requestへ伝搬します
 structured diagnosticsはproject context、prompt、Tool引数として渡したfile名、command output、environment value、credentialを除外します
+
+## 保護された実model検証
+
+manual opt-inのintegration testで実ChatGPT Codex modelに対するwrite path全体を検証できます
+
+```sh
+QED_LIVE_CODING_E2E=1 \
+QED_LIVE_CODING_AUTH_PROFILE=personal \
+QED_LIVE_CODING_MODEL=MODEL_ID \
+go test -mod=readonly -count=1 -v \
+  -run '^TestLiveCodingProfileWritesTemporaryWorkspace$' \
+  ./profile/coding
+```
+
+実行前に`qed auth login --auth-profile personal`でloginし、そのprofileで利用可能なmodelを選択します
+opt-in変数が正確に`1`でない場合はtestをskipし、profileとmodelの変数に暗黙の既定値はありません
+live runはsubscription quotaを消費する可能性があり、成功は選択modelとProvider serviceに依存します
+
+verbose test outputはProvider request、message境界、Tool実行、terminal Eventごとのcontent-free timelineを表示します
+逐次Provider Call番号、経過時間、固定allowlist内のTool名、Tool error flag、固定Tool error class、token数を含みます
+Tool error classは元のoutputを再表示せず、保護Policyの拒否、引数不正、patch構文不正、precondition失敗、patch競合、cancel、未分類の実行失敗を区別します
+prompt、text delta、model output、Tool引数、Tool output、response ID、credential valueは含みません
+最終failure行は既存Runtime errorを保持しますが、timelineはProvider error textを重複表示しません
+Run失敗時はProviderとToolの合計Call数、token usage、Evidence Tool数、最後のEventも表示します
+
+testはtest runnerのtemporary directory配下にsynthetic Git repositoryを構築し、model-facing ToolはQED worktreeを読みません
+Host側Policyは4つのsynthetic fileの読取、precondition付きの`calc.go`更新1回、正確な`go test ./...` command、read-onlyな`git_status`と`git_diff`だけを受理します
+command実行前にHostがすべてのsource fileを検査し、既知の安全なcontentのいずれかであることを確認します
+command environmentはGo module download、checksum service access、telemetry、VCS access、CGO、toolchain downloadを無効にします
+
+modelはRuntime budget内で非mutatingな`apply_patch`構文とpreconditionの失敗から自己修正できます
+Evidence検証は全試行を保持し、成功した変更が正確に1つあること、commandとGit確認が成功したこと、各失敗のvalidationまたはPolicy段階が整合することを要求します
+別pathの変更、未対応file操作、想定外Tool、未分類失敗からの継続は引き続きtestを失敗させます
+
+networkを使うのは設定したmodel requestと必要なauthentication refreshだけです
+Tool経由のnetwork access、任意command、Git write、追加file、absolute path、credential capabilityは拒否します
+ChatGPT credentialはHostに残り、Extension childのcomplete environmentへ含めません
+testはGit `HEAD`が変わらないこと、正確な最終worktree state、別のtemporary directoryに置いたprivate Evidence Bundleのsaveとload round tripも確認します
 
 ## 現在の制限
 

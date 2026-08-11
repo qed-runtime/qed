@@ -93,7 +93,7 @@ func TestChatCompletionsToolLoop(t *testing.T) {
                         "finish_reason":"stop",
                         "message":{"role":"assistant","content":"HELLO"}
                     }],
-                    "usage":{"prompt_tokens":20,"completion_tokens":2,"total_tokens":22}
+					"usage":{"prompt_tokens":20,"completion_tokens":2,"total_tokens":22,"prompt_tokens_details":{"cached_tokens":8,"cache_write_tokens":4}}
                 }`))
 		default:
 			t.Errorf("unexpected request count")
@@ -132,7 +132,9 @@ func TestChatCompletionsToolLoop(t *testing.T) {
 	if last.Text != "HELLO" || last.StopReason != agent.StopReasonEndTurn {
 		t.Errorf("last message = %#v", last)
 	}
-	if last.Usage == nil || last.Usage.TotalTokens != 22 {
+	if last.Usage == nil || last.Usage.TotalTokens != 22 ||
+		!last.Usage.InputTokenDetailsReported || last.Usage.UncachedInputTokens != 8 ||
+		last.Usage.CacheReadInputTokens != 8 || last.Usage.CacheWriteInputTokens != 4 {
 		t.Errorf("usage = %#v", last.Usage)
 	}
 }
@@ -204,7 +206,7 @@ func TestResponsesPreservesOutputItemsForToolContinuation(t *testing.T) {
                         "status":"completed",
                         "content":[{"type":"output_text","text":"HELLO","annotations":[]}]
                     }],
-                    "usage":{"input_tokens":14,"output_tokens":2,"total_tokens":16}
+					"usage":{"input_tokens":14,"output_tokens":2,"total_tokens":16,"input_tokens_details":{"cached_tokens":6,"cache_write_tokens":2}}
                 }`))
 		default:
 			t.Errorf("unexpected request count")
@@ -245,6 +247,10 @@ func TestResponsesPreservesOutputItemsForToolContinuation(t *testing.T) {
 	last := result.Messages[len(result.Messages)-1]
 	if last.Text != "HELLO" || last.ResponseID != "resp_2" {
 		t.Errorf("last message = %#v", last)
+	}
+	if last.Usage == nil || !last.Usage.InputTokenDetailsReported || last.Usage.UncachedInputTokens != 6 ||
+		last.Usage.CacheReadInputTokens != 6 || last.Usage.CacheWriteInputTokens != 2 {
+		t.Errorf("last Usage = %#v", last.Usage)
 	}
 }
 
