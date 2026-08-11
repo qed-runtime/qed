@@ -120,6 +120,9 @@ go run ./cmd/qed run \
 Custom base URLs never receive the default OpenAI or Anthropic credential. Set
 `QED_API_KEY` only when the custom endpoint is trusted and requires a key
 
+Provider adapter implementers can apply the reusable deterministic suite in
+[`provider/contracttest`](docs/providers.md) without calling a live API
+
 ### Use a ChatGPT subscription
 
 `openai-codex` uses a named ChatGPT OAuth profile instead of an OpenAI API key

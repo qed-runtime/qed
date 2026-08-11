@@ -112,6 +112,8 @@ go run ./cmd/qed run \
 custom base URLへ既定のOpenAIまたはAnthropic credentialを送りません
 信頼でき、認証が必要なcustom endpointに限り`QED_API_KEY`を設定します
 
+Provider adapterの実装者は実APIを呼ばずに[`provider/contracttest`](docs/providers_ja.md)の再利用可能な決定的suiteを適用できます
+
 ### ChatGPT subscriptionの利用
 
 `openai-codex`はOpenAI API keyではなく、名前付きChatGPT OAuth profileを利用します

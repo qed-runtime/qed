@@ -227,7 +227,9 @@ type ModelRequest struct {
 //
 // Implementations must honor context cancellation and must be safe for
 // concurrent use when a Runtime is shared by multiple callers. Stream must
-// eventually emit one completed Message with RoleAssistant or return an error
+// eventually emit one completed Message with RoleAssistant or return an error.
+// Name must return a stable, non-empty identity for diagnostics and opaque
+// Provider state ownership.
 type Provider interface {
 	Name() string
 	Stream(ctx context.Context, request ModelRequest) (ModelStream, error)

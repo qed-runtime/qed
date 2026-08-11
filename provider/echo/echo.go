@@ -53,7 +53,11 @@ func (provider *Provider) Complete(ctx context.Context, request agent.ModelReque
 	for index := len(request.Messages) - 1; index >= 0; index-- {
 		message := request.Messages[index]
 		if message.Role == agent.RoleUser {
-			return agent.Message{Role: agent.RoleAssistant, Text: message.Text}, nil
+			return agent.Message{
+				Role:       agent.RoleAssistant,
+				Text:       message.Text,
+				StopReason: agent.StopReasonEndTurn,
+			}, nil
 		}
 	}
 
