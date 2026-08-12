@@ -153,6 +153,75 @@ the Run. The handler receives the low-level handle so an in-process approval
 adapter can resume a waiting Run or queue steering without blocking Event
 drain
 
+The terminal `RunResult.ContextLedger` is the deterministic five-Ledger view of
+the accepted Event history. `agent.BuildContextLedger` rebuilds the same view
+from ordered Events, while `agent.ValidateContextLedger` rejects changed
+derived state. The Ledger is content-bearing because its Constraint entries
+retain exact user text; store and transmit it with the same protection as
+Session Events. A custom Context Compiler receives an isolated in-progress copy
+through `ContextCompileRequest.Ledger`
+
+A custom `CheckpointStrategy` receives an explicit `CheckpointRequest.Mode`,
+target `Generation`, exact raw `Messages`, isolated `Events`, and the matching
+Ledger. For `CheckpointBuildRawRebase`, `Previous` is always nil and
+`RebaseReason` identifies the deterministic trigger. The Strategy must rebuild
+from raw source instead of recursively summarizing its prior semantic output
+
+An embedding host can inject canonical state independently of any Profile
+
+```go
+runtime, err := agent.NewRuntime(agent.Options{
+    Provider:                provider,
+    CurrentWorldStateSource: source,
+})
+```
+
+`agent.CurrentWorldStateSource` receives isolated Run Events and the matching
+Ledger immediately before a logical Provider request. A Source must perform
+read-only bounded work and return structured file, Git, and observed-check
+state. A Source error fails the Run before the Provider call. Runtime validates
+and publishes `current_world_state.captured`; callers can verify a captured
+value with `agent.ValidateCurrentWorldState`. When using `profile/coding`
+directly, pass `codingProfile.CurrentWorldStateSource()` as shown in the Coding
+Profile guide. Declarative `qed.Host` configuration wires it automatically
+
+Constraint Facts use explicit lifecycle control rather than natural-language
+inference. A user Message without a directive creates an active Fact. Use an ID
+from `ContextLedger.Constraints`, or derive one from its source Event with
+`agent.ConstraintFactID`, when a later Run supersedes or resolves it
+
+```go
+targetID := previous.ContextLedger.Constraints[0].ID
+
+handle, err := runtime.Run(ctx, agent.RunRequest{
+    SessionID: previous.SessionID,
+    Input: []agent.Message{{
+        Role: agent.RoleUser,
+        Text: "Use PostgreSQL instead",
+        FactDirective: &agent.FactLifecycleDirective{
+            Action:  agent.FactLifecycleSupersede,
+            Targets: []string{targetID},
+        },
+    }},
+})
+```
+
+`supersede` retires every named active target and creates one active Fact from
+the current Message. `resolve` retires the targets without creating a Fact from
+the resolution Message. Targets must be unique earlier active Facts and are
+bounded by `agent.MaxFactLifecycleTargets`. Invalid shape returns
+`agent.ErrInvalidFactDirective`; `Steer` also classifies it as
+`agent.ErrInvalidSteeringMessage`. Runtime validates target state against the
+current Event prefix before Hooks or persistence; a steering target that is no
+longer active at its safe boundary fails the Run without committing that Event
+
+Runtime transfers input `Message.FactDirective` to `Event.FactDirective`. The
+stored and Provider-facing Message remains free of host lifecycle metadata. A
+published `user.message.added` Event is therefore the transition commit point
+
+Cross-Run transitions require a Session Store because target IDs identify
+source Events; replaying only prior Messages does not preserve those identities
+
 Use `Host.Start` instead when another request or worker must retain the handle,
 stream Events independently, or resume the Run later. A `Start` caller owns
 Event draining and `Wait`, and may call `Host.SaveRunEvidence` after completion
@@ -196,11 +265,36 @@ persisted Session. Without a Store, the caller must provide prior context.
 Reuse the same `*agent.Budget` explicitly only when one shared limit must span
 both Runs
 
-Compatibility note: steering adds the optional `user_message_origin` field to
-Event JSON, and existing Hooks subscribed to `user.message.added` also observe
-steering Messages. External decoders must accept that optional field. The Go
-`agent.Event` struct gained an exported field, so external composite literals
-should use field names
+Compatibility note: steering adds the optional `user_message_origin` field and
+Fact lifecycle adds the optional `fact_directive` field to Event JSON. Existing
+Hooks subscribed to `user.message.added` also observe these Events. External
+decoders must accept the optional fields. The Go `agent.Message` and
+`agent.Event` structs gained exported fields, and Ledger v2 extends
+`agent.ConstraintLedgerEntry`, so external composite literals should use field
+names
+
+Current World State adds the `current_world_state.captured` Event type, the
+optional `current_world_state` field on Events, terminal Results, and Session
+snapshots, and the `current_world_state` Segment kind. Strict Event-type switches
+must accept or deliberately ignore the new Event. Paths and command arguments
+inside a snapshot are content-bearing metadata even though file, diff, stdout,
+and stderr content is absent
+
+Deterministic Ledgers add optional `policy` metadata to Tool results,
+`context_ledger` to terminal Run results, and `ledger` references to new
+Checkpoints. The raw host Policy reason is not included, and Policy metadata is
+not copied into the model-facing Tool Message. Strict external JSON decoders
+must accept these additive fields. Ledger schema v2 adds Fact state and
+transition provenance; replay continues to verify Checkpoint references created
+by Ledger v1. Standalone v1 Ledger snapshots must be rebuilt from Events before
+validation because `ValidateContextLedger` compares against the current schema
+
+Safe-cut annotations add optional `context_operation` metadata to Tool results
+and `Events` to `ContextCompileRequest`. Runtime supplies an isolated exact
+Event prefix and validates it against the Ledger before semantic cuts. A direct
+compiler caller may omit Events to retain Tool-only boundaries. Extension peers
+must implement Protocol v2; v1 manifests and peers are rejected by exact
+version negotiation
 
 At shutdown, stop accepting new work, cancel or finish active Runs, and then
 call `Host.CloseContext` to drain and stop every owned Extension process

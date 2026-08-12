@@ -29,6 +29,11 @@ func TestToolProxyEnforcesPolicyAndRecordsEvidence(t *testing.T) {
 	if err != nil || result.Output != "ok" || result.CallID != "call-1" {
 		t.Fatalf("Execute() = %#v, %v", result, err)
 	}
+	if result.Policy == nil || result.Policy.Outcome != "allow" ||
+		len(result.Policy.Capabilities) != 1 || result.Policy.Capabilities[0] != string(capability.FilesystemRead) ||
+		!strings.HasPrefix(result.Policy.ReasonDigest, "sha256:") {
+		t.Fatalf("Tool Policy metadata = %#v", result.Policy)
+	}
 	records := recorder.ToolInvocations()
 	if len(records) != 1 || records[0].PolicyOutcome != "allow" || records[0].ArgumentsDigest == "" || records[0].OutputDigest == "" {
 		t.Fatalf("evidence = %#v", records)
@@ -46,9 +51,12 @@ func TestToolProxyReturnsDeniedAsToolError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = proxy.Execute(context.Background(), agent.ToolCall{ID: "call-1", Name: "record", Arguments: json.RawMessage(`{}`)})
+	result, err := proxy.Execute(context.Background(), agent.ToolCall{ID: "call-1", Name: "record", Arguments: json.RawMessage(`{}`)})
 	if !errors.Is(err, capability.ErrDenied) {
 		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.Policy == nil || result.Policy.Outcome != "deny" || result.Policy.ReasonDigest == "" {
+		t.Fatalf("denied Tool Policy metadata = %#v", result.Policy)
 	}
 }
 
@@ -104,13 +112,16 @@ func TestToolProxyRejectsInvalidInputBeforeCapabilitiesAndPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = proxy.Execute(context.Background(), agent.ToolCall{
+	result, err := proxy.Execute(context.Background(), agent.ToolCall{
 		ID:        "invalid-call",
 		Name:      "validated",
 		Arguments: json.RawMessage(`{"value":1}`),
 	})
 	if !errors.Is(err, agent.ErrToolInputValidation) || !strings.Contains(err.Error(), "$/value") {
 		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.Policy != nil {
+		t.Fatalf("validation failure recorded a Policy decision = %#v", result.Policy)
 	}
 	if tool.capabilityCalls != 0 || tool.executeCalls != 0 || policy.calls != 0 {
 		t.Fatalf(
@@ -127,13 +138,44 @@ func TestToolProxyRejectsInvalidInputBeforeCapabilitiesAndPolicy(t *testing.T) {
 	}
 }
 
-type recordingTool struct{}
+func TestToolProxyRejectsInvalidContextOperation(t *testing.T) {
+	t.Parallel()
+
+	policy, err := capability.NewStaticPolicy(capability.StaticPolicyOptions{
+		Allow: []capability.Name{capability.FilesystemRead},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := extension.NewTool(extension.ToolOptions{
+		Tool: recordingTool{
+			operation: &agent.ContextOperation{Kind: "unknown"},
+		},
+		Policy: policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := proxy.Execute(context.Background(), agent.ToolCall{
+		ID: "invalid-context-operation", Name: "record", Arguments: json.RawMessage(`{}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported Context operation") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.ContextOperation != nil {
+		t.Fatalf("invalid Context operation escaped Tool proxy = %#v", result.ContextOperation)
+	}
+}
+
+type recordingTool struct {
+	operation *agent.ContextOperation
+}
 
 func (recordingTool) Definition() agent.ToolDefinition {
 	return agent.ToolDefinition{Name: "record", Capabilities: []string{string(capability.FilesystemRead)}}
 }
 
-func (recordingTool) Execute(_ context.Context, call agent.ToolCall) (agent.ToolResult, error) {
+func (tool recordingTool) Execute(_ context.Context, call agent.ToolCall) (agent.ToolResult, error) {
 	var input struct {
 		Value string `json:"value"`
 	}
@@ -142,7 +184,7 @@ func (recordingTool) Execute(_ context.Context, call agent.ToolCall) (agent.Tool
 			return agent.ToolResult{}, err
 		}
 	}
-	return agent.ToolResult{Output: input.Value}, nil
+	return agent.ToolResult{Output: input.Value, ContextOperation: tool.operation}, nil
 }
 
 type validationBoundaryTool struct {

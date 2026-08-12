@@ -420,7 +420,9 @@ func applyEvent(snapshot *agent.SessionSnapshot, event agent.Event) {
 	switch event.Type {
 	case agent.EventUserMessageAdded, agent.EventMessageCompleted:
 		if event.Message != nil {
-			snapshot.Messages = append(snapshot.Messages, cloneMessage(*event.Message))
+			message := cloneMessage(*event.Message)
+			message.FactDirective = nil
+			snapshot.Messages = append(snapshot.Messages, message)
 		}
 	case agent.EventContextCompacted:
 		if event.ContextCheckpoint != nil {
@@ -432,6 +434,8 @@ func applyEvent(snapshot *agent.SessionSnapshot, event agent.Event) {
 				event.ContextCompaction.Externalized,
 			)
 		}
+	case agent.EventCurrentWorldStateCaptured:
+		snapshot.CurrentWorldState = cloneCurrentWorldState(event.CurrentWorldState)
 	case agent.EventToolStarted:
 		if event.ToolCall != nil {
 			call := cloneToolCall(*event.ToolCall)
@@ -439,7 +443,9 @@ func applyEvent(snapshot *agent.SessionSnapshot, event agent.Event) {
 		}
 	case agent.EventToolCompleted:
 		if event.Message != nil {
-			snapshot.Messages = append(snapshot.Messages, cloneMessage(*event.Message))
+			message := cloneMessage(*event.Message)
+			message.FactDirective = nil
+			snapshot.Messages = append(snapshot.Messages, message)
 		}
 		snapshot.PendingTool = nil
 	case agent.EventRunWaiting:
@@ -459,6 +465,7 @@ func cloneSnapshot(snapshot agent.SessionSnapshot) agent.SessionSnapshot {
 	snapshot.Messages = cloneMessages(snapshot.Messages)
 	snapshot.Events = cloneEvents(snapshot.Events)
 	snapshot.Checkpoint = cloneContextCheckpoint(snapshot.Checkpoint)
+	snapshot.CurrentWorldState = cloneCurrentWorldState(snapshot.CurrentWorldState)
 	snapshot.EvidenceObjects = append([]agent.EvidenceObjectRef(nil), snapshot.EvidenceObjects...)
 	if snapshot.PendingWait != nil {
 		request := cloneWaitRequest(*snapshot.PendingWait)
@@ -505,8 +512,18 @@ func cloneEvent(event agent.Event) agent.Event {
 	if event.ContextCompaction != nil {
 		report := *event.ContextCompaction
 		report.Externalized = append([]agent.EvidenceObjectRef(nil), event.ContextCompaction.Externalized...)
+		if event.ContextCompaction.Validation != nil {
+			validation := *event.ContextCompaction.Validation
+			validation.Failures = append(
+				[]agent.ContextValidationFailure(nil),
+				event.ContextCompaction.Validation.Failures...,
+			)
+			report.Validation = &validation
+		}
 		event.ContextCompaction = &report
 	}
+	event.FactDirective = cloneFactLifecycleDirective(event.FactDirective)
+	event.CurrentWorldState = cloneCurrentWorldState(event.CurrentWorldState)
 	if event.Message != nil {
 		message := cloneMessage(*event.Message)
 		event.Message = &message
@@ -517,6 +534,15 @@ func cloneEvent(event agent.Event) agent.Event {
 	}
 	if event.ToolResult != nil {
 		result := *event.ToolResult
+		if event.ToolResult.ContextOperation != nil {
+			operation := *event.ToolResult.ContextOperation
+			result.ContextOperation = &operation
+		}
+		if event.ToolResult.Policy != nil {
+			policy := *event.ToolResult.Policy
+			policy.Capabilities = append([]string(nil), event.ToolResult.Policy.Capabilities...)
+			result.Policy = &policy
+		}
 		event.ToolResult = &result
 	}
 	if event.WaitRequest != nil {
@@ -531,6 +557,36 @@ func cloneEvent(event agent.Event) agent.Event {
 	return event
 }
 
+func cloneCurrentWorldState(state *agent.CurrentWorldState) *agent.CurrentWorldState {
+	if state == nil {
+		return nil
+	}
+	cloned := *state
+	cloned.Snapshot.Files = make([]agent.CurrentWorldFile, len(state.Snapshot.Files))
+	for index := range state.Snapshot.Files {
+		cloned.Snapshot.Files[index] = state.Snapshot.Files[index]
+		if state.Snapshot.Files[index].Observation != nil {
+			observation := *state.Snapshot.Files[index].Observation
+			cloned.Snapshot.Files[index].Observation = &observation
+		}
+	}
+	if state.Snapshot.Git != nil {
+		gitState := *state.Snapshot.Git
+		gitState.Changes = append([]agent.CurrentWorldGitChange(nil), state.Snapshot.Git.Changes...)
+		if state.Snapshot.Git.Observation != nil {
+			observation := *state.Snapshot.Git.Observation
+			gitState.Observation = &observation
+		}
+		cloned.Snapshot.Git = &gitState
+	}
+	cloned.Snapshot.Checks = make([]agent.CurrentWorldCheck, len(state.Snapshot.Checks))
+	for index := range state.Snapshot.Checks {
+		cloned.Snapshot.Checks[index] = state.Snapshot.Checks[index]
+		cloned.Snapshot.Checks[index].Argv = append([]string(nil), state.Snapshot.Checks[index].Argv...)
+	}
+	return &cloned
+}
+
 func cloneMessages(messages []agent.Message) []agent.Message {
 	if messages == nil {
 		return nil
@@ -543,6 +599,7 @@ func cloneMessages(messages []agent.Message) []agent.Message {
 }
 
 func cloneMessage(message agent.Message) agent.Message {
+	message.FactDirective = cloneFactLifecycleDirective(message.FactDirective)
 	if message.ToolCalls != nil {
 		message.ToolCalls = make([]agent.ToolCall, len(message.ToolCalls))
 		for index := range message.ToolCalls {
@@ -559,6 +616,15 @@ func cloneMessage(message agent.Message) agent.Message {
 		message.ProviderState = &state
 	}
 	return message
+}
+
+func cloneFactLifecycleDirective(directive *agent.FactLifecycleDirective) *agent.FactLifecycleDirective {
+	if directive == nil {
+		return nil
+	}
+	cloned := *directive
+	cloned.Targets = append([]string(nil), directive.Targets...)
+	return &cloned
 }
 
 func cloneToolCall(call agent.ToolCall) agent.ToolCall {
@@ -580,6 +646,10 @@ func cloneContextCheckpoint(checkpoint *agent.ContextCheckpoint) *agent.ContextC
 		return nil
 	}
 	cloned := *checkpoint
+	if checkpoint.Ledger != nil {
+		ledger := *checkpoint.Ledger
+		cloned.Ledger = &ledger
+	}
 	if checkpoint.Goal != nil {
 		goal := *checkpoint.Goal
 		cloned.Goal = &goal

@@ -15,7 +15,7 @@ var Catalog = selfexec.MustNewCatalog([]selfexec.Definition{
 		Manifest: extensionmanifest.Declaration{
 			ID:              "downstream.greeting",
 			Version:         "1.0.0",
-			ProtocolVersion: 1,
+			ProtocolVersion: 2,
 			Capabilities:    []string{"downstream.read"},
 		},
 		ServerOptions: extension0.ServerOptions,

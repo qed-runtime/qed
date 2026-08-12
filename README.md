@@ -21,8 +21,15 @@ executable today
 - non-overwriting Go Extension scaffolds with lifecycle contract tests
 - fork-free, application-owned `extensions.lock` catalogs with live manifest validation
 - host-owned Evidence Bundles
-- Evidence-preserving Context compression, Prefix Manifests, prompt-cache Plans,
-  and normalized cache Usage
+- deterministic Artifact, Execution, Constraint, Policy, and Task Ledgers with
+  explicit Fact lifecycle, rebuilt from ordered Session Events
+- canonical Current World State snapshots for relevant file hashes, Git state,
+  and observed check freshness
+- Evidence-preserving Context compression with approval, subagent,
+  edit-verification, commit, and Tool-transaction safe cuts, deterministic
+  preservation reports, and pre-Provider rollback
+- content-free Context inspect, explain, diff, and aggregate quality metrics
+- Prefix Manifests, prompt-cache Plans, and normalized cache Usage
 - Nagi-based CLI and multi-turn TUI
 - safe structured diagnostics propagated to the final Extension process
 
@@ -64,6 +71,7 @@ Evidence Stores also retain exact compacted context objects
 
 ```sh
 qed cache status --store .qed/evidence
+qed context inspect <run-id> --store .qed/evidence
 qed evidence fetch sha256:<digest> --store .qed/evidence
 ```
 
@@ -220,7 +228,7 @@ not excluded by standard Git ignore rules within the same bounded patch.
 
 The checked-in `extensions.lock` selects the reusable `qed.workspace`,
 `qed.process`, and `qed.git` Extensions for this binary. Each runs across
-Extension Protocol v1, including the single-binary self-exec mode
+Extension Protocol v2, including the single-binary self-exec mode
 
 ```json
 {
@@ -298,6 +306,13 @@ discard steering that has not reached that Event. Follow-ups get a new Run ID
 and local limits; without a Session Store the caller must provide prior context
 itself. Reuse the same `*agent.Budget` explicitly when limits must span Runs
 
+Hosts can attach `FactLifecycleDirective` to a user Message to supersede or
+resolve earlier active Constraint Fact IDs. Runtime moves the directive to the
+committed `user.message.added` Event, keeps it out of Provider conversation
+history, and deterministically rebuilds active, superseded, and resolved state
+without interpreting natural language. See
+[Context and caching](docs/context-caching.md) for the lifecycle contract
+
 The experimental TUI maps Enter to active-Run steering and, after the current
 Run reaches its terminal result, to a follow-up Run. A configured `--session-id`
 replays the persisted Session. Without one, the TUI carries the preceding Run
@@ -327,10 +342,14 @@ save a separate Evidence Bundle when an Evidence Store is configured
 ```sh
 go run ./cmd/qed run inspect <run-id> --store .qed/evidence
 go run ./cmd/qed run export <run-id> --store .qed/evidence
+go run ./cmd/qed context inspect <run-id> --store .qed/evidence
+go run ./cmd/qed context explain <run-id> --store .qed/evidence
 ```
 
 The equivalent `qed evidence inspect` and `qed evidence export` commands are
-also available
+also available. `qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after
+RUN_ID[@EVENT_SEQUENCE]` compares two compaction decisions without printing
+message, path, command, or Evidence object content
 
 ## Experimental TUI
 

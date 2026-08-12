@@ -46,7 +46,65 @@ Prefix Manifest on `model.request.started`; Session and Evidence Stores retain
 that Event. The default compiler stabilizes Tool order and JSON schemas. The
 optional compacting compiler keeps raw Session messages immutable, stores exact
 compacted prefixes and large Tool output in a content-addressed Evidence Object
-Store, and publishes a validated typed Checkpoint plus recent raw tail
+Store, and publishes a validated typed Checkpoint plus recent raw tail. Runtime
+also supplies an isolated copy of the exact Event prefix. The compiler validates
+that prefix against the Ledger and derives safe cuts without relying on Tool
+names in Runtime Core
+
+The first Checkpoint is a Raw Event Rebase. Later generations may update from a
+validated previous semantic view, while a deterministic generation interval,
+an explicit Fact lifecycle change, or a Checkpoint Fact contradicted by the
+current Ledger forces a rebuild with no previous Checkpoint. The Strategy still
+receives the exact raw Messages, validated Events, and derived Ledger. Runtime
+publishes the Rebase reason with `context.compacted` and persists the latest
+Rebase generation in the Checkpoint
+
+Every new candidate also produces a deterministic, content-free preservation
+report. Core compares active Constraint identities across the Checkpoint and
+raw tail, keeps Current World State changes and failures, protects pending Tool
+transactions, and resolves each required Evidence object by digest and size. A
+custom candidate that fails these checks falls back to the deterministic
+strategy. A failed deterministic candidate is never published: Runtime keeps a
+validated previous Checkpoint plus raw tail when it fits, records the rollback
+before the next model request, or stops before Provider I/O. Event replay checks
+the report counts, candidate generation, and rollback transition
+
+`agent.BuildContextReport` projects the persisted public Event stream into a
+content-free timeline and aggregate metrics. The projection keeps stable reason
+codes, byte and item counts, ratios, generations, and validation outcomes, but
+does not copy messages, paths, commands, object digests, or object content.
+`ContextReport.Snapshot` selects an exact Run Event sequence and
+`agent.DiffContextSnapshots` compares two projections, which lets the CLI and
+embedded hosts share the same observability contract
+
+`agent.ToolResult.ContextOperation` carries a validated, content-free
+classification for mutation, verification, commit, or subagent work. It never
+enters the model-facing Tool Message and does not grant authority or prove a
+Tool outcome. Safe-cut reconstruction protects every Tool Call and result batch,
+keeps approval inside that transaction, and keeps a mutation with subsequent
+work through its first verification, commit, or next user boundary
+
+Before each Context Compiler call, Runtime reduces the complete ordered Session
+and active-Run Event prefix into an `agent.ContextLedger`. Its five typed
+ledgers describe only Runtime-observable artifacts, executions, explicit user
+Fact lifecycle, authorization decisions, and Run tasks. A user Message creates
+an active Constraint Fact unless the host explicitly marks earlier active Fact
+IDs as superseded or resolved. The reducer never infers a transition from text.
+It neither calls a model nor reads live filesystem or Git state. A custom
+Compiler receives
+an isolated Ledger copy, the terminal `RunResult` exposes the final generation,
+and a compacted Checkpoint retains a content-free reference that replay verifies
+against its exact preceding Event prefix
+
+Runtime can also call an injected `agent.CurrentWorldStateSource` at each safe
+logical Provider boundary. The Source reads canonical host state without
+mutating it and returns a bounded snapshot tied to the exact preceding Ledger
+generation. Runtime validates and publishes `current_world_state.captured`,
+then supplies the snapshot as a required volatile Context Segment without
+adding it to replayable conversation Messages. The Coding Profile implements
+this host boundary with current workspace hashes, read-only Git status and
+diff, and exact prior `run_command` outcomes; Runtime Core retains no
+filesystem or Git implementation
 
 `agent.CachePlanner` combines host policy with Provider capabilities after
 compilation. QED cache controls are disabled by default. An enabled Plan carries
@@ -81,7 +139,9 @@ delta form and the earlier full form
 `profile/coding` assembles bounded project context, one capability Policy, an
 Evidence recorder, and one or more process-isolated Extensions. The reusable
 `qed.workspace`, `qed.process`, and `qed.git` Extensions contribute its six
-standard Tools while keeping them outside Runtime Core
+standard Tools while keeping them outside Runtime Core. The Profile also owns
+the default read-only Current World State Source and applies the same Policy
+and Run capability restriction before canonical reads
 
 `extension.ToolProxy` and `extension.CommandProxy` are host enforcement points.
 Tool input is schema-validated before invocation-specific capability discovery,
@@ -89,11 +149,12 @@ Policy, or approval. The proxies then combine capabilities, evaluate Policy,
 request approval when required, and invoke the remote component only after
 authorization. Tool Evidence is recorded in the Host
 
-`extension/protocol` defines Protocol v1 as 4-byte big-endian length-prefixed
+`extension/protocol` defines Protocol v2 as 4-byte big-endian length-prefixed
 strict JSON over stdio. `extension/server` adapts Go Tools, Hooks, Commands, and
 lifecycle callbacks to that contract and revalidates Tool input before direct
-RPC calls reach component code. `extension/host` supervises processes and
-generation leases
+RPC calls reach component code. Protocol v2 adds Tool-result
+`context_operation` metadata; exact version negotiation intentionally rejects
+v1 peers. `extension/host` supervises processes and generation leases
 
 `extension/manifest` validates the transport-independent declaration shared by
 external and embedded Extensions, resolves distributable manifests, and
@@ -143,6 +204,7 @@ For each candidate Event, Runtime performs this order
 
 ```text
 assign Run identity and candidate sequence
+  -> validate an explicit Fact transition against the Event prefix
   -> invoke matching synchronous Hooks
   -> append to the Session Store when configured
   -> publish to RunHandle.Events
@@ -166,6 +228,16 @@ queued steering as `user.message.added` Events before compiling the next
 Provider request. These Events set `UserMessageOrigin` to `steering`; Event
 publication is the observable point at which steering has entered Session
 state. A queue acceptance alone is not a persistence acknowledgement
+
+Fact lifecycle is host control metadata on user input. Runtime validates its
+shape at submission, moves it from `Message.FactDirective` to
+`Event.FactDirective`, and checks target existence and active state before Hooks
+or persistence. `supersede` retires earlier targets and creates one active
+replacement, while `resolve` retires targets without creating a Fact from the
+resolution Message. Stored and Provider-facing conversation Messages do not
+retain the directive. Ledger v2 records the raw message index, current state,
+state source, transition sources, and both directions of supersedes edges;
+replay also validates references emitted by Ledger v1
 
 An observed `run.waiting` rejects new steering with `ErrRunWaiting`. Steering
 queued before the wait remains pending until the matching resume and Tool

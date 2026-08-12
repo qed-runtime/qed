@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -561,6 +562,14 @@ func TestRuntimeExecutesToolAndContinues(t *testing.T) {
 	if len(result.ToolResults) != 1 || result.ToolResults[0].Output != "HELLO" {
 		t.Fatalf("ToolResults = %#v, want one HELLO result", result.ToolResults)
 	}
+	if result.ContextLedger == nil || len(result.ContextLedger.Tasks) != 1 ||
+		result.ContextLedger.Tasks[0].State != agent.TaskLedgerCompleted ||
+		len(result.ContextLedger.Artifacts) != 1 || len(result.ContextLedger.Executions) != 3 {
+		t.Fatalf("Context Ledger = %#v", result.ContextLedger)
+	}
+	if err := agent.ValidateContextLedger(context.Background(), *result.ContextLedger, events); err != nil {
+		t.Fatalf("validate terminal Context Ledger: %v", err)
+	}
 
 	requests := provider.Requests()
 	if len(requests) != 2 {
@@ -926,6 +935,257 @@ func TestRuntimeFailsBeforeProviderCallWhenContextCompilationFails(t *testing.T)
 	}
 }
 
+func TestRuntimeRejectsInvalidContextRebaseBeforePublication(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{{message: agent.Message{Role: agent.RoleAssistant, Text: "unused"}}}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		ContextCompiler: contextCompilerFunc(func(ctx context.Context, request agent.ContextCompileRequest) (agent.CompiledContext, error) {
+			compiled, err := (agent.DefaultContextCompiler{}).Compile(ctx, request)
+			if err != nil {
+				return agent.CompiledContext{}, err
+			}
+			compiled.Checkpoint = &agent.ContextCheckpoint{Generation: 1, LastRebaseGeneration: 1}
+			compiled.Compaction = &agent.ContextCompactionReport{
+				Applied: true, Rebased: true, RebaseReason: "unknown",
+			}
+			return compiled, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, runErr := collectRun(handle)
+	if runErr == nil || !strings.Contains(runErr.Error(), "unsupported Rebase reason") {
+		t.Fatalf("Run error = %v", runErr)
+	}
+	if result.ProviderCalls != 0 || len(provider.Requests()) != 0 {
+		t.Fatalf("Provider calls = %d/%d", result.ProviderCalls, len(provider.Requests()))
+	}
+	for _, event := range events {
+		if event.Type == agent.EventContextCompacted {
+			t.Fatalf("invalid context.compacted Event was published: %#v", events)
+		}
+	}
+}
+
+func TestRuntimeRejectsInvalidContextValidationBeforePublication(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{{message: agent.Message{Role: agent.RoleAssistant, Text: "unused"}}}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		ContextCompiler: contextCompilerFunc(func(ctx context.Context, request agent.ContextCompileRequest) (agent.CompiledContext, error) {
+			compiled, err := (agent.DefaultContextCompiler{}).Compile(ctx, request)
+			if err != nil {
+				return agent.CompiledContext{}, err
+			}
+			compiled.Compaction = &agent.ContextCompactionReport{
+				Applied: true,
+				Validation: &agent.ContextValidationReport{
+					Version: agent.ContextValidationVersion, CandidateGeneration: 1,
+					CandidateSourceMessageCount: 1, Passed: true,
+				},
+			}
+			return compiled, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, runErr := collectRun(handle)
+	if runErr == nil || !strings.Contains(runErr.Error(), "requires an applied Checkpoint") {
+		t.Fatalf("Run error = %v", runErr)
+	}
+	if result.ProviderCalls != 0 || len(provider.Requests()) != 0 {
+		t.Fatalf("Provider calls = %d/%d", result.ProviderCalls, len(provider.Requests()))
+	}
+	for _, event := range events {
+		if event.Type == agent.EventContextCompacted {
+			t.Fatalf("invalid context.compacted Event was published: %#v", events)
+		}
+	}
+}
+
+func TestRuntimePublishesContextValidationRollbackBeforeProviderCall(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewMemoryStore()
+	compiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
+		MaxInputBytes:            7500,
+		RecentMessages:           1,
+		EvidenceThresholdBytes:   4096,
+		EvidenceExcerptBytes:     256,
+		CheckpointMaxBytes:       5200,
+		RebaseGenerationInterval: 1,
+	}, evidence.NewMemoryObjectStore(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{responses: []providerResponse{
+		{message: agent.Message{Role: agent.RoleAssistant, Text: "first done"}},
+		{message: agent.Message{Role: agent.RoleAssistant, Text: "second done"}},
+	}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider, SessionStore: store, ContextCompiler: compiler,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		SessionID: "validation-rollback", Input: validationConstraintMessages(18),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, first, err := collectRun(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ContextCheckpoint == nil || first.ContextCheckpoint.Generation != 1 {
+		t.Fatalf("first Context Checkpoint = %#v", first.ContextCheckpoint)
+	}
+	handle, err = runtime.Run(context.Background(), agent.RunRequest{
+		SessionID: "validation-rollback",
+		Input:     []agent.Message{{Role: agent.RoleUser, Text: "next constraint"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, second, err := collectRun(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactionIndex := -1
+	modelIndex := -1
+	for index, event := range events {
+		switch event.Type {
+		case agent.EventContextCompacted:
+			compactionIndex = index
+			if event.ContextCheckpoint != nil || event.ContextCompaction == nil ||
+				event.ContextCompaction.Validation == nil || event.ContextCompaction.Validation.Passed ||
+				event.ContextCompaction.Validation.Rollback != agent.ContextValidationRollbackPrevious {
+				t.Fatalf("validation rollback Event = %#v", event)
+			}
+		case agent.EventModelRequest:
+			if modelIndex == -1 {
+				modelIndex = index
+			}
+		}
+	}
+	if compactionIndex < 0 || modelIndex < 0 || compactionIndex >= modelIndex ||
+		second.ContextCheckpoint == nil || second.ContextCheckpoint.Generation != 1 ||
+		second.ContextCompaction == nil || second.ContextCompaction.Validation == nil ||
+		second.ContextCompaction.Validation.Rollback != agent.ContextValidationRollbackPrevious {
+		t.Fatalf("rollback/model/result = %d/%d/%#v", compactionIndex, modelIndex, second)
+	}
+	snapshot, err := store.Load(context.Background(), "validation-rollback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Checkpoint == nil || snapshot.Checkpoint.Generation != 1 {
+		t.Fatalf("Session retained Checkpoint = %#v", snapshot.Checkpoint)
+	}
+}
+
+func TestRuntimeSuppliesIsolatedContextLedgerToCompiler(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{{message: agent.Message{Role: agent.RoleAssistant, Text: "done"}}}}
+	var observed agent.ContextLedgerReference
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		ContextCompiler: contextCompilerFunc(func(ctx context.Context, request agent.ContextCompileRequest) (agent.CompiledContext, error) {
+			if request.Ledger == nil || len(request.Ledger.Tasks) != 1 || request.Ledger.Tasks[0].State != agent.TaskLedgerRunning {
+				return agent.CompiledContext{}, fmt.Errorf("compiler Context Ledger = %#v", request.Ledger)
+			}
+			if len(request.Events) != 2 || request.Events[0].Type != agent.EventRunStarted ||
+				request.Events[1].Type != agent.EventUserMessageAdded {
+				return agent.CompiledContext{}, fmt.Errorf("compiler Events = %#v", request.Events)
+			}
+			observed = request.Ledger.Reference()
+			request.Ledger.Tasks[0].State = agent.TaskLedgerFailed
+			request.Events[0].Type = agent.EventRunFailed
+			request.Events[1].Message.Text = "compiler mutation"
+			return (agent.DefaultContextCompiler{}).Compile(ctx, request)
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, err := collectRun(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.SourceEventCount != 2 || result.ContextLedger == nil ||
+		result.ContextLedger.Tasks[0].State != agent.TaskLedgerCompleted ||
+		result.ContextLedger.SourceEventCount <= observed.SourceEventCount {
+		t.Fatalf("compiler/terminal Context Ledger = %#v / %#v", observed, result.ContextLedger)
+	}
+	if err := agent.ValidateContextLedger(context.Background(), *result.ContextLedger, events); err != nil {
+		t.Fatalf("validate terminal Context Ledger: %v", err)
+	}
+}
+
+func TestRuntimeConvertsInvalidToolContextOperationToToolError(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{
+		{message: agent.Message{
+			Role:      agent.RoleAssistant,
+			ToolCalls: []agent.ToolCall{{ID: "invalid-context", Name: "invalid_context"}},
+		}},
+		{message: agent.Message{Role: agent.RoleAssistant, Text: "recovered"}},
+	}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		Tools:    []agent.Tool{invalidContextOperationTool{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, runErr := collectRun(handle)
+	if runErr != nil || result.Status != agent.RunStatusCompleted || len(result.ToolResults) != 1 ||
+		!result.ToolResults[0].IsError || result.ToolResults[0].ContextOperation != nil ||
+		!strings.Contains(result.ToolResults[0].Output, "invalid context operation") {
+		t.Fatalf("Run = %#v, error = %v", result, runErr)
+	}
+	completed := false
+	for _, event := range events {
+		if event.Type == agent.EventToolCompleted && event.ToolResult != nil {
+			completed = event.ToolResult.IsError && event.ToolResult.ContextOperation == nil
+		}
+	}
+	if !completed {
+		t.Fatal("invalid context operation Tool error was not committed")
+	}
+}
+
 func TestRuntimeReturnsToolErrorsToProvider(t *testing.T) {
 	t.Parallel()
 
@@ -1182,11 +1442,11 @@ func TestRuntimePublishesAndReusesContextCheckpoint(t *testing.T) {
 	store := session.NewMemoryStore()
 	objects := evidence.NewMemoryObjectStore()
 	compiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
-		MaxInputBytes:          2200,
+		MaxInputBytes:          4700,
 		RecentMessages:         1,
 		EvidenceThresholdBytes: 4096,
 		EvidenceExcerptBytes:   256,
-		CheckpointMaxBytes:     1000,
+		CheckpointMaxBytes:     3200,
 	}, objects, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1221,7 +1481,10 @@ func TestRuntimePublishesAndReusesContextCheckpoint(t *testing.T) {
 		switch event.Type {
 		case agent.EventContextCompacted:
 			contextIndex = index
-			if event.ContextCheckpoint == nil || event.ContextCompaction == nil {
+			if event.ContextCheckpoint == nil || event.ContextCompaction == nil ||
+				event.ContextCheckpoint.LastRebaseGeneration != event.ContextCheckpoint.Generation ||
+				!event.ContextCompaction.Rebased ||
+				event.ContextCompaction.RebaseReason != agent.ContextRebaseInitial {
 				t.Fatalf("context.compacted Event = %#v", event)
 			}
 		case agent.EventModelRequest:
@@ -1232,6 +1495,30 @@ func TestRuntimePublishesAndReusesContextCheckpoint(t *testing.T) {
 	}
 	if contextIndex < 0 || modelIndex < 0 || contextIndex >= modelIndex || result.ContextCheckpoint == nil {
 		t.Fatalf("Context event/model/result = %d/%d/%#v", contextIndex, modelIndex, result.ContextCheckpoint)
+	}
+	if result.ContextCheckpoint.Ledger == nil || result.ContextLedger == nil ||
+		result.ContextCheckpoint.Ledger.SourceEventCount >= result.ContextLedger.SourceEventCount ||
+		len(result.ContextLedger.CheckpointReferences) == 0 ||
+		result.ContextLedger.CheckpointReferences[0] != *result.ContextCheckpoint.Ledger {
+		t.Fatalf("Checkpoint/Ledger provenance = %#v / %#v", result.ContextCheckpoint.Ledger, result.ContextLedger)
+	}
+	encodedEvents, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tamperedEvents []agent.Event
+	if err := json.Unmarshal(encodedEvents, &tamperedEvents); err != nil {
+		t.Fatal(err)
+	}
+	for index := range tamperedEvents {
+		if tamperedEvents[index].ContextCheckpoint != nil && tamperedEvents[index].ContextCheckpoint.Ledger != nil {
+			tamperedEvents[index].ContextCheckpoint.Ledger.Digest = "sha256:" + strings.Repeat("f", 64)
+			break
+		}
+	}
+	if _, err := agent.BuildContextLedger(context.Background(), tamperedEvents); err == nil ||
+		!strings.Contains(err.Error(), "does not match its Event prefix") {
+		t.Fatalf("tampered Checkpoint Ledger error = %v", err)
 	}
 
 	handle, err = runtime.Run(context.Background(), agent.RunRequest{
@@ -1499,6 +1786,19 @@ func (compiler contextCompilerFunc) Compile(
 }
 
 type uppercaseTool struct{}
+
+type invalidContextOperationTool struct{}
+
+func (invalidContextOperationTool) Definition() agent.ToolDefinition {
+	return agent.ToolDefinition{Name: "invalid_context", InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (invalidContextOperationTool) Execute(context.Context, agent.ToolCall) (agent.ToolResult, error) {
+	return agent.ToolResult{
+		Output:           "changed",
+		ContextOperation: &agent.ContextOperation{Kind: "invalid"},
+	}, nil
+}
 
 type countingTool struct {
 	mu    sync.Mutex

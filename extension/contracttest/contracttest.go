@@ -517,6 +517,9 @@ func executeEcho(
 	if result.CallID != call.ID || result.Name != call.Name || result.IsError {
 		t.Fatalf("echo Tool result identity = %#v", result)
 	}
+	if result.ContextOperation == nil || result.ContextOperation.Kind != agent.ContextOperationVerification {
+		t.Fatalf("echo Tool Context operation = %#v", result.ContextOperation)
+	}
 	var output echoOutput
 	if err := json.Unmarshal([]byte(result.Output), &output); err != nil {
 		t.Fatalf("decode echo Tool output: %v", err)
@@ -793,7 +796,10 @@ func (tool *echoTool) Execute(ctx context.Context, call agent.ToolCall) (agent.T
 	if err != nil {
 		return agent.ToolResult{}, err
 	}
-	return agent.ToolResult{CallID: call.ID, Name: call.Name, Output: string(output)}, nil
+	return agent.ToolResult{
+		CallID: call.ID, Name: call.Name, Output: string(output),
+		ContextOperation: &agent.ContextOperation{Kind: agent.ContextOperationVerification},
+	}, nil
 }
 
 type blockingTool struct {

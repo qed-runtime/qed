@@ -6,7 +6,9 @@ content-free Prefix observability, an optional semantic Checkpoint, and a
 Provider-neutral Cache Plan
 
 ```text
-immutable Session messages + Run input + pinned Tools
+immutable Session Events + Run input + pinned Tools
+  -> Deterministic Ledgers
+     -> Artifact + Execution + Constraint + Policy + Task
   -> Context Compiler
      -> canonical ModelRequest
      -> optional Checkpoint + recent raw tail
@@ -55,17 +57,144 @@ the previous append-only messages. Its new input becomes another raw tail
 Segment; no previous Segment is rewritten. Without a Session Store, the caller
 must provide prior context explicitly
 
+## Deterministic Ledgers
+
+Before each Context Compiler call, Runtime rebuilds `agent.ContextLedger` from
+the complete ordered Event prefix. The terminal `agent.RunResult` contains the
+Ledger after the terminal Event. A custom Compiler receives an isolated copy in
+`ContextCompileRequest.Ledger`; changing it cannot alter Runtime state
+
+The v2 Reducer produces five typed ledgers without calling a model or reading a
+live workspace
+
+| Ledger | Runtime-observable contents |
+| --- | --- |
+| Artifact | exact digests of Tool output and externalized Evidence Objects |
+| Execution | Provider attempts and Tool calls with pending, succeeded, failed, or canceled state |
+| Constraint | exact user Facts with active, superseded, or resolved state, including steering origin |
+| Policy | host Tool authorization metadata and human approval decisions |
+| Task | each Run's latest running, waiting, completed, failed, or canceled state |
+
+`BuildContextLedger` treats Event order as authoritative, verifies contiguous
+Session revisions and per-Run sequences, pairs Provider and Tool transactions,
+and creates domain-separated source and snapshot digests. It preserves the
+exact byte identity of malformed Tool JSON without trying to execute or repair
+it. `ValidateContextLedger` rebuilds the snapshot and rejects changed derived
+state
+
+The Ledger is derived state and is not stored as a second source of truth
+Memory and JSONL Session Stores replay the same Events into the same digest
+New Checkpoints contain a content-free `ContextLedgerReference`; replay of the
+subsequent `context.compacted` Event verifies that reference against the exact
+preceding Event prefix
+
+Every user Message without a lifecycle directive creates an active Constraint
+Fact. The host can explicitly attach `Message.FactDirective` with action
+`supersede` or `resolve` and one or more earlier active Fact IDs. Superseding
+retires every target and creates one active replacement Fact from the current
+Message. Resolving retires every target and does not turn the resolution
+Message itself into a Constraint Fact. Runtime never infers these transitions
+from natural-language similarity
+
+`ConstraintFactID` derives the stable ID from the source Event reference.
+Constraint entries expose the raw Session message index, current state, the
+Event that established that state, both sides of a supersedes relation, and all
+transition sources. Targets must be unique earlier active Facts; missing,
+future, duplicate, already retired, malformed, and cyclic relationships are
+rejected. One directive is bounded by `MaxFactLifecycleTargets`
+
+Runtime moves a directive from input `Message.FactDirective` to the separate
+`Event.FactDirective` field before Hooks, persistence, and publication. The
+Event is the lifecycle commit point. The stored conversation, Provider request,
+and terminal `RunResult.Messages` do not contain this host control metadata.
+Runtime validates the candidate transition against the complete Event prefix
+before any Hook or Session Store observes it. Shape errors are returned by
+`Runtime.Run` or `RunHandle.Steer`; a target that becomes invalid before the
+safe steering boundary fails the Run without committing the candidate Event
+
+Because Fact IDs identify source Events, a transition across terminal Run
+boundaries requires a configured Session Store that replays those Events. An
+ephemeral Run can transition a Fact through steering after observing its
+`user.message.added` Event, but passing prior Messages alone to a later Run does
+not recreate their earlier Event identities
+
+Ledger schema v2 adds Fact lifecycle fields. New Checkpoints reference v2,
+while replay still verifies references produced by Ledger v1. The deterministic
+Checkpoint strategy omits superseded and resolved Constraint Facts from a new
+model-facing Checkpoint. When reusing an earlier Checkpoint, the Compiler also
+filters its transient model view against the current Ledger without mutating
+the persisted Checkpoint. Its Ledger reference commits the complete lifecycle
+snapshot. Artifact entries do not represent current file or Git state because
+those values belong to Current World State
+
+## Current World State
+
+When `agent.Options.CurrentWorldStateSource` is configured, Runtime calls it at
+the safe boundary before compiling each logical Provider request. The request
+contains isolated copies of the complete Event prefix and its deterministic
+Ledger. The Source must be concurrency-safe, honor cancellation, avoid
+mutation, and return a canonical snapshot no larger than
+`agent.MaxCurrentWorldStateBytes`
+
+Runtime normalizes the snapshot, binds it to the exact preceding
+`ContextLedgerReference`, computes a domain-separated digest, and emits
+`current_world_state.captured` before the next model request. Ledger replay
+validates the source generation, digest, and every referenced Tool completion
+`ValidateCurrentWorldState` performs the same check for an external caller
+Memory and JSONL Session Stores expose the latest captured Event value through
+`SessionSnapshot.CurrentWorldState`
+
+The snapshot becomes one required, volatile `current_world_state` Context
+Segment and a host context Message. It is not appended to Session messages or
+`RunResult.Messages`. Runtime places it without splitting a Tool transaction
+and keeps an actual user Message last when that Message was already the raw
+tail. The compacting Compiler reserves the rendered bytes before selecting a
+safe cut; Current World State is regenerated and never copied into a
+Checkpoint
+
+File and Git observations carry only bounded identities and Tool provenance
+Check results carry command identity and the digest of exact structured Tool
+output, not stdout or stderr. Paths and arguments are untrusted content and are
+never interpreted as instructions. State capture changes the volatile suffix
+and therefore participates in Prefix Manifest and cache planning without
+rewriting stable earlier Segments
+
+`ContextLedgerVersion` and the snapshot digest domain changed from v1 to v2.
+Standalone v1 snapshots are derived data and should be rebuilt from their Event
+Log; `ValidateContextLedger` compares supplied state with the current v2
+reduction. Compatibility support is limited to v1 references already embedded
+in persisted Checkpoints whose Event prefix predates Current World State
+capture
+
+For compatibility, Runtime emits one `user.message.added` Event for every
+`RunRequest.Input` entry, including caller-supplied assistant or Tool history
+The Reducer retains all of those Events as sources but creates Constraint
+entries only for Messages whose role is `user`. Steering remains restricted to
+plain, non-empty user Messages
+
+Ledgers are content-bearing private data because Constraint entries retain user
+text. Tool arguments, Tool output, terminal errors, and Policy reasons are kept
+as digests inside the corresponding entries, while their source Events remain
+subject to the Session and Evidence storage policy
+
 ## Evidence-preserving compression
 
 `agent.CompactingContextCompiler` adds a bounded model view above the immutable
 raw messages
 
 - it externalizes large Tool output into a content-addressed Evidence Object
-- it selects a cut that does not split an assistant Tool Call from its results
+- it validates the exact Event prefix against the deterministic Ledger
+- it selects a cut that does not split an assistant Tool Call from all results,
+  including an approval request and decision inside that Tool transaction
+- it keeps a delegated subagent Call with its terminal parent Tool result
+- it keeps a mutation and subsequent work together through the first annotated
+  verification or commit attempt, or until the next user Message
 - it stores the exact compacted raw prefix as an Evidence Object
 - it creates a typed, size-bounded `ContextCheckpoint`
 - it validates source hashes, message references, Tool outcomes, generation,
   Session revision, encoded size, and exact Evidence availability
+- it publishes content-free preservation counts for active Constraints, current
+  Git changes, retained failed checks, pending Tools, and required Evidence
 - it injects the validated Checkpoint followed by the recent raw message tail
 
 The Compiler never deletes or rewrites Session messages. A successfully
@@ -76,6 +205,126 @@ A custom `CheckpointStrategy` may create the semantic view. QED validates its
 result and falls back to the deterministic strategy without exposing the
 strategy error or message content in the fallback label. If no valid candidate
 fits the configured hard limit, the Run stops before calling the Provider
+
+`ContextCompactionReport.Validation` identifies the candidate generation and
+raw source boundary, then records required and preserved item counts. Evidence
+also records exact byte totals. An active Constraint is preserved only when its
+source identity remains in the Checkpoint Goal or Facts, or its exact Message
+remains in the raw tail. Current Git changes and every retained failed check
+remain in the required Current World State segment. A pending Tool Call must
+remain in the raw tail. Every required Evidence reference must remain in the
+candidate Context Program and resolve to bytes matching its digest and size
+
+The report contains stable failure codes and counts, never message text, paths,
+commands, or object content. Runtime validates that the codes match the counts
+and that a passed report identifies the exact published Checkpoint. Memory and
+JSONL Session replay also verify the candidate generation and rollback
+transition. Events written before this report existed remain valid without a
+`validation` field
+
+If a custom candidate loses required state, QED first retries the same safe cut
+with the deterministic strategy. The deterministic strategy does not discard
+active Constraint Facts or required Evidence merely to meet
+`checkpoint_max_bytes`. If the deterministic candidate still fails, the
+Compiler tries other safe cuts. It then retains the previous validated
+Checkpoint plus raw tail when that view fits, publishes a failed report with
+rollback `previous_checkpoint`, and continues without publishing the failed
+candidate. An uncheckpointed raw view uses rollback `raw_context` when
+available. If no validated effective view fits, the Run stops before its next
+Provider call
+
+Runtime always supplies a Ledger, so its reports cover active Constraints. A
+direct Compiler caller that omits `ContextCompileRequest.Ledger` gets zero
+required active Constraints because QED does not infer lifecycle state from
+message text
+
+Checkpoint construction has two explicit modes. An incremental build receives
+the latest validated `Previous` Checkpoint together with exact raw source. A
+`CheckpointBuildRawRebase` receives the target generation and
+`RebaseReason`, but `Previous` is nil. It must rebuild from `Messages`, the
+isolated ordered `Events`, and the matching deterministic Ledger. QED validates
+the Event prefix before invoking the Strategy. A custom Strategy may be invoked
+for more than one safe candidate cut and must not retain mutable request values
+Strategies that previously derived every generation solely from `Previous`
+must use `CheckpointRequest.Generation`; otherwise a later Rebase candidate is
+rejected and QED uses the deterministic fallback
+
+The first Checkpoint is reported as an `initial` Raw Event Rebase. After that,
+the compiler selects the first applicable deterministic trigger in this order
+
+1. a Fact stored in the Checkpoint is no longer active in the current Ledger:
+   `checkpoint_inconsistent`
+2. an explicit Fact lifecycle directive occurred after the Checkpoint Ledger
+   generation: `fact_lifecycle_changed`
+3. the next generation reaches `rebase_generation_interval` generations after
+   the prior Rebase: `generation_interval`
+
+The interval defaults to `4` and is bounded at `64`. A triggered Rebase occurs
+at the next compile boundary. It advances through the latest safe cut that
+preserves the configured recent raw tail, or rebuilds the existing compacted
+prefix when no later preferred cut exists. If input pressure also requires
+compaction, the compiler may advance farther.
+`ContextCheckpoint.LastRebaseGeneration` records the latest full rebuild;
+`ContextCompactionReport.Rebased` and `RebaseReason` make the decision
+observable on `context.compacted`. Direct message-only callers still get the
+initial and generation triggers, but explicit lifecycle detection requires the
+Event prefix that Runtime always supplies
+
+Runtime supplies `ContextCompileRequest.Events` as an isolated copy of the
+exact Event prefix. A direct caller that omits Events retains the legacy Tool
+Call/result safe-cut behavior. `ToolResult.ContextOperation` is host-only
+metadata with `mutation`, `verification`, `commit`, or `subagent` kind. It is a
+cut classification, not authorization or proof that an operation succeeded.
+Unknown kinds are rejected at the Tool boundary
+
+## Content-free Context reports
+
+Configured Runs store public `context.compacted` Events in their Evidence
+Bundles. QED projects those Events through the same exported read model used by
+embedding hosts
+
+```sh
+qed context inspect <run-id> --store .qed/evidence
+qed context explain RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
+qed context diff \
+  --before RUN_ID[@EVENT_SEQUENCE] \
+  --after RUN_ID[@EVENT_SEQUENCE] \
+  --store .qed/evidence
+```
+
+All three commands accept `--output text|json`. `inspect` reports the complete
+Context timeline for the Run and aggregates the number of published Checkpoint
+generations, full Rebases, rollbacks, custom-strategy fallbacks, validation failures,
+externalized objects, and validation preservation counts. Its compression
+ratio is the aggregate compiled byte total divided by the aggregate original
+byte total. Preservation rates are aggregate preserved counts divided by
+aggregate required counts and remain unavailable when no item was required
+
+`explain` selects the latest Context Event by default. Appending an exact Run
+Event sequence selects an earlier decision. `diff` uses the same selector for
+each side. Event sequence is the selector identity because a failed candidate
+may roll back and later retry the same candidate generation. Selectors may
+refer to different Run Bundles, including terminal follow-ups in one Session
+
+The projection includes stable reason and failure codes, byte and item counts,
+ratios, generation numbers, and validation outcomes. It does not copy messages,
+paths, commands, object digests, or object content. This content-free output
+does not change the Evidence Bundle security boundary: its public Events may
+still contain normal message and Tool payloads. Compaction reason and fallback
+labels outside QED's stable allowlist are projected as `unrecognized`
+
+Events without a candidate validation report remain visible with an unreported
+validation count. This includes both older Events and current Evidence-only
+compaction Events. A generation inherited from an earlier Run is also
+unavailable when the selected Bundle does not establish it. Post-compaction
+model rereads are reported as unavailable, not zero, because the current public
+Event schema does not record retrieval.
+Stage 4 retrieval auditing can populate that metric without guessing from
+validation-time object checks
+
+Embedding hosts can build the same JSON-compatible structures with
+`agent.BuildContextReport`, select with `ContextReport.Snapshot`, and compare
+with `agent.DiffContextSnapshots`
 
 `max_input_bytes` is a provider-neutral canonical byte limit, not a tokenizer or
 the model's advertised context window. It is deliberately deterministic but
@@ -195,8 +444,11 @@ reported a complete breakdown. Per-message Usage keeps each individual result
 
 ## Current limits
 
-- Checkpoints contain a deterministic compact semantic model, not full domain
-  ledgers or model-based semantic verification
+- deterministic Ledgers cover explicit Fact lifecycle and other
+  Runtime-observable state, but canonical workspace reconstruction and
+  model-based semantic verification do not exist yet
+- Runtime currently rebuilds a Ledger from the complete Event prefix before
+  every Compiler call; no incremental reducer index exists yet
 - no tokenizer-backed context limit or predictive output reserve exists
 - Evidence retrieval is CLI/API based and is not automatically exposed as a
   model Tool

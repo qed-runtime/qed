@@ -423,6 +423,23 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 			want: "context compaction requires a JSON Evidence Store",
 		},
 		{
+			name: "context Rebase interval too large",
+			document: `{
+				"version": 1,
+				"providers": {"local": {"protocol": "echo"}},
+				"evidence": {"store": "json", "path": "evidence"},
+				"agents": {"main": {
+					"provider": "local",
+					"context": {
+						"max_input_bytes": 4096,
+						"checkpoint_max_bytes": 512,
+						"rebase_generation_interval": 65
+					}
+				}}
+			}`,
+			want: "Context Rebase generation interval exceeds 64",
+		},
+		{
 			name: "incomplete cache pricing",
 			document: `{
 				"version": 1,
@@ -559,9 +576,9 @@ func TestLoadBuildsContextAndCacheConfiguration(t *testing.T) {
 			"main": {
 				"provider": "local",
 				"context": {
-					"max_input_bytes": 2200,
+					"max_input_bytes": 4700,
 					"recent_messages": 2,
-					"checkpoint_max_bytes": 1000
+					"checkpoint_max_bytes": 3200
 				},
 				"cache": {
 					"mode": "adaptive",
@@ -660,6 +677,19 @@ func TestLoadBuildsWorkspaceBoundCodingProfile(t *testing.T) {
 	}
 	if result.Messages[len(result.Messages)-1].Text != "hello" {
 		t.Fatalf("Run result = %#v", result)
+	}
+	if result.CurrentWorldState == nil || !result.CurrentWorldState.Snapshot.FilesAvailable {
+		t.Fatalf("declarative Coding Profile Current World State = %#v", result.CurrentWorldState)
+	}
+	foundInstructions := false
+	for _, file := range result.CurrentWorldState.Snapshot.Files {
+		if file.Path == "AGENTS.md" && file.Status == agent.CurrentWorldFilePresent {
+			foundInstructions = true
+			break
+		}
+	}
+	if !foundInstructions {
+		t.Fatalf("Current World State files = %#v", result.CurrentWorldState.Snapshot.Files)
 	}
 }
 
@@ -787,7 +817,7 @@ func writeManifestExtension(t *testing.T, root, extensionID string) string {
 	document := fmt.Sprintf(`{
 		"id":%q,
 		"version":"v1",
-		"protocol_version":1,
+		"protocol_version":2,
 		"entrypoint":"extension"
 	}`, extensionID)
 	if err := os.WriteFile(filepath.Join(directory, "qed-extension.json"), []byte(document), 0o600); err != nil {

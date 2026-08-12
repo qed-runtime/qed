@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/qed-runtime/qed/agent"
 	"github.com/qed-runtime/qed/session"
@@ -91,6 +92,164 @@ func TestSessionStoresReplayEventsAndEnforceRevisions(t *testing.T) {
 				if event.SessionRevision != uint64(index+1) || event.SessionID != "session-1" {
 					t.Fatalf("Event[%d] identity = %q/%d", index, event.SessionID, event.SessionRevision)
 				}
+			}
+		})
+	}
+}
+
+func TestSessionStoresReplayCurrentWorldState(t *testing.T) {
+	t.Parallel()
+
+	stores := map[string]func(*testing.T) agent.SessionStore{
+		"memory": func(*testing.T) agent.SessionStore { return session.NewMemoryStore() },
+		"jsonl": func(t *testing.T) agent.SessionStore {
+			store, err := session.NewJSONLStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	for name, construct := range stores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := construct(t)
+			state := agent.CurrentWorldState{
+				Version: 1,
+				Digest:  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				Snapshot: agent.CurrentWorldStateSnapshot{
+					FilesAvailable: true,
+					Files: []agent.CurrentWorldFile{{
+						Path: "note.txt", Status: agent.CurrentWorldFilePresent,
+						Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Bytes: 4,
+					}},
+					Checks: []agent.CurrentWorldCheck{{
+						Argv: []string{"go", "test", "./..."}, CWD: ".", Status: agent.CurrentWorldCheckPassed,
+						Freshness: agent.CurrentWorldCheckCurrent, OutputDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+					}},
+				},
+			}
+			_, err := store.Append(context.Background(), "world-state", 0, []agent.Event{{
+				RunID: "run-1", Sequence: 1, Type: agent.EventCurrentWorldStateCaptured, CurrentWorldState: &state,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := store.Load(context.Background(), "world-state")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.CurrentWorldState == nil || snapshot.CurrentWorldState.Digest != state.Digest ||
+				len(snapshot.CurrentWorldState.Snapshot.Checks) != 1 {
+				t.Fatalf("Current World State = %#v", snapshot.CurrentWorldState)
+			}
+			snapshot.CurrentWorldState.Snapshot.Files[0].Path = "changed.txt"
+			snapshot.CurrentWorldState.Snapshot.Checks[0].Argv[0] = "changed"
+			reloaded, err := store.Load(context.Background(), "world-state")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.CurrentWorldState.Snapshot.Files[0].Path != "note.txt" ||
+				reloaded.CurrentWorldState.Snapshot.Checks[0].Argv[0] != "go" {
+				t.Fatal("Session Store Current World State aliases caller memory")
+			}
+		})
+	}
+}
+
+func TestSessionStoresRebuildIdenticalContextLedgers(t *testing.T) {
+	t.Parallel()
+
+	constructors := map[string]func(*testing.T) agent.SessionStore{
+		"memory": func(*testing.T) agent.SessionStore { return session.NewMemoryStore() },
+		"jsonl": func(t *testing.T) agent.SessionStore {
+			store, err := session.NewJSONLStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	baseTime := time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC)
+	events := []agent.Event{
+		{RunID: "run-ledger", Sequence: 1, Type: agent.EventRunStarted, Time: baseTime},
+		{
+			RunID: "run-ledger", Sequence: 2, Type: agent.EventUserMessageAdded,
+			Time: baseTime.Add(time.Second), Message: &agent.Message{Role: agent.RoleUser, Text: "persist this constraint"},
+		},
+		{RunID: "run-ledger", Sequence: 3, Type: agent.EventRunCompleted, Time: baseTime.Add(2 * time.Second)},
+	}
+	var want string
+	for name, construct := range constructors {
+		store := construct(t)
+		if _, err := store.Append(context.Background(), "ledger-replay", 0, events); err != nil {
+			t.Fatalf("%s Append: %v", name, err)
+		}
+		snapshot, err := store.Load(context.Background(), "ledger-replay")
+		if err != nil {
+			t.Fatalf("%s Load: %v", name, err)
+		}
+		ledger, err := agent.BuildContextLedger(context.Background(), snapshot.Events)
+		if err != nil {
+			t.Fatalf("%s BuildContextLedger: %v", name, err)
+		}
+		encoded, err := json.Marshal(ledger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want == "" {
+			want = string(encoded)
+		} else if string(encoded) != want {
+			t.Fatalf("%s rebuilt a different Ledger:\n%s\n%s", name, encoded, want)
+		}
+	}
+}
+
+func TestSessionStoresPreserveToolHostMetadata(t *testing.T) {
+	t.Parallel()
+
+	stores := map[string]func(*testing.T) agent.SessionStore{
+		"memory": func(*testing.T) agent.SessionStore { return session.NewMemoryStore() },
+		"jsonl": func(t *testing.T) agent.SessionStore {
+			store, err := session.NewJSONLStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	for name, construct := range stores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			policy := &agent.ToolPolicyDecision{
+				Outcome:      "allow",
+				Capabilities: []string{"filesystem.read"},
+				ReasonDigest: "sha256:" + strings.Repeat("a", 64),
+			}
+			operation := &agent.ContextOperation{Kind: agent.ContextOperationVerification}
+			result := &agent.ToolResult{
+				CallID: "call-1", Name: "read_file", Policy: policy, ContextOperation: operation,
+			}
+			store := construct(t)
+			if _, err := store.Append(context.Background(), "tool-policy", 0, []agent.Event{{
+				Type: agent.EventToolCompleted, ToolResult: result,
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			policy.Outcome = "deny"
+			policy.Capabilities[0] = "changed"
+			operation.Kind = agent.ContextOperationMutation
+			snapshot, err := store.Load(context.Background(), "tool-policy")
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored := snapshot.Events[0].ToolResult.Policy
+			if stored == nil || stored.Outcome != "allow" || stored.Capabilities[0] != "filesystem.read" {
+				t.Fatalf("stored Tool Policy = %#v", stored)
+			}
+			storedOperation := snapshot.Events[0].ToolResult.ContextOperation
+			if storedOperation == nil || storedOperation.Kind != agent.ContextOperationVerification {
+				t.Fatalf("stored Context operation = %#v", storedOperation)
 			}
 		})
 	}
@@ -360,11 +519,16 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			checkpoint := agent.ContextCheckpoint{
-				Version:            1,
-				Generation:         2,
-				SourceMessageCount: 3,
-				SourceHash:         "sha256:" + strings.Repeat("1", 64),
-				Narrative:          "checkpoint",
+				Version:              1,
+				Generation:           2,
+				LastRebaseGeneration: 2,
+				SourceMessageCount:   3,
+				SourceHash:           "sha256:" + strings.Repeat("1", 64),
+				Ledger: &agent.ContextLedgerReference{
+					Version: 1, Digest: "sha256:" + strings.Repeat("3", 64),
+					SourceEventCount: 2, SourceHash: "sha256:" + strings.Repeat("4", 64), SessionRevision: 2,
+				},
+				Narrative: "checkpoint",
 				Evidence: []agent.EvidenceObjectRef{{
 					Digest:    "sha256:" + strings.Repeat("2", 64),
 					Bytes:     10,
@@ -372,11 +536,22 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 				}},
 			}
 			report := agent.ContextCompactionReport{
-				Applied:       true,
-				Reason:        "input_limit",
-				OriginalBytes: 100,
-				CompiledBytes: 40,
-				Externalized:  append([]agent.EvidenceObjectRef(nil), checkpoint.Evidence...),
+				Applied:            true,
+				Reason:             "input_limit",
+				OriginalBytes:      100,
+				CompiledBytes:      40,
+				SourceMessageCount: 3,
+				Rebased:            true,
+				RebaseReason:       agent.ContextRebaseGenerationInterval,
+				Externalized:       append([]agent.EvidenceObjectRef(nil), checkpoint.Evidence...),
+				Validation: &agent.ContextValidationReport{
+					Version: agent.ContextValidationVersion, CandidateGeneration: 2,
+					CandidateSourceMessageCount: 3, Passed: true,
+					ActiveConstraints: agent.ContextPreservationCount{Required: 1, Preserved: 1},
+					Evidence: agent.ContextPreservationCount{
+						Required: 1, Preserved: 1, RequiredBytes: 10, PreservedBytes: 10,
+					},
+				},
 			}
 			store := construct(t)
 			if _, err := store.Append(context.Background(), "checkpoint", 0, []agent.Event{{
@@ -387,14 +562,93 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			checkpoint.Narrative = "mutated"
+			checkpoint.Ledger.Digest = "mutated"
 			report.Externalized[0].Digest = "mutated"
+			report.Validation.ActiveConstraints.Required = 99
 			snapshot, err := store.Load(context.Background(), "checkpoint")
 			if err != nil {
 				t.Fatal(err)
 			}
 			if snapshot.Checkpoint == nil || snapshot.Checkpoint.Narrative != "checkpoint" ||
+				snapshot.Checkpoint.LastRebaseGeneration != 2 ||
+				snapshot.Checkpoint.Ledger == nil || snapshot.Checkpoint.Ledger.Digest == "mutated" ||
 				len(snapshot.EvidenceObjects) != 1 || snapshot.EvidenceObjects[0].Digest == "mutated" {
 				t.Fatalf("Checkpoint Snapshot = %#v", snapshot)
+			}
+			if len(snapshot.Events) != 1 || snapshot.Events[0].ContextCompaction == nil ||
+				!snapshot.Events[0].ContextCompaction.Rebased ||
+				snapshot.Events[0].ContextCompaction.RebaseReason != agent.ContextRebaseGenerationInterval ||
+				snapshot.Events[0].ContextCompaction.Validation == nil ||
+				snapshot.Events[0].ContextCompaction.Validation.ActiveConstraints.Required != 1 {
+				t.Fatalf("Checkpoint Rebase Event = %#v", snapshot.Events)
+			}
+		})
+	}
+}
+
+func TestSessionStoresReplayFactLifecycleDirectives(t *testing.T) {
+	t.Parallel()
+
+	stores := map[string]func(*testing.T) agent.SessionStore{
+		"memory": func(*testing.T) agent.SessionStore { return session.NewMemoryStore() },
+		"jsonl": func(t *testing.T) agent.SessionStore {
+			store, err := session.NewJSONLStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	for name, construct := range stores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			target, err := agent.ConstraintFactID(agent.ContextLedgerEventRef{RunID: "run-old", Sequence: 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			directive := &agent.FactLifecycleDirective{
+				Action: agent.FactLifecycleSupersede, Targets: []string{target},
+			}
+			events := []agent.Event{
+				{RunID: "run-old", Sequence: 1, Type: agent.EventRunStarted},
+				{RunID: "run-old", Sequence: 2, Type: agent.EventUserMessageAdded, Message: &agent.Message{Role: agent.RoleUser, Text: "old"}},
+				{RunID: "run-old", Sequence: 3, Type: agent.EventRunCompleted},
+				{RunID: "run-new", Sequence: 1, Type: agent.EventRunStarted},
+				{
+					RunID: "run-new", Sequence: 2, Type: agent.EventUserMessageAdded,
+					Message: &agent.Message{Role: agent.RoleUser, Text: "new"}, FactDirective: directive,
+				},
+				{RunID: "run-new", Sequence: 3, Type: agent.EventRunCompleted},
+			}
+			store := construct(t)
+			if _, err := store.Append(context.Background(), "fact-replay", 0, events); err != nil {
+				t.Fatal(err)
+			}
+			directive.Targets[0] = "constraint_" + strings.Repeat("f", 64)
+			snapshot, err := store.Load(context.Background(), "fact-replay")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshot.Messages) != 2 || snapshot.Messages[1].FactDirective != nil ||
+				len(snapshot.Events) != len(events) || snapshot.Events[4].FactDirective == nil ||
+				snapshot.Events[4].FactDirective.Targets[0] != target {
+				t.Fatalf("Session Snapshot = %#v", snapshot)
+			}
+			ledger, err := agent.BuildContextLedger(context.Background(), snapshot.Events)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ledger.Constraints) != 2 || ledger.Constraints[0].State != agent.FactSuperseded ||
+				ledger.Constraints[1].State != agent.FactActive {
+				t.Fatalf("Context Ledger = %#v", ledger.Constraints)
+			}
+			snapshot.Events[4].FactDirective.Targets[0] = "constraint_" + strings.Repeat("e", 64)
+			reloaded, err := store.Load(context.Background(), "fact-replay")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.Events[4].FactDirective.Targets[0] != target {
+				t.Fatal("loaded Fact lifecycle target aliased Session Store state")
 			}
 		})
 	}

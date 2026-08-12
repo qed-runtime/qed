@@ -4,7 +4,9 @@ QEDは永続Session messageをimmutableな正本として扱い、Provider call�
 同じcompile処理から本文を含まないPrefix observability、任意のsemantic Checkpoint、Provider-neutralなCache Planを生成します
 
 ```text
-immutable Session messages + Run input + pinned Tools
+immutable Session Events + Run input + pinned Tools
+  -> Deterministic Ledgers
+     -> Artifact + Execution + Constraint + Policy + Task
   -> Context Compiler
      -> canonical ModelRequest
      -> optional Checkpoint + recent raw tail
@@ -48,15 +50,101 @@ terminal後のfollow-upは設定済みSession Storeから同じSessionをreplay�
 新しいinputはraw tail Segmentとして追加され、以前のSegmentを書き換えません
 Session Storeがない場合はcallerが過去contextを明示的に渡す必要があります
 
+## Deterministic Ledger
+
+RuntimeはContext Compiler callの前に完全なordered Event prefixから`agent.ContextLedger`を再構築します
+terminal `agent.RunResult`にはterminal Event反映後のLedgerが入ります
+custom Compilerは`ContextCompileRequest.Ledger`からisolated copyを受け取り、変更してもRuntime stateには影響しません
+
+v2 Reducerはmodel callやlive workspace readを行わず5つのtyped Ledgerを生成します
+
+| Ledger | Runtimeから観測できる内容 |
+| --- | --- |
+| Artifact | Tool outputと外部化したEvidence Objectの正確なdigest |
+| Execution | pending、succeeded、failed、canceledを持つProvider attemptとTool call |
+| Constraint | steering originを含むactive、superseded、resolved状態の正確なuser Fact |
+| Policy | host Tool authorization metadataとhuman approval decision |
+| Task | Runごとのrunning、waiting、completed、failed、canceled state |
+
+`BuildContextLedger`はEvent順を正本とし、連続するSession revisionとRun内sequence、ProviderとTool transactionの対応を検証し、domain-separatedなsource digestとsnapshot digestを生成します
+malformedなTool JSONも実行や修復を行わず正確なbyte identityを保持します
+`ValidateContextLedger`はsnapshotを再構築してderived stateの改ざんを拒否します
+
+Ledgerはderived stateであり2つ目の正本として保存しません
+MemoryとJSONL Session Storeは同じEventを同じdigestへreplayします
+新しいCheckpointは本文を含まない`ContextLedgerReference`を持ち、後続`context.compacted` Eventのreplay時に直前の正確なEvent prefixと照合します
+
+Fact lifecycle宣言がないuser MessageはactiveなConstraint Factを作ります
+hostは`Message.FactDirective`へ`supersede`または`resolve` actionと1つ以上の過去のactive Fact IDを明示できます
+supersedeは全targetを失効させ、現在のMessageから1つのactive replacement Factを作ります
+resolveは全targetを解決済みにし、解決を伝える現在のMessage自体はConstraint Factにしません
+Runtimeは自然言語の類似性からtransitionを推測しません
+
+`ConstraintFactID`はsource Event参照からstable IDを生成します
+Constraint entryはraw Session message index、現在state、stateを確定したEvent、supersedes関係の両側、全transition sourceを公開します
+targetは過去の一意なactive Factである必要があり、missing、future、duplicate、retired済み、malformed、循環関係を拒否します
+1つの宣言は`MaxFactLifecycleTargets`を上限とします
+
+Runtimeはinputの`Message.FactDirective`をHook、永続化、publishより前に独立した`Event.FactDirective` fieldへ移します
+このEventがlifecycleのcommit pointです
+保存conversation、Provider request、terminal `RunResult.Messages`にはhost control metadataを含めません
+RuntimeはHookやSession Storeが観測する前に完全なEvent prefixへcandidate transitionを適用して検証します
+shape errorは`Runtime.Run`または`RunHandle.Steer`が返し、安全なsteering境界へ到達する前にtargetが無効になった場合はcandidate EventをcommitせずRunを失敗させます
+
+Fact IDはsource Eventを識別するため、terminal RunをまたぐtransitionにはEventをreplayするSession Storeが必要です
+ephemeral Runでも`user.message.added` Eventを観測した後のsteeringなら同じRun内のFactを遷移できますが、過去Messageだけを後続Runへ渡しても以前のEvent identityは再生成されません
+
+Ledger schema v2はFact lifecycle fieldを追加します
+新しいCheckpointはv2を参照し、replayではLedger v1が生成した参照も引き続き検証します
+deterministic Checkpoint Strategyは新しいmodel向けCheckpointからsupersededとresolvedのConstraint Factを除外し、Ledger参照が完全なlifecycle snapshotをcommitします
+過去のCheckpointを再利用する場合も、Compilerは永続Checkpointを変更せず現在Ledgerに照らして一時的なmodel viewをfilterします
+Artifact entryは現在のfileやGit stateを表さず、これらの値はCurrent World Stateが所有します
+
+## Current World State
+
+`agent.Options.CurrentWorldStateSource`が設定されている場合、Runtimeは各logical Provider requestをcompileする前のsafe boundaryでSourceを呼びます
+requestは完全なEvent prefixとdeterministic Ledgerのisolated copyを含みます
+Sourceはconcurrency-safeでcancelを尊重し、mutationを行わず、`agent.MaxCurrentWorldStateBytes`以下のcanonical snapshotを返す必要があります
+
+Runtimeはsnapshotを正規化し、直前の正確な`ContextLedgerReference`へ結び付け、domain-separated digestを計算して次のmodel requestより前に`current_world_state.captured`をemitします
+Ledger replayはsource generation、digest、参照された全Tool completionを検証します
+external callerは`ValidateCurrentWorldState`で同じ検証を実行できます
+MemoryとJSONL Session Storeは`SessionSnapshot.CurrentWorldState`から最新のcapture済みEvent valueを公開します
+
+snapshotは必須かつvolatileな`current_world_state` Context Segmentとhost context Messageになります
+Session messageや`RunResult.Messages`へ追加しません
+RuntimeはTool transactionを分断せず配置し、actual user Messageがraw tailだった場合はそのMessageを最後に維持します
+compacting Compilerはsafe cutを選ぶ前にrender済みbyteを予約し、Current World Stateは毎回再生成してCheckpointへコピーしません
+
+fileとGit observationはboundedなidentityとTool provenanceだけを持ちます
+check resultはstdoutやstderrではなくcommand identityと正確なstructured Tool outputのdigestを持ちます
+pathとargumentはuntrusted contentでありinstructionとして解釈しません
+state captureはvolatile suffixを変更するため、stableな先行Segmentを書き換えずPrefix Manifestとcache planningへ反映されます
+
+`ContextLedgerVersion`とsnapshot digest domainはv1からv2へ変更しました
+standaloneなv1 snapshotはderived dataであるためEvent Logから再構築し、`ValidateContextLedger`は渡されたstateを現在のv2 reductionと比較します
+互換対応はCurrent World State captureより前のEvent prefixを参照する永続Checkpoint内のv1 referenceに限定します
+
+互換性のためRuntimeはcallerが渡したassistantまたはTool履歴を含む全`RunRequest.Input` entryを`user.message.added` Eventとしてemitします
+Reducerはすべてをsourceとして保持し、roleが`user`のMessageだけをConstraint entryにします
+steeringは引き続きplainかつnon-emptyなuser Messageだけを受理します
+
+Constraint entryはuser本文を保持するためLedgerはprivateなcontent-bearing dataです
+対応entryではTool argument、Tool output、terminal error、Policy reasonをdigestとして保持し、source Event自体にはSessionとEvidenceのstorage policyを適用します
+
 ## Evidence-preserving compression
 
 `agent.CompactingContextCompiler`はimmutableなraw messageの上にboundedなmodel viewを作ります
 
 - 巨大Tool outputをcontent-addressed Evidence Objectへ外部化
-- assistant Tool Callと対応resultを分断しないcut pointを選択
+- exact Event prefixをdeterministic Ledgerと照合
+- approval requestとdecisionを含むassistant Tool Callと全resultを分断しないcut pointを選択
+- delegated subagent Callとterminalなparent Tool resultを同じ範囲へ保持
+- mutationから最初のannotation付きverificationまたはcommit attemptまでの後続workを保持し、どちらもない場合は次のuser Messageまで保持
 - compact対象の正確なraw prefixをEvidence Objectへ保存
 - 型付きでsize上限のある`ContextCheckpoint`を生成
 - source hash、message参照、Tool outcome、generation、Session revision、encoded size、Evidence実在性を検証
+- active Constraint、現在のGit change、保持済みfailed check、pending Tool、required Evidenceの本文なし保存件数を公開
 - 検証済みCheckpointの後ろへrecent raw message tailを配置
 
 CompilerはSession messageを削除も書き換えもしません
@@ -66,6 +154,94 @@ raw Event Logは引き続きreplay可能です
 custom `CheckpointStrategy`も利用できます
 QEDが結果を検証し、失敗時はstrategy errorやmessage本文をfallback labelへ含めずdeterministic strategyへ戻します
 有効なcandidateがhard limit内に収まらない場合はProviderを呼ぶ前にRunを停止します
+
+`ContextCompactionReport.Validation`はcandidate generationとraw source境界を識別し、required item数とpreserved item数を記録します
+Evidenceは正確なbyte総数も記録します
+active Constraintはsource identityがCheckpoint GoalまたはFactsに残るか、正確なMessageがraw tailに残る場合だけpreservedになります
+現在のGit changeと保持済みfailed checkは必須Current World State segmentに残ります
+pending Tool Callはraw tailに残る必要があります
+required Evidence参照はcandidate Context Programに残り、digestとsizeが一致するbyteへ解決できる必要があります
+
+reportはstable failure codeと件数だけを持ち、message本文、path、command、object contentを含みません
+Runtimeはcodeとcountの一致およびpassed reportがpublish対象の正確なCheckpointを識別することを検証します
+MemoryとJSONL Session replayもcandidate generationとrollback transitionを検証します
+このreportより前に保存されたEventは`validation` fieldなしで引き続き有効です
+
+custom candidateがrequired stateを失った場合、QEDは最初に同じsafe cutをdeterministic strategyで再試行します
+deterministic strategyは`checkpoint_max_bytes`へ収める目的でactive Constraint Factやrequired Evidenceを破棄しません
+deterministic candidateも失敗した場合は別のsafe cutを試します
+その後も失敗し、前回の検証済みCheckpointとraw tailが上限内なら、そのviewを維持してrollback `previous_checkpoint`付きのfailed reportをpublishし、失敗candidate自体はpublishせず継続します
+Checkpointがないraw viewを利用できる場合はrollback `raw_context`を使います
+検証済みeffective viewが上限内に存在しなければ次のProvider call前にRunを停止します
+
+Runtimeは常にLedgerを渡すためreportがactive Constraintを対象にします
+`ContextCompileRequest.Ledger`を省略するdirect Compiler callerではQEDがmessage本文からlifecycle stateを推測しないためrequired active Constraintは0件になります
+
+Checkpoint生成には2つの明示的なmodeがあります
+incremental buildは正確なraw sourceと最新の検証済み`Previous` Checkpointを受け取ります
+`CheckpointBuildRawRebase`はtarget generationと`RebaseReason`を受け取りますが`Previous`はnilです
+`Messages`、isolatedなordered `Events`、対応するdeterministic Ledgerから再構築する必要があります
+QEDはStrategyを呼ぶ前にEvent prefixを検証します
+custom Strategyは複数のsafe candidate cutで呼ばれる場合があるためmutableなrequest valueを保持してはいけません
+従来`Previous`だけから全generationを導出していたStrategyは`CheckpointRequest.Generation`を使う必要があります
+未対応の場合は後続Rebase candidateが拒否され、QEDはdeterministic fallbackを使います
+
+最初のCheckpointは`initial` Raw Event Rebaseとしてreportされます
+以後は次の順で最初に該当した決定的なtriggerを選びます
+
+1. Checkpoint保存済みFactがcurrent Ledgerでactiveではない場合は`checkpoint_inconsistent`
+2. CheckpointのLedger generationより後に明示的なFact lifecycle宣言がある場合は`fact_lifecycle_changed`
+3. 次generationが前回Rebaseから`rebase_generation_interval` generationへ到達した場合は`generation_interval`
+
+intervalの既定値は`4`で上限は`64`です
+triggerされたRebaseは次のcompile boundaryで実行します
+設定したrecent raw tailを維持できる最新safe cutまで進み、優先範囲に後続cutがなければ既存compact済みraw prefixを再構築します
+input圧力によるcompactionも必要ならさらに後続のsafe cutへ進む場合があります
+`ContextCheckpoint.LastRebaseGeneration`が最新の完全再構築を記録し、`ContextCompactionReport.Rebased`と`RebaseReason`が`context.compacted`上で判断を観測可能にします
+messageだけを渡すdirect callerもinitialとgeneration triggerを利用できますが、明示的なlifecycle検出にはRuntimeが常に渡すEvent prefixが必要です
+
+Runtimeは`ContextCompileRequest.Events`へexact Event prefixのisolated copyを渡します
+Eventsを省略するdirect callerは従来のTool Callとresultだけを保護するsafe cutを使います
+`ToolResult.ContextOperation`は`mutation`、`verification`、`commit`、`subagent`のhost-only metadataです
+authorizationやoperation成功の証明ではなくcut分類であり、未知のkindはTool境界で拒否します
+
+## 本文を含まないContext report
+
+設定済みRunはpublic `context.compacted` EventをEvidence Bundleへ保存します
+QEDはembedding hostと同じexported read modelでEventをprojectします
+
+```sh
+qed context inspect <run-id> --store .qed/evidence
+qed context explain RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
+qed context diff \
+  --before RUN_ID[@EVENT_SEQUENCE] \
+  --after RUN_ID[@EVENT_SEQUENCE] \
+  --store .qed/evidence
+```
+
+3つのcommandはすべて`--output text|json`に対応します
+`inspect`はRun内のContext timeline全体とpublish済みCheckpoint generation数、full Rebase数、rollback数、custom strategy fallback数、validation failure数、externalized object、validation preservation countの集計を表示します
+compression ratioはcompiled byte総数をoriginal byte総数で割った値です
+preservation rateはaggregate preserved countをaggregate required countで割った値で、required itemが0件ならunavailableのままです
+
+`explain`は既定で最新Context Eventを選びます
+正確なRun Event sequenceを追加すると過去の判断を選択できます
+`diff`も両側で同じselectorを使います
+失敗candidateはrollback後に同じcandidate generationを再試行できるため、selector identityにはEvent sequenceを使います
+selectorは同じSessionのterminal follow-upを含む異なるRun Bundleも参照できます
+
+projectionはstable reasonとfailure code、byteとitem count、ratio、generation番号、validation outcomeを含みます
+message、path、command、object digest、object contentはcopyしません
+このcontent-free出力はEvidence Bundleのsecurity境界を変えず、Bundle内のpublic Eventは通常のmessageとTool payloadを引き続き含む場合があります
+QEDのstable allowlistにないcompaction reasonとfallback labelは`unrecognized`へ変換します
+
+candidate validation reportがないEventはunreported validation countとして表示されます
+対象にはdeterministic validation以前のEventと現在のEvidence-only compaction Eventの両方が含まれます
+選択Bundleが以前のRunから継承したgenerationを確定できない場合もunavailableとして表示します
+現在のpublic Event schemaはretrievalを記録しないため、compaction後のmodel rereadは0ではなくunavailableとして表示します
+Stage 4のretrieval auditによりvalidation時のobject checkから推測せず、このmetricを記録できるようになります
+
+embedding hostは`agent.BuildContextReport`で同じJSON互換構造を構築し、`ContextReport.Snapshot`で選択し、`agent.DiffContextSnapshots`で比較できます
 
 `max_input_bytes`はProvider-neutralなcanonical byte上限であり、tokenizerやmodelの公開context windowではありません
 選択modelに対して安全側に調整してください
@@ -167,7 +343,8 @@ messageごとのUsageは個別resultを保持します
 
 ## 現在の制限
 
-- Checkpointはdeterministicなcompact semantic modelであり、完全なdomain ledgerやmodel-based semantic verificationではない
+- deterministic Ledgerは明示的なFact lifecycleとRuntimeから観測できるstateを扱うが、canonical workspace再構築とmodel-based semantic verificationは未実装
+- RuntimeはCompiler call前に完全なEvent prefixからLedgerを再構築し、incremental reducer indexは未実装
 - tokenizer-backed context limitとpredictive output reserveは未実装
 - Evidence retrievalはCLIとAPI経由でありmodel Toolへ自動公開しない
 - Cache Planは複数stability layer breakpointではなく1つのuser-message breakpointを選ぶ

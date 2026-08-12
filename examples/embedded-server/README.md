@@ -54,7 +54,7 @@ curl \
 The executable dispatches `__extension` before parsing application flags. In
 normal mode it loads one reusable `qed.Host`, shares it across requests, and
 closes its Extension processes during shutdown. In child mode the same catalog
-serves the selected Extension over Protocol v1
+serves the selected Extension over Protocol v2
 
 The example uses the deterministic echo Provider so it does not call the
 `greet` Tool. Its integration test still starts and validates the linked

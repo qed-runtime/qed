@@ -303,7 +303,7 @@ func TestGeneratedScaffoldBuildsAndPassesLifecycleContract(t *testing.T) {
     "manifest": {
       "id": "example.generated",
       "version": "0.1.0",
-      "protocol_version": 1
+      "protocol_version": 2
     }
   }]
 }

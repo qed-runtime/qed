@@ -17,7 +17,7 @@ var Catalog = selfexec.MustNewCatalog([]selfexec.Definition{
 		Manifest: extensionmanifest.Declaration{
 			ID:              "qed.git",
 			Version:         "0.1.0",
-			ProtocolVersion: 1,
+			ProtocolVersion: 2,
 			Capabilities:    []string{"git.read"},
 		},
 		ServerOptions: extension0.ServerOptions,
@@ -26,7 +26,7 @@ var Catalog = selfexec.MustNewCatalog([]selfexec.Definition{
 		Manifest: extensionmanifest.Declaration{
 			ID:              "qed.process",
 			Version:         "0.1.0",
-			ProtocolVersion: 1,
+			ProtocolVersion: 2,
 			Capabilities:    []string{"process.execute"},
 		},
 		ServerOptions: extension1.ServerOptions,
@@ -35,7 +35,7 @@ var Catalog = selfexec.MustNewCatalog([]selfexec.Definition{
 		Manifest: extensionmanifest.Declaration{
 			ID:              "qed.workspace",
 			Version:         "0.1.0",
-			ProtocolVersion: 1,
+			ProtocolVersion: 2,
 			Capabilities:    []string{"filesystem.read", "filesystem.write"},
 		},
 		ServerOptions: extension2.ServerOptions,

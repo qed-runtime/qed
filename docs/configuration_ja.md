@@ -74,7 +74,8 @@ QEDは1つのstrictなJSON documentからProvider profile、process分離Extensi
       },
       "context": {
         "max_input_bytes": 65536,
-        "recent_messages": 12
+        "recent_messages": 12,
+        "rebase_generation_interval": 4
       },
       "cache": {
         "mode": "adaptive",
@@ -328,6 +329,11 @@ capability nameは有効な形式であれば外部Extension由来でも利用�
 prompt diagnosticsはTool名とcapabilityだけを含み、raw Tool引数を含みません
 
 選択したenvironment名はすべて存在する必要があります
+
+宣言的Coding Profileは参照する各Agentへ既定Current World State Sourceも設定します
+canonical fileとGit readは同じProfile Policyとoptional Run capability restrictionに従います
+background captureは`ask` outcome用approvalを要求しません
+scopeとlimitは[Coding Profile](coding-profile_ja.md#current-world-state)を参照してください
 executable lookupは選択した`PATH`だけを使い、Host environmentへfallbackしません
 
 ## Agent定義とdelegation
@@ -395,10 +401,19 @@ QEDは正確なcompact済みmessage prefixと外部化したTool outputをconten
 | `evidence_threshold_bytes` | no | Tool outputを外部化するsize、既定値`16384` |
 | `evidence_excerpt_bytes` | no | 両端に保持するbyte数、既定値`2048` |
 | `checkpoint_max_bytes` | no | encoded Checkpoint上限、既定値`8192` |
+| `rebase_generation_interval` | no | 前回semantic Checkpointを使わず再構築するまでの新しいgeneration数、既定値`4`、最大`64` |
 
 `max_input_bytes`は決定的なProvider neutral値でありtokenizer basedなmodel context limitではありません
 QEDはraw Session messageを書き換えません
-検証済みCheckpointとrecent raw tailをcompileし、安全なTool transaction境界でhard limit内に収まらなければProvider call前に停止します
+検証済みCheckpointとrecent raw tailをcompileし、Tool、approval、subagent、edit-verification、commitの安全なtransaction境界でhard limit内に収まらなければProvider call前に停止します
+
+最初のCheckpointと設定間隔ごとのRaw Event Rebaseは前回semantic Checkpointを使わず再構築します
+明示的なFact lifecycle変更とcurrent Ledgerで失効したCheckpoint FactもRebase triggerになります
+`context.compacted` Eventは`rebased`と`rebase_reason`を公開します
+
+新しいCheckpoint candidateごとに`context_compaction.validation`へ決定的なpreservation countを記録します
+QEDは`checkpoint_max_bytes`を満たす目的でactive Constraint Factやrequired Evidenceを削除しません
+上限が小さすぎる場合は記録付きrollbackにより前回の検証済みCheckpointとraw tailを維持するか、検証済みviewが存在しなければProvider I/O前に停止します
 
 `cache`を省略した場合、または`mode`が空か`disabled`の場合、QED側のprompt cache制御は無効です
 Provider側のimplicit behaviorは独立して発生する場合があります
@@ -484,6 +499,11 @@ active Runのsteeringは既存の`user.message.added` Event typeを維持し、`
 queue受理はprocess localであり、このEventが永続Sessionへの反映境界です
 cancel、Deadline切れ、terminal Run failureでは、Event未発行のsteeringを破棄する場合があります
 
+Fact lifecycleも同じappend-only境界を使います
+Runtimeは明示的なinput `Message.FactDirective`を`Event.FactDirective`へ移し、Session messageとProvider requestにはuser textだけを残します
+MemoryとJSONL Storeはdirective Eventを保持するため、replayで同じactive、superseded、resolved Constraint Factを再構築します
+Ledgerはderived stateであり別に保存しません
+
 follow-upは前のhandleがterminal resultへ達した後、同じSession IDで開始する新しいRunです
 Sessionをreplayしますが、新しいRun IDとRuntime localのProvider、Tool上限を持ちます
 Session Storeは`agent.Budget`を永続化しないため、複数follow-up Runで1つのbudgetを使う場合だけ同じ`*agent.Budget`を明示的に再利用します
@@ -513,9 +533,15 @@ qed evidence inspect <run-id> --store .qed/evidence
 qed evidence export <run-id> --store .qed/evidence
 qed evidence fetch sha256:<digest> --store .qed/evidence
 qed cache status [run-id] --store .qed/evidence
+qed context inspect <run-id> --store .qed/evidence
+qed context explain RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
+qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
 ```
 
 `qed cache status`はRun ID省略時に最新Bundleを選び、effective Plan、normalized cache Usage、任意のforecastとUsage cost estimate、最初のPrefix divergence、最新compaction recordを表示します
+
+Context commandは同じ保存済みpublic Eventから本文を含まないtimeline、集計metrics、before-to-after変更を導出します
+message、path、command、Evidence object digest、object contentは出力しません
 
 ## Extension State Store
 

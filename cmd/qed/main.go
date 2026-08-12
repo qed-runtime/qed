@@ -284,6 +284,7 @@ func application(dependencies commandDependencies) *cli.Command {
 		Subcommand(sessionCommand(dependencies)).
 		Subcommand(evidenceCommand()).
 		Subcommand(cacheCommand()).
+		Subcommand(contextCommand()).
 		Subcommand(extensionCommand())
 }
 

@@ -2,7 +2,7 @@
 
 QED places Tools, Event Hooks, and host-invoked Commands behind a versioned
 process boundary. Development executables, discovered packages, and the QED
-self-exec child use the same Protocol v1 contract
+self-exec child use the same Protocol v2 contract
 
 ```text
 Agent Run
@@ -73,11 +73,15 @@ fails. It does not run Go dependency commands or modify `go.mod`, `go.sum`, or
 `extensions.lock`. The owning module must add its QED dependency through its
 normal dependency workflow
 
-## Protocol v1
+## Protocol v2
 
 Each message is one UTF-8 JSON object prefixed by a 4-byte unsigned big-endian
 payload length. The maximum envelope is 8 MiB. Unknown fields, trailing values,
 malformed frames, missing correlation IDs, and version mismatches are rejected
+
+Protocol v2 adds optional `context_operation` metadata to `invoke_tool`
+results. Because v1 decoders reject unknown fields, exact version negotiation
+deliberately rejects v1 peers instead of treating the wire change as compatible
 
 Requests contain `version`, `id`, `method`, and optional `params`. Responses
 repeat `version` and `id` and contain exactly one of `result` or `error`.
@@ -138,6 +142,19 @@ Tool decoders remain required as defense in depth
 
 Tool definitions receive Extension ID and generation metadata before entering
 Runtime. Evidence records that origin plus hashes of arguments and output
+The Host proxy also attaches the final authorization outcome, sorted capability
+names, and a digest of the Policy reason to `ToolResult.Policy`. It never places
+the raw reason in public Events, and Runtime does not copy this metadata into
+the model-facing Tool Message. These fields let Session replay reconstruct the
+Policy Ledger without trusting a second mutable state store
+
+A Tool may also return `ToolResult.ContextOperation` with a `mutation`,
+`verification`, `commit`, or `subagent` kind. Protocol implementations encode
+it as `{"context_operation":{"kind":"mutation"}}` in the Tool result. Runtime
+keeps this content-free metadata in Events and Session replay, but not in the
+model-facing Tool Message. It prevents context compression from splitting
+semantic transactions; it does not authorize a call or attest that the result
+succeeded. The Host and Extension server reject unknown kinds
 
 ### Hooks
 
@@ -154,7 +171,14 @@ Store failure because Extension RPC and Store append are not one transaction
 Active-Run steering retains the `user.message.added` Event type and sets the
 optional `user_message_origin` field to `steering`. A Hook subscribed to that
 type receives both Run input and steering Messages, so strict protocol decoders
-must include the optional field
+must include the optional field. Explicit Fact lifecycle transitions use the
+same Event type and add optional `fact_directive` metadata after Runtime has
+validated the target Event prefix. The nested Message does not retain that
+host-only directive
+
+A Hook may subscribe to `current_world_state.captured`. Its payload omits file,
+diff, stdout, and stderr content, but it contains workspace paths, command
+arguments, digests, and provenance. Treat it as sensitive Session metadata
 
 ### Commands
 
@@ -282,7 +306,7 @@ The conventional filename is `qed-extension.json`
 {
   "id": "example-extension",
   "version": "0.1.0",
-  "protocol_version": 1,
+  "protocol_version": 2,
   "entrypoint": "bin/example-extension",
   "capabilities": ["filesystem.read"],
   "hooks": ["run.started"],
@@ -332,7 +356,7 @@ same declaration validation as an external manifest
       "manifest": {
         "id": "example-extension",
         "version": "0.1.0",
-        "protocol_version": 1,
+        "protocol_version": 2,
         "capabilities": ["example.read"]
       }
     }

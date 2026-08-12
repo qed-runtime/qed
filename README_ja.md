@@ -18,7 +18,11 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - lifecycle contract test付きで既存fileを上書きしないGo Extension scaffold
 - fork不要でapplicationが所有する`extensions.lock` catalogとlive manifest validation
 - host所有Evidence Bundle
-- Evidence preservingなContext圧縮、Prefix Manifest、prompt cache Plan、正規化cache Usage
+- ordered Session Eventから明示的なFact lifecycleを含めて再構築するdeterministicなArtifact、Execution、Constraint、Policy、Task Ledger
+- relevant file hash、Git state、観測済みcheck freshnessを持つcanonical Current World State snapshot
+- approval、subagent、edit-verification、commit、Tool transactionを分断しないsafe cut、決定的なpreservation report、Provider call前rollbackを持つEvidence preservingなContext圧縮
+- 本文を含まないContext inspect、explain、diff、品質metrics集計
+- Prefix Manifest、prompt cache Plan、正規化cache Usage
 - NagiベースのCLIとmulti-turn TUI
 - 末端のExtension processまで伝搬する安全な構造化diagnostics
 
@@ -58,6 +62,7 @@ prompt cache usageを返すProviderではcache read、write、uncached inputの�
 
 ```sh
 qed cache status --store .qed/evidence
+qed context inspect <run-id> --store .qed/evidence
 qed evidence fetch sha256:<digest> --store .qed/evidence
 ```
 
@@ -204,7 +209,7 @@ go run ./cmd/qed run --config ./qed.json --prompt "Review this plan"
 `staged`はindexだけを対象にします
 
 checked-in `extensions.lock`はこのbinary向けに再利用可能な`qed.workspace`、`qed.process`、`qed.git` Extensionを選択します
-各Extensionはsingle binaryのself-exec modeを含め、常にExtension Protocol v1境界で実行されます
+各Extensionはsingle binaryのself-exec modeを含め、常にExtension Protocol v2境界で実行されます
 
 ```json
 {
@@ -276,6 +281,10 @@ cancel、Deadline切れ、terminal Run failureでは、このEventへ到達し�
 follow-upは新しいRun IDとRun local上限を持ち、Session Storeがない場合はcallerが過去contextを渡す必要があります
 複数Runで上限を共有する場合だけ同じ`*agent.Budget`を明示的に再利用します
 
+hostはuser Messageへ`FactLifecycleDirective`を付け、過去のactive Constraint Fact IDをsupersedeまたはresolveできます
+Runtimeはdirectiveをcommit対象の`user.message.added` Eventへ移し、Provider conversation historyへ含めず、自然言語を解釈せずにactive、superseded、resolved stateを決定的に再構築します
+lifecycle契約は[Contextとcache](docs/context-caching_ja.md)を参照してください
+
 実験的TUIではEnterをactive Runへのsteeringへ割り当て、現在のRunがterminal resultへ達した後はfollow-up Runを開始します
 設定済み`--session-id`がある場合は永続Sessionをreplayし、ない場合はそのchatが続く間だけ前Runのmessageを引き継ぎます
 
@@ -301,9 +310,12 @@ Evidence Storeが設定されている場合、設定Run、設定TUI chat内で�
 ```sh
 go run ./cmd/qed run inspect <run-id> --store .qed/evidence
 go run ./cmd/qed run export <run-id> --store .qed/evidence
+go run ./cmd/qed context inspect <run-id> --store .qed/evidence
+go run ./cmd/qed context explain <run-id> --store .qed/evidence
 ```
 
 同じ機能を`qed evidence inspect`と`qed evidence export`でも利用できます
+`qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after RUN_ID[@EVENT_SEQUENCE]`はmessage、path、command、Evidence object contentを出力せず2つのcompaction判断を比較します
 
 ## 実験的TUI
 

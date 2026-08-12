@@ -60,6 +60,10 @@ type Options struct {
 	//
 	// A nil Compiler uses DefaultContextCompiler
 	ContextCompiler ContextCompiler
+	// CurrentWorldStateSource reads canonical host state before each logical Provider request
+	//
+	// A nil Source disables Current World State capture
+	CurrentWorldStateSource CurrentWorldStateSource
 	// CachePlanner creates Provider-neutral cache routing and breakpoint decisions
 	//
 	// A nil Planner uses DefaultCachePlanner
@@ -81,23 +85,24 @@ type Options struct {
 //
 // Runtime is safe for concurrent use after construction
 type Runtime struct {
-	provider         Provider
-	staticTools      runtimeToolSet
-	toolValidator    ToolInputValidator
-	toolSource       ToolSource
-	componentSource  ComponentSource
-	staticHooks      []runtimeHook
-	maxProviderCalls int
-	maxToolCalls     int
-	sessionStore     SessionStore
-	contextCompiler  ContextCompiler
-	cachePlanner     CachePlanner
-	cachePolicy      CachePolicy
-	providerRetry    ProviderRetryPolicy
-	providerLimiter  ProviderRateLimitController
-	logger           *slog.Logger
-	sessionMu        sync.Mutex
-	sessionLocks     map[string]*runtimeSessionLock
+	provider                Provider
+	staticTools             runtimeToolSet
+	toolValidator           ToolInputValidator
+	toolSource              ToolSource
+	componentSource         ComponentSource
+	staticHooks             []runtimeHook
+	maxProviderCalls        int
+	maxToolCalls            int
+	sessionStore            SessionStore
+	contextCompiler         ContextCompiler
+	currentWorldStateSource CurrentWorldStateSource
+	cachePlanner            CachePlanner
+	cachePolicy             CachePolicy
+	providerRetry           ProviderRetryPolicy
+	providerLimiter         ProviderRateLimitController
+	logger                  *slog.Logger
+	sessionMu               sync.Mutex
+	sessionLocks            map[string]*runtimeSessionLock
 }
 
 type runtimeSessionLock struct {
@@ -178,22 +183,23 @@ func NewRuntime(options Options) (*Runtime, error) {
 	}
 
 	return &Runtime{
-		provider:         options.Provider,
-		staticTools:      staticTools,
-		toolValidator:    options.ToolInputValidator,
-		toolSource:       options.ToolSource,
-		componentSource:  options.ComponentSource,
-		staticHooks:      staticHooks,
-		maxProviderCalls: maxProviderCalls,
-		maxToolCalls:     maxToolCalls,
-		sessionStore:     options.SessionStore,
-		contextCompiler:  contextCompiler,
-		cachePlanner:     cachePlanner,
-		cachePolicy:      cachePolicy,
-		providerRetry:    providerRetry,
-		providerLimiter:  providerLimiter,
-		logger:           options.Logger,
-		sessionLocks:     make(map[string]*runtimeSessionLock),
+		provider:                options.Provider,
+		staticTools:             staticTools,
+		toolValidator:           options.ToolInputValidator,
+		toolSource:              options.ToolSource,
+		componentSource:         options.ComponentSource,
+		staticHooks:             staticHooks,
+		maxProviderCalls:        maxProviderCalls,
+		maxToolCalls:            maxToolCalls,
+		sessionStore:            options.SessionStore,
+		contextCompiler:         contextCompiler,
+		currentWorldStateSource: options.CurrentWorldStateSource,
+		cachePlanner:            cachePlanner,
+		cachePolicy:             cachePolicy,
+		providerRetry:           providerRetry,
+		providerLimiter:         providerLimiter,
+		logger:                  options.Logger,
+		sessionLocks:            make(map[string]*runtimeSessionLock),
 	}, nil
 }
 
@@ -284,6 +290,11 @@ func (runtime *Runtime) Run(ctx context.Context, request RunRequest) (*RunHandle
 		}
 		if request.Resume.RequestID == "" {
 			return nil, errors.New("resume request ID is required")
+		}
+	}
+	for index := range request.Input {
+		if err := validateFactDirectiveMessage(request.Input[index]); err != nil {
+			return nil, fmt.Errorf("run input Message %d: %w", index, err)
 		}
 	}
 	if !request.Deadline.IsZero() && !request.Deadline.After(time.Now()) {
@@ -419,6 +430,7 @@ func (runtime *Runtime) execute(
 	defer releaseSession()
 	messages := loaded.messages
 	sessionRevision := loaded.revision
+	ledgerEvents := cloneEvents(loaded.events)
 	activeCheckpoint := cloneContextCheckpointPointer(loaded.checkpoint)
 	knownEvidence := make(map[string]struct{}, len(loaded.evidenceObjects))
 	for _, reference := range loaded.evidenceObjects {
@@ -426,6 +438,7 @@ func (runtime *Runtime) execute(
 	}
 	var latestCompaction *ContextCompactionReport
 	var latestCachePlan *CachePlan
+	var latestWorldState *CurrentWorldState
 
 	ctx = WithRunInfo(ctx, RunInfo{
 		RunID:        runID,
@@ -457,6 +470,41 @@ func (runtime *Runtime) execute(
 		event.AgentID = request.AgentID
 		event.SessionID = request.SessionID
 		event.Time = time.Now().UTC()
+		if event.FactDirective != nil {
+			preview := cloneEvent(event)
+			if runtime.sessionStore != nil && request.SessionID != "" {
+				preview.SessionRevision = sessionRevision + 1
+			}
+			previewEvents := append(cloneEvents(ledgerEvents), preview)
+			if _, err := BuildContextLedger(ctx, previewEvents); err != nil {
+				return fmt.Errorf("validate Fact lifecycle transition: %w", err)
+			}
+		}
+		if event.Type == EventContextCompacted {
+			preview := cloneEvent(event)
+			if runtime.sessionStore != nil && request.SessionID != "" {
+				preview.SessionRevision = sessionRevision + 1
+			}
+			previewEvents := append(cloneEvents(ledgerEvents), preview)
+			if _, err := BuildContextLedger(ctx, previewEvents); err != nil {
+				return fmt.Errorf("validate Context compaction: %w", err)
+			}
+		}
+		if event.Type == EventCurrentWorldStateCaptured && event.CurrentWorldState == nil {
+			return errors.New("current_world_state.captured requires Current World State")
+		}
+		if event.Type != EventCurrentWorldStateCaptured && event.CurrentWorldState != nil {
+			return fmt.Errorf("Event %q must not contain Current World State", event.Type)
+		}
+		if event.CurrentWorldState != nil {
+			prefix, err := BuildContextLedger(ctx, ledgerEvents)
+			if err != nil {
+				return fmt.Errorf("build Current World State prefix: %w", err)
+			}
+			if err := validateCurrentWorldStateAgainstPrefix(*event.CurrentWorldState, prefix, ledgerEvents); err != nil {
+				return fmt.Errorf("validate Current World State: %w", err)
+			}
+		}
 		for _, configured := range hooks {
 			if _, observes := configured.eventTypes[event.Type]; !observes {
 				continue
@@ -501,6 +549,7 @@ func (runtime *Runtime) execute(
 			event.SessionRevision = revision
 		}
 		sequence = event.Sequence
+		ledgerEvents = append(ledgerEvents, cloneEvent(event))
 		handle.events <- cloneEvent(event)
 		runtime.debug("run.event.emitted",
 			"run_id", runID,
@@ -525,10 +574,13 @@ func (runtime *Runtime) execute(
 				return err
 			}
 			message := cloneMessage(pending[index])
+			directive := cloneFactLifecycleDirective(message.FactDirective)
+			message.FactDirective = nil
 			if err := emit(Event{
 				Type:              EventUserMessageAdded,
 				Message:           &message,
 				UserMessageOrigin: UserMessageOriginSteering,
+				FactDirective:     directive,
 			}); err != nil {
 				return err
 			}
@@ -577,6 +629,16 @@ func (runtime *Runtime) execute(
 			event.Error = runErr.Error()
 			handle.events <- cloneEvent(event)
 		}
+		finalLedger, ledgerErr := BuildContextLedger(context.WithoutCancel(ctx), ledgerEvents)
+		var terminalLedger *ContextLedger
+		if ledgerErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("build terminal Context Ledger: %w", ledgerErr))
+			if status == RunStatusCompleted {
+				status = RunStatusFailed
+			}
+		} else {
+			terminalLedger = &finalLedger
+		}
 		release()
 		var budgetSnapshot *BudgetSnapshot
 		if request.Budget != nil {
@@ -606,6 +668,8 @@ func (runtime *Runtime) execute(
 			Budget:            budgetSnapshot,
 			SessionRevision:   sessionRevision,
 			ContextCheckpoint: cloneContextCheckpointPointer(activeCheckpoint),
+			ContextLedger:     cloneContextLedgerPointer(terminalLedger),
+			CurrentWorldState: cloneCurrentWorldStatePointer(latestWorldState),
 			ContextCompaction: cloneContextCompactionReport(latestCompaction),
 			CachePlan:         cloneCachePlanPointer(latestCachePlan),
 		}, runErr)
@@ -625,14 +689,18 @@ func (runtime *Runtime) execute(
 	}
 	for index := range request.Input {
 		input := cloneMessage(request.Input[index])
+		directive := cloneFactLifecycleDirective(input.FactDirective)
+		input.FactDirective = nil
 		if err := emit(Event{
 			Type:              EventUserMessageAdded,
 			Message:           &input,
 			UserMessageOrigin: UserMessageOriginRunInput,
+			FactDirective:     directive,
 		}); err != nil {
 			fail(err)
 			return
 		}
+		messages = append(messages, input)
 	}
 	if request.Resume != nil {
 		if loaded.pendingTool == nil {
@@ -697,12 +765,84 @@ func (runtime *Runtime) execute(
 			Tools:        cloneToolDefinitions(toolSet.definitions),
 		}
 		compileStartedAt := time.Now()
+		activeLedger, err := BuildContextLedger(ctx, ledgerEvents)
+		if err != nil {
+			fail(fmt.Errorf("build Context Ledger: %w", err))
+			return
+		}
+		if runtime.currentWorldStateSource != nil {
+			captureStartedAt := time.Now()
+			runtime.debug("current_world_state.capture.started",
+				"run_id", runID,
+				"provider", runtime.provider.Name(),
+			)
+			snapshot, snapshotErr := runtime.currentWorldStateSource.Snapshot(ctx, CurrentWorldStateRequest{
+				Run: RunInfo{
+					RunID: runID, ParentRunID: request.ParentRunID, AgentID: request.AgentID,
+					SessionID: request.SessionID, Capabilities: append([]string(nil), request.Capabilities...),
+				},
+				Events: cloneEvents(ledgerEvents),
+				Ledger: *cloneContextLedgerPointer(&activeLedger),
+			})
+			if snapshotErr != nil {
+				runtime.debug("current_world_state.capture.failed",
+					"run_id", runID,
+					"provider", runtime.provider.Name(),
+					"duration_ms", time.Since(captureStartedAt).Milliseconds(),
+					"error_type", fmt.Sprintf("%T", snapshotErr),
+				)
+				fail(fmt.Errorf("capture Current World State: %w", snapshotErr))
+				return
+			}
+			worldState, stateErr := buildCurrentWorldState(activeLedger.Reference(), snapshot, ledgerEvents)
+			if stateErr != nil {
+				runtime.debug("current_world_state.capture.failed",
+					"run_id", runID,
+					"provider", runtime.provider.Name(),
+					"duration_ms", time.Since(captureStartedAt).Milliseconds(),
+					"error_type", fmt.Sprintf("%T", stateErr),
+				)
+				fail(fmt.Errorf("build Current World State: %w", stateErr))
+				return
+			}
+			if err := emit(Event{Type: EventCurrentWorldStateCaptured, CurrentWorldState: &worldState}); err != nil {
+				fail(err)
+				return
+			}
+			latestWorldState = cloneCurrentWorldStatePointer(&worldState)
+			activeLedger, err = BuildContextLedger(ctx, ledgerEvents)
+			if err != nil {
+				fail(fmt.Errorf("rebuild Context Ledger after Current World State: %w", err))
+				return
+			}
+			gitChanges := 0
+			gitAvailable := false
+			if worldState.Snapshot.Git != nil {
+				gitAvailable = worldState.Snapshot.Git.Available
+				gitChanges = len(worldState.Snapshot.Git.Changes)
+			}
+			runtime.debug("current_world_state.capture.completed",
+				"run_id", runID,
+				"provider", runtime.provider.Name(),
+				"duration_ms", time.Since(captureStartedAt).Milliseconds(),
+				"files_available", worldState.Snapshot.FilesAvailable,
+				"file_count", len(worldState.Snapshot.Files),
+				"files_truncated", worldState.Snapshot.FilesTruncated,
+				"git_available", gitAvailable,
+				"git_change_count", gitChanges,
+				"check_count", len(worldState.Snapshot.Checks),
+				"checks_truncated", worldState.Snapshot.ChecksTruncated,
+			)
+		}
 		compiled, manifest, err := runtime.compileContext(
 			ctx,
 			runID,
 			modelRequest,
 			sessionRevision,
 			activeCheckpoint,
+			&activeLedger,
+			ledgerEvents,
+			latestWorldState,
 		)
 		if err != nil {
 			runtime.debug("context.compile.failed",
@@ -714,12 +854,37 @@ func (runtime *Runtime) execute(
 			fail(fmt.Errorf("compile Provider context: %w", err))
 			return
 		}
+		compactionReason := ""
+		rebased := false
+		rebaseReason := ContextRebaseReason("")
+		validationReported := false
+		validationPassed := false
+		validationRollback := ContextValidationRollback("")
+		validationFailureCount := 0
+		if compiled.Compaction != nil {
+			compactionReason = compiled.Compaction.Reason
+			rebased = compiled.Compaction.Rebased
+			rebaseReason = compiled.Compaction.RebaseReason
+			if compiled.Compaction.Validation != nil {
+				validationReported = true
+				validationPassed = compiled.Compaction.Validation.Passed
+				validationRollback = compiled.Compaction.Validation.Rollback
+				validationFailureCount = len(compiled.Compaction.Validation.Failures)
+			}
+		}
 		runtime.debug("context.compile.completed",
 			"run_id", runID,
 			"provider", runtime.provider.Name(),
 			"duration_ms", time.Since(compileStartedAt).Milliseconds(),
 			"segment_count", len(manifest.Segments),
 			"prefix_epoch", manifest.Epoch,
+			"compaction_reason", compactionReason,
+			"rebased", rebased,
+			"rebase_reason", rebaseReason,
+			"validation_reported", validationReported,
+			"validation_passed", validationPassed,
+			"validation_rollback", validationRollback,
+			"validation_failure_count", validationFailureCount,
 		)
 		checkpointChanged := compiled.Checkpoint != nil && !contextCheckpointsEqual(activeCheckpoint, compiled.Checkpoint)
 		var newEvidence []EvidenceObjectRef
@@ -731,7 +896,7 @@ func (runtime *Runtime) execute(
 				newEvidence = append(newEvidence, reference)
 			}
 		}
-		if checkpointChanged || len(newEvidence) > 0 {
+		if checkpointChanged || len(newEvidence) > 0 || validationRollback != "" {
 			report := cloneContextCompactionReport(compiled.Compaction)
 			if report == nil {
 				report = &ContextCompactionReport{Applied: true, Reason: "checkpoint"}
@@ -947,6 +1112,10 @@ func (runtime *Runtime) execute(
 			fail(fmt.Errorf("provider %q returned message role %q, want %q", runtime.provider.Name(), message.Role, RoleAssistant))
 			return
 		}
+		if message.FactDirective != nil {
+			fail(fmt.Errorf("provider %q returned host-only Fact lifecycle state", runtime.provider.Name()))
+			return
+		}
 		if err := validateUsage(message.Usage); err != nil {
 			fail(fmt.Errorf("provider %q returned invalid Usage: %w", runtime.provider.Name(), err))
 			return
@@ -1060,17 +1229,23 @@ func (runtime *Runtime) compileContext(
 	request ModelRequest,
 	sessionRevision uint64,
 	checkpoint *ContextCheckpoint,
+	ledger *ContextLedger,
+	events []Event,
+	worldState *CurrentWorldState,
 ) (CompiledContext, PrefixManifest, error) {
 	model := ""
 	if provider, ok := runtime.provider.(ModelIDProvider); ok {
 		model = provider.ModelID()
 	}
 	compiled, err := runtime.contextCompiler.Compile(ctx, ContextCompileRequest{
-		Provider:        runtime.provider.Name(),
-		Model:           model,
-		ModelRequest:    cloneModelRequest(request),
-		SessionRevision: sessionRevision,
-		Checkpoint:      cloneContextCheckpointPointer(checkpoint),
+		Provider:          runtime.provider.Name(),
+		Model:             model,
+		ModelRequest:      cloneModelRequest(request),
+		SessionRevision:   sessionRevision,
+		Checkpoint:        cloneContextCheckpointPointer(checkpoint),
+		Ledger:            cloneContextLedgerPointer(ledger),
+		Events:            cloneEvents(events),
+		CurrentWorldState: cloneCurrentWorldStatePointer(worldState),
 	})
 	if err != nil {
 		return CompiledContext{}, PrefixManifest{}, err
@@ -1079,6 +1254,9 @@ func (runtime *Runtime) compileContext(
 	compiled.Segments = cloneContextSegments(compiled.Segments)
 	compiled.Checkpoint = cloneContextCheckpointPointer(compiled.Checkpoint)
 	compiled.Compaction = cloneContextCompactionReport(compiled.Compaction)
+	if err := validateCompiledContextValidation(compiled.Compaction, compiled.Checkpoint, checkpoint); err != nil {
+		return CompiledContext{}, PrefixManifest{}, fmt.Errorf("validate Context preservation report: %w", err)
+	}
 	if compiled.ModelRequest.AgentID != request.AgentID {
 		return CompiledContext{}, PrefixManifest{}, errors.New("Context Compiler changed Agent ID")
 	}
@@ -1088,8 +1266,19 @@ func (runtime *Runtime) compileContext(
 	if !metadataEqual(compiled.ModelRequest.Metadata, request.Metadata) {
 		return CompiledContext{}, PrefixManifest{}, errors.New("Context Compiler changed request metadata")
 	}
+	for index := range compiled.ModelRequest.Messages {
+		if compiled.ModelRequest.Messages[index].FactDirective != nil {
+			return CompiledContext{}, PrefixManifest{}, fmt.Errorf(
+				"Context Compiler returned host-only Fact lifecycle state in Message %d",
+				index,
+			)
+		}
+	}
 	if len(compiled.ModelRequest.Messages) == 0 && compiled.ModelRequest.Instructions == "" {
 		return CompiledContext{}, PrefixManifest{}, errors.New("Context Compiler returned an empty model request")
+	}
+	if err := appendCurrentWorldState(&compiled, worldState); err != nil {
+		return CompiledContext{}, PrefixManifest{}, err
 	}
 	toolNames := make(map[string]struct{}, len(compiled.ModelRequest.Tools))
 	for _, definition := range compiled.ModelRequest.Tools {
@@ -1250,6 +1439,7 @@ func errorType(err error) string {
 
 type loadedSession struct {
 	messages        []Message
+	events          []Event
 	revision        uint64
 	checkpoint      *ContextCheckpoint
 	evidenceObjects []EvidenceObjectRef
@@ -1259,7 +1449,7 @@ type loadedSession struct {
 
 func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (loadedSession, func(), error) {
 	if runtime.sessionStore == nil || request.SessionID == "" {
-		return loadedSession{messages: cloneMessages(request.Input)}, func() {}, nil
+		return loadedSession{}, func() {}, nil
 	}
 	release, err := runtime.acquireSession(ctx, request.SessionID)
 	if err != nil {
@@ -1290,7 +1480,8 @@ func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (lo
 		wait := cloneWaitRequest(*snapshot.PendingWait)
 		tool := cloneToolCall(*snapshot.PendingTool)
 		return loadedSession{
-			messages:        cloneMessages(snapshot.Messages),
+			messages:        cloneMessagesWithoutFactDirectives(snapshot.Messages),
+			events:          cloneEvents(snapshot.Events),
 			revision:        snapshot.Revision,
 			checkpoint:      cloneContextCheckpointPointer(snapshot.Checkpoint),
 			evidenceObjects: append([]EvidenceObjectRef(nil), snapshot.EvidenceObjects...),
@@ -1302,10 +1493,9 @@ func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (lo
 		release()
 		return loadedSession{}, func() {}, fmt.Errorf("Session %q has unfinished work and must be resumed", request.SessionID)
 	}
-	messages := cloneMessages(snapshot.Messages)
-	messages = append(messages, cloneMessages(request.Input)...)
 	return loadedSession{
-		messages:        messages,
+		messages:        cloneMessagesWithoutFactDirectives(snapshot.Messages),
+		events:          cloneEvents(snapshot.Events),
 		revision:        snapshot.Revision,
 		checkpoint:      cloneContextCheckpointPointer(snapshot.Checkpoint),
 		evidenceObjects: append([]EvidenceObjectRef(nil), snapshot.EvidenceObjects...),
@@ -1366,18 +1556,30 @@ func (runtime *Runtime) executeTool(ctx context.Context, toolSet runtimeToolSet,
 
 	call.Arguments = arguments
 	toolResult, err := tool.Execute(ctx, call)
+	result.Policy = cloneToolPolicyDecision(toolResult.Policy)
 	if err != nil {
 		result.Output = err.Error()
+		result.IsError = true
+		return result
+	}
+	if err := ValidateContextOperation(toolResult.ContextOperation); err != nil {
+		result.Output = fmt.Sprintf("tool %q returned invalid context operation: %v", call.Name, err)
 		result.IsError = true
 		return result
 	}
 
 	result.Output = toolResult.Output
 	result.IsError = toolResult.IsError
+	result.ContextOperation = cloneContextOperation(toolResult.ContextOperation)
 	return result
 }
 
-func (runtime *Runtime) executeToolWithDebug(ctx context.Context, runID string, toolSet runtimeToolSet, call ToolCall) ToolResult {
+func (runtime *Runtime) executeToolWithDebug(
+	ctx context.Context,
+	runID string,
+	toolSet runtimeToolSet,
+	call ToolCall,
+) ToolResult {
 	startedAt := time.Now()
 	tool := toolSet.tools[call.Name]
 	var definition ToolDefinition
@@ -1531,6 +1733,7 @@ func cloneToolCalls(calls []ToolCall) []ToolCall {
 }
 
 func cloneMessage(message Message) Message {
+	message.FactDirective = cloneFactLifecycleDirective(message.FactDirective)
 	message.ToolCalls = cloneToolCalls(message.ToolCalls)
 	if message.Usage != nil {
 		usage := *message.Usage
@@ -1552,6 +1755,14 @@ func cloneMessages(messages []Message) []Message {
 	cloned := make([]Message, len(messages))
 	for index := range messages {
 		cloned[index] = cloneMessage(messages[index])
+	}
+	return cloned
+}
+
+func cloneMessagesWithoutFactDirectives(messages []Message) []Message {
+	cloned := cloneMessages(messages)
+	for index := range cloned {
+		cloned[index].FactDirective = nil
 	}
 	return cloned
 }
@@ -1578,7 +1789,22 @@ func cloneToolResults(results []ToolResult) []ToolResult {
 	if results == nil {
 		return nil
 	}
-	return append([]ToolResult(nil), results...)
+	cloned := make([]ToolResult, len(results))
+	for index := range results {
+		cloned[index] = results[index]
+		cloned[index].Policy = cloneToolPolicyDecision(results[index].Policy)
+		cloned[index].ContextOperation = cloneContextOperation(results[index].ContextOperation)
+	}
+	return cloned
+}
+
+func cloneToolPolicyDecision(decision *ToolPolicyDecision) *ToolPolicyDecision {
+	if decision == nil {
+		return nil
+	}
+	cloned := *decision
+	cloned.Capabilities = append([]string(nil), decision.Capabilities...)
+	return &cloned
 }
 
 func cloneEvent(event Event) Event {
@@ -1601,6 +1827,8 @@ func cloneEvent(event Event) Event {
 	}
 	event.ContextCheckpoint = cloneContextCheckpointPointer(event.ContextCheckpoint)
 	event.ContextCompaction = cloneContextCompactionReport(event.ContextCompaction)
+	event.FactDirective = cloneFactLifecycleDirective(event.FactDirective)
+	event.CurrentWorldState = cloneCurrentWorldStatePointer(event.CurrentWorldState)
 	if event.Message != nil {
 		message := cloneMessage(*event.Message)
 		event.Message = &message
@@ -1611,6 +1839,8 @@ func cloneEvent(event Event) Event {
 	}
 	if event.ToolResult != nil {
 		result := *event.ToolResult
+		result.Policy = cloneToolPolicyDecision(event.ToolResult.Policy)
+		result.ContextOperation = cloneContextOperation(event.ToolResult.ContextOperation)
 		event.ToolResult = &result
 	}
 	if event.WaitRequest != nil {
@@ -1625,6 +1855,17 @@ func cloneEvent(event Event) Event {
 	return event
 }
 
+func cloneEvents(events []Event) []Event {
+	if events == nil {
+		return nil
+	}
+	cloned := make([]Event, len(events))
+	for index := range events {
+		cloned[index] = cloneEvent(events[index])
+	}
+	return cloned
+}
+
 func cloneRunResult(result RunResult) RunResult {
 	result.Messages = cloneMessages(result.Messages)
 	result.ToolResults = cloneToolResults(result.ToolResults)
@@ -1633,6 +1874,8 @@ func cloneRunResult(result RunResult) RunResult {
 		result.Budget = &budget
 	}
 	result.ContextCheckpoint = cloneContextCheckpointPointer(result.ContextCheckpoint)
+	result.ContextLedger = cloneContextLedgerPointer(result.ContextLedger)
+	result.CurrentWorldState = cloneCurrentWorldStatePointer(result.CurrentWorldState)
 	result.ContextCompaction = cloneContextCompactionReport(result.ContextCompaction)
 	result.CachePlan = cloneCachePlanPointer(result.CachePlan)
 	return result

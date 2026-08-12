@@ -25,6 +25,12 @@ type Message struct {
 	Role Role `json:"role"`
 	// Text contains user, assistant, or Tool output text
 	Text string `json:"text,omitempty"`
+	// FactDirective explicitly changes earlier Constraint Facts
+	//
+	// Runtime accepts this field only on user input. It moves the directive to
+	// the corresponding user.message.added Event and removes it from Provider
+	// conversation history.
+	FactDirective *FactLifecycleDirective `json:"fact_directive,omitempty"`
 	// ToolCallID correlates a Tool result message with its request
 	ToolCallID string `json:"tool_call_id,omitempty"`
 	// ToolName identifies the Tool that produced a result message
@@ -48,6 +54,34 @@ type Message struct {
 	// ProviderState is not serialized. Callers must treat it as opaque and only
 	// pass it back to a Provider with the same name
 	ProviderState *ProviderState `json:"-"`
+}
+
+// FactLifecycleAction identifies an explicit Constraint Fact transition
+type FactLifecycleAction string
+
+// Fact lifecycle actions supported by Runtime
+const (
+	// FactLifecycleSupersede retires every target and makes the current user Message active
+	FactLifecycleSupersede FactLifecycleAction = "supersede"
+	// FactLifecycleResolve retires every target without creating a new Constraint Fact
+	FactLifecycleResolve FactLifecycleAction = "resolve"
+)
+
+const (
+	// MaxFactLifecycleTargets bounds one deterministic lifecycle transition
+	MaxFactLifecycleTargets = 64
+)
+
+// FactLifecycleDirective explicitly transitions earlier active Constraint Facts
+//
+// Targets contains stable Constraint Fact IDs returned by ConstraintFactID or
+// exposed through ContextLedger.Constraints. Runtime applies targets in the
+// supplied order after rejecting empty, duplicate, missing, or non-active IDs.
+type FactLifecycleDirective struct {
+	// Action identifies whether Targets are superseded or resolved
+	Action FactLifecycleAction `json:"action"`
+	// Targets identifies earlier active Constraint Facts
+	Targets []string `json:"targets"`
 }
 
 // StopReason identifies why a Provider stopped generating a message
@@ -138,6 +172,29 @@ type ToolResult struct {
 	Output string `json:"output,omitempty"`
 	// IsError reports whether execution failed without terminating the Run
 	IsError bool `json:"is_error,omitempty"`
+	// ContextOperation classifies a host-observed operation for safe context cuts
+	//
+	// It is retained in Run Events and results but is not copied into the
+	// model-facing Tool Message
+	ContextOperation *ContextOperation `json:"context_operation,omitempty"`
+	// Policy contains content-free host authorization metadata when a host proxy
+	// enforced capabilities for this invocation
+	//
+	// Policy is not copied into the model-facing Tool Message
+	Policy *ToolPolicyDecision `json:"policy,omitempty"`
+}
+
+// ToolPolicyDecision contains safe authorization metadata retained by Run Events
+//
+// ReasonDigest identifies the complete host reason without exposing its text
+// through Session or public Event output
+type ToolPolicyDecision struct {
+	// Outcome is the host Policy outcome after any human approval
+	Outcome string `json:"outcome"`
+	// Capabilities contains the sorted capabilities evaluated for this invocation
+	Capabilities []string `json:"capabilities,omitempty"`
+	// ReasonDigest identifies the complete Policy reason when one was supplied
+	ReasonDigest string `json:"reason_digest,omitempty"`
 }
 
 // Tool executes a capability exposed to a Provider
@@ -303,7 +360,9 @@ const (
 const (
 	EventRunStarted       EventType = "run.started"
 	EventUserMessageAdded EventType = "user.message.added"
-	EventContextCompacted EventType = "context.compacted"
+	// EventCurrentWorldStateCaptured commits one canonical state snapshot
+	EventCurrentWorldStateCaptured EventType = "current_world_state.captured"
+	EventContextCompacted          EventType = "context.compacted"
 	// EventProviderRateLimitWait reports a queued outbound Provider attempt
 	EventProviderRateLimitWait EventType = "provider.rate_limit.waiting"
 	EventModelRequest          EventType = "model.request.started"
@@ -405,6 +464,13 @@ type Event struct {
 	// It is only meaningful for user.message.added Events. An empty value means
 	// the Message came from RunRequest.Input, including a follow-up Run.
 	UserMessageOrigin UserMessageOrigin `json:"user_message_origin,omitempty"`
+	// FactDirective records an explicit Constraint Fact transition
+	//
+	// Runtime moves this value from user Message input to the Event before
+	// persistence. Event.Message therefore remains provider-neutral history.
+	FactDirective *FactLifecycleDirective `json:"fact_directive,omitempty"`
+	// CurrentWorldState contains canonical host state for a capture Event
+	CurrentWorldState *CurrentWorldState `json:"current_world_state,omitempty"`
 	// Delta contains incremental assistant text for message.delta
 	Delta string `json:"delta,omitempty"`
 	// ToolCall is present for Tool events
@@ -447,6 +513,10 @@ type RunResult struct {
 	SessionRevision uint64 `json:"session_revision,omitempty"`
 	// ContextCheckpoint is the latest validated Checkpoint used by this Run
 	ContextCheckpoint *ContextCheckpoint `json:"context_checkpoint,omitempty"`
+	// ContextLedger is the terminal deterministic view over this Run's Event history
+	ContextLedger *ContextLedger `json:"context_ledger,omitempty"`
+	// CurrentWorldState is the latest canonical host snapshot used by this Run
+	CurrentWorldState *CurrentWorldState `json:"current_world_state,omitempty"`
 	// ContextCompaction is the latest context reduction published by this Run
 	ContextCompaction *ContextCompactionReport `json:"context_compaction,omitempty"`
 	// CachePlan is the latest Provider cache decision used by this Run

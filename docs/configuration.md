@@ -75,7 +75,8 @@ The format is used by `qed run`, `qed tui`, and `qed session resume`
       },
       "context": {
         "max_input_bytes": 65536,
-        "recent_messages": 12
+        "recent_messages": 12,
+        "rebase_generation_interval": 4
       },
       "cache": {
         "mode": "adaptive",
@@ -349,6 +350,12 @@ and capabilities, not raw Tool arguments
 Every selected environment name must exist. Executable lookup uses only the
 selected `PATH` and does not fall back to the Host environment
 
+A declarative Coding Profile also installs its default Current World State
+Source on every referencing Agent. Canonical file and Git reads obey the same
+Profile Policy and optional Run capability restriction. Background capture
+does not request approval for an `ask` outcome. See
+[Coding Profile](coding-profile.md#current-world-state) for scope and limits
+
 ## Agent definitions and delegation
 
 | Field | Required | Meaning |
@@ -418,11 +425,24 @@ output as content-addressed objects
 | `evidence_threshold_bytes` | no | Externalize Tool output at this size, default `16384` |
 | `evidence_excerpt_bytes` | no | Retain this many bytes from both ends, default `2048` |
 | `checkpoint_max_bytes` | no | Maximum encoded Checkpoint size, default `8192` |
+| `rebase_generation_interval` | no | Rebuild without the previous semantic Checkpoint after this many newer generations, default `4`, maximum `64` |
 
 `max_input_bytes` is deterministic and Provider-neutral, not a tokenizer-backed
 model context limit. QED never rewrites raw Session messages. It compiles a
 validated Checkpoint followed by a recent raw tail, and stops before a Provider
-call when no safe Tool-transaction boundary fits the hard limit
+call when no safe Tool, approval, subagent, edit-verification, or commit
+transaction boundary fits the hard limit
+
+The first Checkpoint and every configured Raw Event Rebase are rebuilt without
+the previous semantic Checkpoint. Explicit Fact lifecycle changes and a
+Checkpoint Fact retired by the current Ledger also trigger a Rebase. The
+`context.compacted` Event reports `rebased` and `rebase_reason`
+
+Each new Checkpoint candidate reports deterministic preservation counts in
+`context_compaction.validation`. QED does not shrink away active Constraint
+Facts or required Evidence to satisfy `checkpoint_max_bytes`. An undersized
+limit can therefore retain the prior validated Checkpoint and raw tail with a
+recorded rollback, or stop before Provider I/O when no validated view fits
 
 Prompt-cache control is disabled when `cache` is omitted or `mode` is empty or
 `disabled`. Provider-side implicit behavior may still occur independently
@@ -515,6 +535,12 @@ Event is the durable Session boundary. Steering that has not emitted that Event
 may be discarded by cancellation, deadline expiry, or terminal Run
 failure
 
+Fact lifecycle uses the same append-only boundary. Runtime moves an explicit
+input `Message.FactDirective` to `Event.FactDirective`; Session messages and
+Provider requests retain only the user text. Memory and JSONL Stores preserve
+the directive Event, so replay reconstructs the same active, superseded, and
+resolved Constraint Facts. The Ledger is derived and is not stored separately
+
 A follow-up is a new Run started with the same Session ID only after the
 previous handle reaches a terminal result. It replays the Session but receives
 a new Run ID and new Runtime-local Provider and Tool limits. Session Stores do
@@ -548,11 +574,18 @@ qed evidence inspect <run-id> --store .qed/evidence
 qed evidence export <run-id> --store .qed/evidence
 qed evidence fetch sha256:<digest> --store .qed/evidence
 qed cache status [run-id] --store .qed/evidence
+qed context inspect <run-id> --store .qed/evidence
+qed context explain RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
+qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
 ```
 
 `qed cache status` defaults to the newest Bundle and reports the effective
 Plan, normalized cache Usage, optional forecast and usage-cost estimate, first
 Prefix divergence, and latest compaction record
+
+The Context commands derive content-free timelines, aggregate metrics, and
+before-to-after changes from the same stored public Events. They do not print
+messages, paths, commands, Evidence object digests, or object content
 
 ## Extension State Store
 

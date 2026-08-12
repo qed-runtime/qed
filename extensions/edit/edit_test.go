@@ -57,6 +57,9 @@ func TestApplyPatchUpdatesFileWithDigestPrecondition(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("result = %#v", result)
 	}
+	if result.ContextOperation == nil || result.ContextOperation.Kind != agent.ContextOperationMutation {
+		t.Fatalf("Context operation = %#v", result.ContextOperation)
+	}
 	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

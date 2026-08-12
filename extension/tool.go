@@ -90,6 +90,15 @@ func (proxy *ToolProxy) Execute(ctx context.Context, call agent.ToolCall) (resul
 	var err error
 	decision := capability.Decision{}
 	defer func() {
+		if decision.Outcome != "" {
+			result.Policy = &agent.ToolPolicyDecision{
+				Outcome:      string(decision.Outcome),
+				Capabilities: namesAsStrings(capabilities),
+			}
+			if decision.Reason != "" {
+				result.Policy.ReasonDigest = digest([]byte(decision.Reason))
+			}
+		}
 		invocation := evidence.ToolInvocation{
 			CallID:              call.ID,
 			Tool:                call.Name,
@@ -155,6 +164,16 @@ func (proxy *ToolProxy) Execute(ctx context.Context, call agent.ToolCall) (resul
 	}
 
 	result, resultErr = proxy.tool.Execute(ctx, call)
+	if resultErr == nil {
+		if err := agent.ValidateContextOperation(result.ContextOperation); err != nil {
+			result.ContextOperation = nil
+			return result, fmt.Errorf("Tool %q context operation: %w", call.Name, err)
+		}
+		if result.ContextOperation != nil {
+			operation := *result.ContextOperation
+			result.ContextOperation = &operation
+		}
+	}
 	result.CallID = call.ID
 	result.Name = call.Name
 	return result, resultErr
