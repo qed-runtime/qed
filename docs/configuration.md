@@ -428,7 +428,8 @@ output as content-addressed objects
 `max_input_bytes` is deterministic and Provider-neutral, not a tokenizer-backed
 model context limit. QED never rewrites raw Session messages. It compiles a
 validated Checkpoint followed by a recent raw tail, and stops before a Provider
-call when no safe Tool-transaction boundary fits the hard limit
+call when no safe Tool, approval, subagent, edit-verification, or commit
+transaction boundary fits the hard limit
 
 Prompt-cache control is disabled when `cache` is omitted or `mode` is empty or
 `disabled`. Provider-side implicit behavior may still occur independently

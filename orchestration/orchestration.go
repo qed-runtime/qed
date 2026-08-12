@@ -428,7 +428,12 @@ func (tool *SubagentTool) Execute(ctx context.Context, call agent.ToolCall) (age
 	if err != nil {
 		return agent.ToolResult{}, fmt.Errorf("encode subagent result: %w", err)
 	}
-	return agent.ToolResult{Output: string(encoded)}, nil
+	return agent.ToolResult{
+		Output: string(encoded),
+		ContextOperation: &agent.ContextOperation{
+			Kind: agent.ContextOperationSubagent,
+		},
+	}, nil
 }
 
 type teamExecution struct {

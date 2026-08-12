@@ -137,7 +137,10 @@ Constraint entryはuser本文を保持するためLedgerはprivateなcontent-bea
 `agent.CompactingContextCompiler`はimmutableなraw messageの上にboundedなmodel viewを作ります
 
 - 巨大Tool outputをcontent-addressed Evidence Objectへ外部化
-- assistant Tool Callと対応resultを分断しないcut pointを選択
+- exact Event prefixをdeterministic Ledgerと照合
+- approval requestとdecisionを含むassistant Tool Callと全resultを分断しないcut pointを選択
+- delegated subagent Callとterminalなparent Tool resultを同じ範囲へ保持
+- mutationから最初のannotation付きverificationまたはcommit attemptまでの後続workを保持し、どちらもない場合は次のuser Messageまで保持
 - compact対象の正確なraw prefixをEvidence Objectへ保存
 - 型付きでsize上限のある`ContextCheckpoint`を生成
 - source hash、message参照、Tool outcome、generation、Session revision、encoded size、Evidence実在性を検証
@@ -150,6 +153,11 @@ raw Event Logは引き続きreplay可能です
 custom `CheckpointStrategy`も利用できます
 QEDが結果を検証し、失敗時はstrategy errorやmessage本文をfallback labelへ含めずdeterministic strategyへ戻します
 有効なcandidateがhard limit内に収まらない場合はProviderを呼ぶ前にRunを停止します
+
+Runtimeは`ContextCompileRequest.Events`へexact Event prefixのisolated copyを渡します
+Eventsを省略するdirect callerは従来のTool Callとresultだけを保護するsafe cutを使います
+`ToolResult.ContextOperation`は`mutation`、`verification`、`commit`、`subagent`のhost-only metadataです
+authorizationやoperation成功の証明ではなくcut分類であり、未知のkindはTool境界で拒否します
 
 `max_input_bytes`はProvider-neutralなcanonical byte上限であり、tokenizerやmodelの公開context windowではありません
 選択modelに対して安全側に調整してください

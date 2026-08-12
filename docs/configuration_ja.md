@@ -403,7 +403,7 @@ QEDは正確なcompact済みmessage prefixと外部化したTool outputをconten
 
 `max_input_bytes`は決定的なProvider neutral値でありtokenizer basedなmodel context limitではありません
 QEDはraw Session messageを書き換えません
-検証済みCheckpointとrecent raw tailをcompileし、安全なTool transaction境界でhard limit内に収まらなければProvider call前に停止します
+検証済みCheckpointとrecent raw tailをcompileし、Tool、approval、subagent、edit-verification、commitの安全なtransaction境界でhard limit内に収まらなければProvider call前に停止します
 
 `cache`を省略した場合、または`mode`が空か`disabled`の場合、QED側のprompt cache制御は無効です
 Provider側のimplicit behaviorは独立して発生する場合があります

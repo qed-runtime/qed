@@ -541,6 +541,9 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 				event.ToolResult.CallID != event.ToolCall.ID || event.ToolResult.Name != event.ToolCall.Name {
 				return ContextLedger{}, errors.New("tool.completed requires matching Tool Call and Tool Result identities")
 			}
+			if err := ValidateContextOperation(event.ToolResult.ContextOperation); err != nil {
+				return ContextLedger{}, fmt.Errorf("tool.completed: %w", err)
+			}
 			key := toolExecutionKey(event.RunID, event.ToolCall.ID)
 			execution := executions[key]
 			if execution == nil || execution.entry.State != ExecutionLedgerPending || execution.entry.Name != event.ToolCall.Name {

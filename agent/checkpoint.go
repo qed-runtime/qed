@@ -311,6 +311,16 @@ func (compiler *CompactingContextCompiler) Compile(
 		return CompiledContext{}, err
 	}
 	baselineBytes := contextSegmentBytes(baselineSegments) + worldStateBytes
+	var cutPlan contextSafeCutPlan
+	if request.Checkpoint != nil || baselineBytes > compiler.policy.MaxInputBytes {
+		cutPlan, err = buildContextSafeCutPlan(ctx, request.ModelRequest.Messages, request.Events, request.Ledger)
+		if err != nil {
+			return CompiledContext{}, fmt.Errorf("build safe Checkpoint boundaries: %w", err)
+		}
+		if request.Checkpoint != nil && !cutPlan.safe(request.Checkpoint.SourceMessageCount) {
+			return CompiledContext{}, errors.New("active Context Checkpoint splits a protected transaction")
+		}
+	}
 	if baselineBytes <= compiler.policy.MaxInputBytes {
 		var report *ContextCompactionReport
 		if request.Checkpoint != nil || len(baselineRefs) > 0 {
@@ -337,7 +347,10 @@ func (compiler *CompactingContextCompiler) Compile(
 	}
 
 	minimumSource := checkpointSourceCount(request.Checkpoint) + 1
-	cuts := safeCheckpointCuts(canonical.Messages, minimumSource)
+	cuts, err := safeCheckpointCuts(ctx, cutPlan, minimumSource)
+	if err != nil {
+		return CompiledContext{}, err
+	}
 	if len(cuts) == 0 {
 		return CompiledContext{}, fmt.Errorf(
 			"context requires %d bytes, limit is %d, and no safe Checkpoint boundary exists",
@@ -390,7 +403,7 @@ func (compiler *CompactingContextCompiler) Compile(
 		}, nil
 	}
 	return CompiledContext{}, fmt.Errorf(
-		"context cannot be reduced below %d bytes without splitting recent Tool transactions",
+		"context cannot be reduced below %d bytes without splitting protected context transactions",
 		compiler.policy.MaxInputBytes,
 	)
 }
@@ -790,46 +803,17 @@ func checkpointMessageHash(message Message) (string, error) {
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
 }
 
-func safeCheckpointCuts(messages []Message, minimum int) []int {
+func safeCheckpointCuts(ctx context.Context, plan contextSafeCutPlan, minimum int) ([]int, error) {
 	var cuts []int
-	for cut := minimum; cut < len(messages); cut++ {
-		if safeCheckpointCut(messages, cut) {
+	for cut := minimum; cut < plan.messages; cut++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if plan.safe(cut) {
 			cuts = append(cuts, cut)
 		}
 	}
-	return cuts
-}
-
-func safeCheckpointCut(messages []Message, cut int) bool {
-	if cut <= 0 || cut >= len(messages) || messages[cut].Role == RoleTool {
-		return false
-	}
-	pending := make(map[string]struct{})
-	for index := 0; index < cut; index++ {
-		message := messages[index]
-		switch message.Role {
-		case RoleAssistant:
-			if len(pending) != 0 {
-				return false
-			}
-			for _, call := range message.ToolCalls {
-				if call.ID == "" {
-					return false
-				}
-				pending[call.ID] = struct{}{}
-			}
-		case RoleTool:
-			if _, exists := pending[message.ToolCallID]; !exists {
-				return false
-			}
-			delete(pending, message.ToolCallID)
-		case RoleUser:
-			if len(pending) != 0 {
-				return false
-			}
-		}
-	}
-	return len(pending) == 0
+	return cuts, nil
 }
 
 func renderContextCheckpoint(checkpoint ContextCheckpoint) (string, error) {

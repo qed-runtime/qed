@@ -73,6 +73,22 @@ then enforce the Runtime's 256 KiB encoded snapshot limit. Programmatic callers
 can change the Profile limits or set `CurrentWorldState.Disabled`; declarative
 configuration currently uses these defaults
 
+## Safe context operation annotations
+
+Official mutating and process Tools attach content-free operation metadata to
+successful RPC results. `apply_patch` reports `mutation`. `run_command` reports
+`commit` for direct `git commit` invocations, `verification` for a conservative
+allowlist of direct test, check, lint, vet, and typecheck commands, and
+`mutation` for every other command. Path-qualified executables are treated as
+mutation rather than inferred from their basename
+
+The orchestration subagent Tool reports `subagent` after its delegated run
+returns. Runtime validates and persists these annotations without showing them
+to the model. They only constrain Context Checkpoint cuts: a verification or
+commit attempt closes a preceding mutation range even when the command reports
+failure. Policy, approval, Evidence, and Current World State remain the sources
+of authorization and observed outcome
+
 ## Declarative configuration
 
 Define Extensions and the Profile independently from Provider profiles

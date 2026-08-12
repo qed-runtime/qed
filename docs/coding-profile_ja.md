@@ -53,6 +53,18 @@ captureはboundedですが、external processを横断するatomicなOS snapshot
 programmatic callerはProfile limitを変更でき、`CurrentWorldState.Disabled`で無効化できます
 宣言設定は現在この既定値を使います
 
+## 安全なcontext operation annotation
+
+公式のmutation Toolとprocess Toolは成功したRPC resultへcontent-freeなoperation metadataを追加します
+`apply_patch`は`mutation`を返します
+`run_command`はdirectな`git commit`を`commit`、保守的なallowlistに一致するdirectなtest、check、lint、vet、typecheck commandを`verification`、それ以外を`mutation`として返します
+path付きexecutableはbasenameから推測せず`mutation`として扱います
+
+orchestrationのsubagent Toolはdelegated Runが戻った後に`subagent`を返します
+Runtimeはannotationを検証して永続化しますがmodelへは見せません
+Context Checkpointのcutだけを制約し、commandがfailureを報告した場合もverificationまたはcommit attemptが先行mutation rangeを閉じます
+authorizationと観測済みoutcomeの正本は引き続きPolicy、approval、Evidence、Current World Stateです
+
 ## Declarative configuration
 
 ExtensionとProfileをProvider profileから独立して定義します

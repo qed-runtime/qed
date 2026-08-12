@@ -340,6 +340,74 @@ func TestCompactingContextCompilerDoesNotSplitToolTransaction(t *testing.T) {
 	}
 }
 
+func TestCompactingContextCompilerUsesEventAwareMutationVerificationBoundary(t *testing.T) {
+	t.Parallel()
+
+	newCompiler := func(t *testing.T) *agent.CompactingContextCompiler {
+		t.Helper()
+		compiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
+			MaxInputBytes:          2600,
+			RecentMessages:         3,
+			EvidenceThresholdBytes: 4096,
+			EvidenceExcerptBytes:   256,
+			CheckpointMaxBytes:     1400,
+		}, evidence.NewMemoryObjectStore(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return compiler
+	}
+	messages := []agent.Message{
+		{Role: agent.RoleUser, Text: strings.Repeat("request", 180)},
+		{Role: agent.RoleAssistant, ToolCalls: []agent.ToolCall{{ID: "edit-1", Name: "edit"}}},
+		{Role: agent.RoleTool, ToolCallID: "edit-1", ToolName: "edit", Text: strings.Repeat("changed", 180)},
+		{Role: agent.RoleAssistant, ToolCalls: []agent.ToolCall{{ID: "read-1", Name: "read"}}},
+		{Role: agent.RoleTool, ToolCallID: "read-1", ToolName: "read", Text: strings.Repeat("current", 180)},
+		{Role: agent.RoleAssistant, ToolCalls: []agent.ToolCall{{ID: "verify-1", Name: "verify"}}},
+		{Role: agent.RoleTool, ToolCallID: "verify-1", ToolName: "verify", Text: "passed"},
+		{Role: agent.RoleUser, Text: "next request"},
+	}
+	legacyCompiler := newCompiler(t)
+	legacy, err := legacyCompiler.Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: messages},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Checkpoint == nil || legacy.Checkpoint.SourceMessageCount != 5 {
+		t.Fatalf("legacy Checkpoint = %#v", legacy.Checkpoint)
+	}
+
+	events := safeCutCompilerEvents(messages, map[string]agent.ContextOperationKind{
+		"edit-1":   agent.ContextOperationMutation,
+		"verify-1": agent.ContextOperationVerification,
+	})
+	ledger, err := agent.BuildContextLedger(context.Background(), events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := newCompiler(t).Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: messages},
+		Ledger:       &ledger,
+		Events:       events,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.Checkpoint == nil || compiled.Checkpoint.SourceMessageCount != 7 {
+		t.Fatalf("event-aware Checkpoint = %#v", compiled.Checkpoint)
+	}
+	_, err = legacyCompiler.Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: messages},
+		Checkpoint:   legacy.Checkpoint,
+		Ledger:       &ledger,
+		Events:       events,
+	})
+	if err == nil || !strings.Contains(err.Error(), "active Context Checkpoint splits a protected transaction") {
+		t.Fatalf("unsafe active Checkpoint error = %v", err)
+	}
+}
+
 func TestCompactingContextCompilerExternalizesLargeToolOutput(t *testing.T) {
 	t.Parallel()
 
@@ -552,6 +620,58 @@ func TestCompactingContextCompilerRejectsMissingStrategyEvidence(t *testing.T) {
 }
 
 type checkpointStrategyFunc func(context.Context, agent.CheckpointRequest) (agent.ContextCheckpoint, error)
+
+func safeCutCompilerEvents(
+	messages []agent.Message,
+	operations map[string]agent.ContextOperationKind,
+) []agent.Event {
+	const runID = "run-safe-cut-compiler"
+	sequence := uint64(0)
+	providerCall := 0
+	events := make([]agent.Event, 0, len(messages)*2)
+	calls := make(map[string]agent.ToolCall)
+	emit := func(event agent.Event) {
+		sequence++
+		event.RunID = runID
+		event.Sequence = sequence
+		events = append(events, event)
+	}
+	emit(agent.Event{Type: agent.EventRunStarted})
+	for index := range messages {
+		message := messages[index]
+		switch message.Role {
+		case agent.RoleUser:
+			emit(agent.Event{Type: agent.EventUserMessageAdded, Message: &message})
+		case agent.RoleAssistant:
+			providerCall++
+			emit(agent.Event{
+				Type:            agent.EventModelRequest,
+				ProviderCall:    providerCall,
+				ProviderAttempt: 1,
+				PrefixManifest: &agent.PrefixManifest{
+					Version: 1, Provider: "safe-cut/provider", Epoch: "safe-cut",
+				},
+			})
+			emit(agent.Event{Type: agent.EventMessageCompleted, Message: &message})
+			for _, call := range message.ToolCalls {
+				calls[call.ID] = call
+			}
+		case agent.RoleTool:
+			call := calls[message.ToolCallID]
+			emit(agent.Event{Type: agent.EventToolStarted, ToolCall: &call})
+			result := agent.ToolResult{
+				CallID: message.ToolCallID, Name: message.ToolName, Output: message.Text,
+			}
+			if kind := operations[message.ToolCallID]; kind != "" {
+				result.ContextOperation = &agent.ContextOperation{Kind: kind}
+			}
+			emit(agent.Event{
+				Type: agent.EventToolCompleted, Message: &message, ToolCall: &call, ToolResult: &result,
+			})
+		}
+	}
+	return events
+}
 
 func (strategy checkpointStrategyFunc) BuildCheckpoint(
 	ctx context.Context,

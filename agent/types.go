@@ -172,6 +172,11 @@ type ToolResult struct {
 	Output string `json:"output,omitempty"`
 	// IsError reports whether execution failed without terminating the Run
 	IsError bool `json:"is_error,omitempty"`
+	// ContextOperation classifies a host-observed operation for safe context cuts
+	//
+	// It is retained in Run Events and results but is not copied into the
+	// model-facing Tool Message
+	ContextOperation *ContextOperation `json:"context_operation,omitempty"`
 	// Policy contains content-free host authorization metadata when a host proxy
 	// enforced capabilities for this invocation
 	//

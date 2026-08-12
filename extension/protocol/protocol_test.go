@@ -52,8 +52,30 @@ func TestUnmarshalRejectsUnknownFields(t *testing.T) {
 	t.Parallel()
 
 	var request protocol.HandshakeRequest
-	err := protocol.Unmarshal(json.RawMessage(`{"protocol_version":1,"unexpected":true}`), &request)
+	err := protocol.Unmarshal(json.RawMessage(`{"protocol_version":2,"unexpected":true}`), &request)
 	if err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("Unmarshal() error = %v, want unknown field", err)
+	}
+}
+
+func TestToolResultContextOperationRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	encoded, err := protocol.Marshal(protocol.ToolResult{
+		CallID: "call-1",
+		Name:   "edit",
+		ContextOperation: &protocol.ContextOperation{
+			Kind: "mutation",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result protocol.ToolResult
+	if err := protocol.Unmarshal(encoded, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ContextOperation == nil || result.ContextOperation.Kind != "mutation" {
+		t.Fatalf("Tool result = %#v", result)
 	}
 }

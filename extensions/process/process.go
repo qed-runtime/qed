@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -151,7 +152,92 @@ func (tool *runCommandTool) Execute(ctx context.Context, call agent.ToolCall) (a
 	if err != nil {
 		return agent.ToolResult{}, fmt.Errorf("encode run_command result: %w", err)
 	}
-	return agent.ToolResult{Output: string(encoded), IsError: !response.Success}, nil
+	return agent.ToolResult{
+		Output:           string(encoded),
+		IsError:          !response.Success,
+		ContextOperation: classifyContextOperation(input.Argv),
+	}, nil
+}
+
+func classifyContextOperation(argv []string) *agent.ContextOperation {
+	if len(argv) == 0 {
+		return nil
+	}
+	executable := strings.TrimSuffix(strings.ToLower(filepath.Base(argv[0])), ".exe")
+	operation := func(kind agent.ContextOperationKind) *agent.ContextOperation {
+		return &agent.ContextOperation{Kind: kind}
+	}
+	rawExecutable := strings.ToLower(argv[0])
+	if rawExecutable != executable && rawExecutable != executable+".exe" {
+		return operation(agent.ContextOperationMutation)
+	}
+	if executable == "git" && len(argv) > 1 && argv[1] == "commit" {
+		return operation(agent.ContextOperationCommit)
+	}
+	if commandMatches(argv, executable, "go", "test", "vet") ||
+		commandMatches(argv, executable, "cargo", "test", "check", "clippy") ||
+		commandMatches(argv, executable, "dotnet", "test") ||
+		commandMatches(argv, executable, "swift", "test") ||
+		commandMatches(argv, executable, "mvn", "test", "verify") ||
+		commandMatches(argv, executable, "gradle", "test", "check") ||
+		commandMatches(argv, executable, "gradlew", "test", "check") ||
+		executable == "pytest" || executable == "phpunit" || executable == "rspec" ||
+		executable == "golangci-lint" && len(argv) > 1 && argv[1] == "run" ||
+		isPythonPytest(argv, executable) || isPackageVerification(argv, executable) ||
+		isTaskVerification(argv, executable) {
+		return operation(agent.ContextOperationVerification)
+	}
+	return operation(agent.ContextOperationMutation)
+}
+
+func commandMatches(argv []string, executable string, wantExecutable string, subcommands ...string) bool {
+	if executable != wantExecutable || len(argv) < 2 {
+		return false
+	}
+	for _, subcommand := range subcommands {
+		if argv[1] == subcommand {
+			return true
+		}
+	}
+	return false
+}
+
+func isPythonPytest(argv []string, executable string) bool {
+	return (executable == "python" || executable == "python3") && len(argv) > 2 &&
+		argv[1] == "-m" && argv[2] == "pytest"
+}
+
+func isPackageVerification(argv []string, executable string) bool {
+	switch executable {
+	case "npm", "pnpm", "yarn", "bun":
+	default:
+		return false
+	}
+	if len(argv) < 2 {
+		return false
+	}
+	if argv[1] == "test" {
+		return true
+	}
+	return len(argv) > 2 && argv[1] == "run" && verificationTarget(argv[2])
+}
+
+func isTaskVerification(argv []string, executable string) bool {
+	switch executable {
+	case "make", "gmake", "just", "task":
+		return len(argv) > 1 && verificationTarget(argv[1])
+	default:
+		return false
+	}
+}
+
+func verificationTarget(target string) bool {
+	switch target {
+	case "test", "check", "lint", "vet", "verify", "typecheck":
+		return true
+	default:
+		return false
+	}
 }
 
 type commandResponse struct {

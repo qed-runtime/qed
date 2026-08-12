@@ -800,7 +800,7 @@ func writeManifestExtension(t *testing.T, root, extensionID string) string {
 	document := fmt.Sprintf(`{
 		"id":%q,
 		"version":"v1",
-		"protocol_version":1,
+		"protocol_version":2,
 		"entrypoint":"extension"
 	}`, extensionID)
 	if err := os.WriteFile(filepath.Join(directory, "qed-extension.json"), []byte(document), 0o600); err != nil {

@@ -146,6 +146,12 @@ type ContextCompileRequest struct {
 	Checkpoint *ContextCheckpoint
 	// Ledger is the deterministic state reconstructed from ordered Run Events
 	Ledger *ContextLedger
+	// Events is the exact ordered Event prefix represented by Ledger and ModelRequest
+	//
+	// Compacting compilers use it to preserve approval, delegation, mutation,
+	// verification, and commit transaction boundaries. Callers that omit Events
+	// receive the legacy Tool Call and Tool result boundary behavior.
+	Events []Event
 	// CurrentWorldState is the latest canonical host snapshot when configured
 	//
 	// Runtime appends its required volatile Context Segment after Compile returns.

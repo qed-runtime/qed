@@ -183,7 +183,12 @@ subject to the Session and Evidence storage policy
 raw messages
 
 - it externalizes large Tool output into a content-addressed Evidence Object
-- it selects a cut that does not split an assistant Tool Call from its results
+- it validates the exact Event prefix against the deterministic Ledger
+- it selects a cut that does not split an assistant Tool Call from all results,
+  including an approval request and decision inside that Tool transaction
+- it keeps a delegated subagent Call with its terminal parent Tool result
+- it keeps a mutation and subsequent work together through the first annotated
+  verification or commit attempt, or until the next user Message
 - it stores the exact compacted raw prefix as an Evidence Object
 - it creates a typed, size-bounded `ContextCheckpoint`
 - it validates source hashes, message references, Tool outcomes, generation,
@@ -198,6 +203,13 @@ A custom `CheckpointStrategy` may create the semantic view. QED validates its
 result and falls back to the deterministic strategy without exposing the
 strategy error or message content in the fallback label. If no valid candidate
 fits the configured hard limit, the Run stops before calling the Provider
+
+Runtime supplies `ContextCompileRequest.Events` as an isolated copy of the
+exact Event prefix. A direct caller that omits Events retains the legacy Tool
+Call/result safe-cut behavior. `ToolResult.ContextOperation` is host-only
+metadata with `mutation`, `verification`, `commit`, or `subagent` kind. It is a
+cut classification, not authorization or proof that an operation succeeded.
+Unknown kinds are rejected at the Tool boundary
 
 `max_input_bytes` is a provider-neutral canonical byte limit, not a tokenizer or
 the model's advertised context window. It is deliberately deterministic but

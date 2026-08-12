@@ -489,12 +489,23 @@ func (state *state) invokeTool(ctx context.Context, params json.RawMessage) (any
 	if err != nil {
 		return nil, mapCallError(err)
 	}
+	if err := agent.ValidateContextOperation(result.ContextOperation); err != nil {
+		return nil, rpcErrorFrom(protocol.ErrorCodeExtensionRejected, fmt.Errorf("Tool context operation: %w", err))
+	}
 	return protocol.InvokeToolResponse{Result: protocol.ToolResult{
-		CallID:  request.Call.ID,
-		Name:    request.Call.Name,
-		Output:  result.Output,
-		IsError: result.IsError,
+		CallID:           request.Call.ID,
+		Name:             request.Call.Name,
+		Output:           result.Output,
+		IsError:          result.IsError,
+		ContextOperation: toProtocolContextOperation(result.ContextOperation),
 	}}, nil
+}
+
+func toProtocolContextOperation(operation *agent.ContextOperation) *protocol.ContextOperation {
+	if operation == nil {
+		return nil
+	}
+	return &protocol.ContextOperation{Kind: string(operation.Kind)}
 }
 
 func (state *state) handleEvent(ctx context.Context, params json.RawMessage) (any, *protocol.RPCError) {

@@ -946,8 +946,14 @@ func TestRuntimeSuppliesIsolatedContextLedgerToCompiler(t *testing.T) {
 			if request.Ledger == nil || len(request.Ledger.Tasks) != 1 || request.Ledger.Tasks[0].State != agent.TaskLedgerRunning {
 				return agent.CompiledContext{}, fmt.Errorf("compiler Context Ledger = %#v", request.Ledger)
 			}
+			if len(request.Events) != 2 || request.Events[0].Type != agent.EventRunStarted ||
+				request.Events[1].Type != agent.EventUserMessageAdded {
+				return agent.CompiledContext{}, fmt.Errorf("compiler Events = %#v", request.Events)
+			}
 			observed = request.Ledger.Reference()
 			request.Ledger.Tasks[0].State = agent.TaskLedgerFailed
+			request.Events[0].Type = agent.EventRunFailed
+			request.Events[1].Message.Text = "compiler mutation"
 			return (agent.DefaultContextCompiler{}).Compile(ctx, request)
 		}),
 	})
@@ -971,6 +977,46 @@ func TestRuntimeSuppliesIsolatedContextLedgerToCompiler(t *testing.T) {
 	}
 	if err := agent.ValidateContextLedger(context.Background(), *result.ContextLedger, events); err != nil {
 		t.Fatalf("validate terminal Context Ledger: %v", err)
+	}
+}
+
+func TestRuntimeConvertsInvalidToolContextOperationToToolError(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{
+		{message: agent.Message{
+			Role:      agent.RoleAssistant,
+			ToolCalls: []agent.ToolCall{{ID: "invalid-context", Name: "invalid_context"}},
+		}},
+		{message: agent.Message{Role: agent.RoleAssistant, Text: "recovered"}},
+	}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		Tools:    []agent.Tool{invalidContextOperationTool{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, runErr := collectRun(handle)
+	if runErr != nil || result.Status != agent.RunStatusCompleted || len(result.ToolResults) != 1 ||
+		!result.ToolResults[0].IsError || result.ToolResults[0].ContextOperation != nil ||
+		!strings.Contains(result.ToolResults[0].Output, "invalid context operation") {
+		t.Fatalf("Run = %#v, error = %v", result, runErr)
+	}
+	completed := false
+	for _, event := range events {
+		if event.Type == agent.EventToolCompleted && event.ToolResult != nil {
+			completed = event.ToolResult.IsError && event.ToolResult.ContextOperation == nil
+		}
+	}
+	if !completed {
+		t.Fatal("invalid context operation Tool error was not committed")
 	}
 }
 
@@ -1571,6 +1617,19 @@ func (compiler contextCompilerFunc) Compile(
 }
 
 type uppercaseTool struct{}
+
+type invalidContextOperationTool struct{}
+
+func (invalidContextOperationTool) Definition() agent.ToolDefinition {
+	return agent.ToolDefinition{Name: "invalid_context", InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (invalidContextOperationTool) Execute(context.Context, agent.ToolCall) (agent.ToolResult, error) {
+	return agent.ToolResult{
+		Output:           "changed",
+		ContextOperation: &agent.ContextOperation{Kind: "invalid"},
+	}, nil
+}
 
 type countingTool struct {
 	mu    sync.Mutex

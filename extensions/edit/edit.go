@@ -141,7 +141,12 @@ func (tool *applyPatchTool) Execute(ctx context.Context, call agent.ToolCall) (a
 	if err != nil {
 		return agent.ToolResult{}, fmt.Errorf("encode apply_patch result: %w", err)
 	}
-	return agent.ToolResult{Output: string(encoded)}, nil
+	return agent.ToolResult{
+		Output: string(encoded),
+		ContextOperation: &agent.ContextOperation{
+			Kind: agent.ContextOperationMutation,
+		},
+	}, nil
 }
 
 type patchRequest struct {

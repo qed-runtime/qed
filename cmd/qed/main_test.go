@@ -104,7 +104,7 @@ func TestExtensionGenerateWritesAndChecksCatalog(t *testing.T) {
 			"manifest":{
 				"id":"qed.git",
 				"version":"0.1.0",
-				"protocol_version":1,
+				"protocol_version":2,
 				"capabilities":["git.read"]
 			}
 		}]

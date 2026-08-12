@@ -690,12 +690,24 @@ func (tool *remoteTool) Execute(ctx context.Context, call agent.ToolCall) (agent
 	}, &response); err != nil {
 		return agent.ToolResult{}, err
 	}
-	return agent.ToolResult{
-		CallID:  call.ID,
-		Name:    call.Name,
-		Output:  response.Result.Output,
-		IsError: response.Result.IsError,
-	}, nil
+	result := agent.ToolResult{
+		CallID:           call.ID,
+		Name:             call.Name,
+		Output:           response.Result.Output,
+		IsError:          response.Result.IsError,
+		ContextOperation: toAgentContextOperation(response.Result.ContextOperation),
+	}
+	if err := agent.ValidateContextOperation(result.ContextOperation); err != nil {
+		return agent.ToolResult{}, fmt.Errorf("Tool %q context operation: %w", call.Name, err)
+	}
+	return result, nil
+}
+
+func toAgentContextOperation(operation *protocol.ContextOperation) *agent.ContextOperation {
+	if operation == nil {
+		return nil
+	}
+	return &agent.ContextOperation{Kind: agent.ContextOperationKind(operation.Kind)}
 }
 
 type dynamicRemoteTool struct {

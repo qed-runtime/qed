@@ -526,6 +526,10 @@ func cloneEvent(event agent.Event) agent.Event {
 	}
 	if event.ToolResult != nil {
 		result := *event.ToolResult
+		if event.ToolResult.ContextOperation != nil {
+			operation := *event.ToolResult.ContextOperation
+			result.ContextOperation = &operation
+		}
 		if event.ToolResult.Policy != nil {
 			policy := *event.ToolResult.Policy
 			policy.Capabilities = append([]string(nil), event.ToolResult.Policy.Capabilities...)

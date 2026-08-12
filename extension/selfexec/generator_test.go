@@ -24,14 +24,14 @@ func TestGenerateProducesStandaloneDeterministicCatalog(t *testing.T) {
 			{
 				"go_package":"example.com/extensions/first",
 				"factory":"NewServerOptions",
-				"manifest":{"id":"second","version":"v2","protocol_version":1}
+				"manifest":{"id":"second","version":"v2","protocol_version":2}
 			},
 			{
 				"go_package":"example.com/extensions/first",
 				"manifest":{
 					"id":"first",
 					"version":"v1",
-					"protocol_version":1,
+					"protocol_version":2,
 					"capabilities":["test.read"],
 					"commands":[{
 						"name":"inspect",
@@ -103,15 +103,15 @@ func TestGenerateRejectsInvalidLocksAndIdentifiers(t *testing.T) {
 			name: "unknown field",
 			document: `{"version":1,"unknown":true,"extensions":[{
 				"go_package":"example.com/extension",
-				"manifest":{"id":"one","version":"v1","protocol_version":1}
+				"manifest":{"id":"one","version":"v1","protocol_version":2}
 			}]}`,
 			want: `unknown field "unknown"`,
 		},
 		{
 			name: "duplicate ID",
 			document: `{"version":1,"extensions":[
-				{"go_package":"example.com/one","manifest":{"id":"duplicate","version":"v1","protocol_version":1}},
-				{"go_package":"example.com/two","manifest":{"id":"duplicate","version":"v2","protocol_version":1}}
+				{"go_package":"example.com/one","manifest":{"id":"duplicate","version":"v1","protocol_version":2}},
+				{"go_package":"example.com/two","manifest":{"id":"duplicate","version":"v2","protocol_version":2}}
 			]}`,
 			want: `ID "duplicate" is declared more than once`,
 		},
@@ -119,7 +119,7 @@ func TestGenerateRejectsInvalidLocksAndIdentifiers(t *testing.T) {
 			name: "invalid package",
 			document: `{"version":1,"extensions":[{
 				"go_package":"../extension",
-				"manifest":{"id":"one","version":"v1","protocol_version":1}
+				"manifest":{"id":"one","version":"v1","protocol_version":2}
 			}]}`,
 			want: "go_package must be a clean import path",
 		},
@@ -128,7 +128,7 @@ func TestGenerateRejectsInvalidLocksAndIdentifiers(t *testing.T) {
 			document: `{"version":1,"extensions":[{
 				"go_package":"example.com/extension",
 				"factory":"serverOptions",
-				"manifest":{"id":"one","version":"v1","protocol_version":1}
+				"manifest":{"id":"one","version":"v1","protocol_version":2}
 			}]}`,
 			want: "factory must be an exported Go identifier",
 		},
@@ -137,7 +137,7 @@ func TestGenerateRejectsInvalidLocksAndIdentifiers(t *testing.T) {
 			document: `{"version":1,"extensions":[{
 				"go_package":"example.com/extension",
 				"manifest":{
-					"id":"one","version":"v1","protocol_version":1,
+					"id":"one","version":"v1","protocol_version":2,
 					"commands":[{"name":"inspect","capabilities":["test.read"]}]
 				}
 			}]}`,
@@ -147,7 +147,7 @@ func TestGenerateRejectsInvalidLocksAndIdentifiers(t *testing.T) {
 			name: "invalid generated package",
 			document: `{"version":1,"extensions":[{
 				"go_package":"example.com/extension",
-				"manifest":{"id":"one","version":"v1","protocol_version":1}
+				"manifest":{"id":"one","version":"v1","protocol_version":2}
 			}]}`,
 			options: selfexec.GenerateOptions{PackageName: "package"},
 			want:    "package must be a valid",
@@ -156,7 +156,7 @@ func TestGenerateRejectsInvalidLocksAndIdentifiers(t *testing.T) {
 			name: "private generated variable",
 			document: `{"version":1,"extensions":[{
 				"go_package":"example.com/extension",
-				"manifest":{"id":"one","version":"v1","protocol_version":1}
+				"manifest":{"id":"one","version":"v1","protocol_version":2}
 			}]}`,
 			options: selfexec.GenerateOptions{VariableName: "catalog"},
 			want:    "variable must be an exported",

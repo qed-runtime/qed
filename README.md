@@ -25,8 +25,9 @@ executable today
   explicit Fact lifecycle, rebuilt from ordered Session Events
 - canonical Current World State snapshots for relevant file hashes, Git state,
   and observed check freshness
-- Evidence-preserving Context compression, Prefix Manifests, prompt-cache Plans,
-  and normalized cache Usage
+- Evidence-preserving Context compression with approval, subagent,
+  edit-verification, commit, and Tool-transaction safe cuts
+- Prefix Manifests, prompt-cache Plans, and normalized cache Usage
 - Nagi-based CLI and multi-turn TUI
 - safe structured diagnostics propagated to the final Extension process
 
@@ -224,7 +225,7 @@ not excluded by standard Git ignore rules within the same bounded patch.
 
 The checked-in `extensions.lock` selects the reusable `qed.workspace`,
 `qed.process`, and `qed.git` Extensions for this binary. Each runs across
-Extension Protocol v1, including the single-binary self-exec mode
+Extension Protocol v2, including the single-binary self-exec mode
 
 ```json
 {

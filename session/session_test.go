@@ -205,7 +205,7 @@ func TestSessionStoresRebuildIdenticalContextLedgers(t *testing.T) {
 	}
 }
 
-func TestSessionStoresPreserveToolPolicyMetadata(t *testing.T) {
+func TestSessionStoresPreserveToolHostMetadata(t *testing.T) {
 	t.Parallel()
 
 	stores := map[string]func(*testing.T) agent.SessionStore{
@@ -226,7 +226,10 @@ func TestSessionStoresPreserveToolPolicyMetadata(t *testing.T) {
 				Capabilities: []string{"filesystem.read"},
 				ReasonDigest: "sha256:" + strings.Repeat("a", 64),
 			}
-			result := &agent.ToolResult{CallID: "call-1", Name: "read_file", Policy: policy}
+			operation := &agent.ContextOperation{Kind: agent.ContextOperationVerification}
+			result := &agent.ToolResult{
+				CallID: "call-1", Name: "read_file", Policy: policy, ContextOperation: operation,
+			}
 			store := construct(t)
 			if _, err := store.Append(context.Background(), "tool-policy", 0, []agent.Event{{
 				Type: agent.EventToolCompleted, ToolResult: result,
@@ -235,6 +238,7 @@ func TestSessionStoresPreserveToolPolicyMetadata(t *testing.T) {
 			}
 			policy.Outcome = "deny"
 			policy.Capabilities[0] = "changed"
+			operation.Kind = agent.ContextOperationMutation
 			snapshot, err := store.Load(context.Background(), "tool-policy")
 			if err != nil {
 				t.Fatal(err)
@@ -242,6 +246,10 @@ func TestSessionStoresPreserveToolPolicyMetadata(t *testing.T) {
 			stored := snapshot.Events[0].ToolResult.Policy
 			if stored == nil || stored.Outcome != "allow" || stored.Capabilities[0] != "filesystem.read" {
 				t.Fatalf("stored Tool Policy = %#v", stored)
+			}
+			storedOperation := snapshot.Events[0].ToolResult.ContextOperation
+			if storedOperation == nil || storedOperation.Kind != agent.ContextOperationVerification {
+				t.Fatalf("stored Context operation = %#v", storedOperation)
 			}
 		})
 	}

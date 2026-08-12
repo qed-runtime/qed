@@ -20,7 +20,8 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - host所有Evidence Bundle
 - ordered Session Eventから明示的なFact lifecycleを含めて再構築するdeterministicなArtifact、Execution、Constraint、Policy、Task Ledger
 - relevant file hash、Git state、観測済みcheck freshnessを持つcanonical Current World State snapshot
-- Evidence preservingなContext圧縮、Prefix Manifest、prompt cache Plan、正規化cache Usage
+- approval、subagent、edit-verification、commit、Tool transactionを分断しないEvidence preservingなContext圧縮
+- Prefix Manifest、prompt cache Plan、正規化cache Usage
 - NagiベースのCLIとmulti-turn TUI
 - 末端のExtension processまで伝搬する安全な構造化diagnostics
 
@@ -206,7 +207,7 @@ go run ./cmd/qed run --config ./qed.json --prompt "Review this plan"
 `staged`はindexだけを対象にします
 
 checked-in `extensions.lock`はこのbinary向けに再利用可能な`qed.workspace`、`qed.process`、`qed.git` Extensionを選択します
-各Extensionはsingle binaryのself-exec modeを含め、常にExtension Protocol v1境界で実行されます
+各Extensionはsingle binaryのself-exec modeを含め、常にExtension Protocol v2境界で実行されます
 
 ```json
 {

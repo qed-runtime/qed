@@ -46,7 +46,17 @@ Prefix Manifest on `model.request.started`; Session and Evidence Stores retain
 that Event. The default compiler stabilizes Tool order and JSON schemas. The
 optional compacting compiler keeps raw Session messages immutable, stores exact
 compacted prefixes and large Tool output in a content-addressed Evidence Object
-Store, and publishes a validated typed Checkpoint plus recent raw tail
+Store, and publishes a validated typed Checkpoint plus recent raw tail. Runtime
+also supplies an isolated copy of the exact Event prefix. The compiler validates
+that prefix against the Ledger and derives safe cuts without relying on Tool
+names in Runtime Core
+
+`agent.ToolResult.ContextOperation` carries a validated, content-free
+classification for mutation, verification, commit, or subagent work. It never
+enters the model-facing Tool Message and does not grant authority or prove a
+Tool outcome. Safe-cut reconstruction protects every Tool Call and result batch,
+keeps approval inside that transaction, and keeps a mutation with subsequent
+work through its first verification, commit, or next user boundary
 
 Before each Context Compiler call, Runtime reduces the complete ordered Session
 and active-Run Event prefix into an `agent.ContextLedger`. Its five typed
@@ -113,11 +123,12 @@ Policy, or approval. The proxies then combine capabilities, evaluate Policy,
 request approval when required, and invoke the remote component only after
 authorization. Tool Evidence is recorded in the Host
 
-`extension/protocol` defines Protocol v1 as 4-byte big-endian length-prefixed
+`extension/protocol` defines Protocol v2 as 4-byte big-endian length-prefixed
 strict JSON over stdio. `extension/server` adapts Go Tools, Hooks, Commands, and
 lifecycle callbacks to that contract and revalidates Tool input before direct
-RPC calls reach component code. `extension/host` supervises processes and
-generation leases
+RPC calls reach component code. Protocol v2 adds Tool-result
+`context_operation` metadata; exact version negotiation intentionally rejects
+v1 peers. `extension/host` supervises processes and generation leases
 
 `extension/manifest` validates the transport-independent declaration shared by
 external and embedded Extensions, resolves distributable manifests, and

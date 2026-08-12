@@ -128,6 +128,10 @@ func TestAgentRegistryRunsMixedProviderSubagentTool(t *testing.T) {
 	if len(result.ToolResults) != 1 || result.ToolResults[0].IsError {
 		t.Fatalf("ToolResults = %#v, want one successful result", result.ToolResults)
 	}
+	if result.ToolResults[0].ContextOperation == nil ||
+		result.ToolResults[0].ContextOperation.Kind != agent.ContextOperationSubagent {
+		t.Fatalf("Context operation = %#v", result.ToolResults[0].ContextOperation)
+	}
 
 	var delegated struct {
 		Strategy   orchestration.TeamStrategy `json:"strategy"`

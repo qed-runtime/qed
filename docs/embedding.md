@@ -283,6 +283,13 @@ transition provenance; replay continues to verify Checkpoint references created
 by Ledger v1. Standalone v1 Ledger snapshots must be rebuilt from Events before
 validation because `ValidateContextLedger` compares against the current schema
 
+Safe-cut annotations add optional `context_operation` metadata to Tool results
+and `Events` to `ContextCompileRequest`. Runtime supplies an isolated exact
+Event prefix and validates it against the Ledger before semantic cuts. A direct
+compiler caller may omit Events to retain Tool-only boundaries. Extension peers
+must implement Protocol v2; v1 manifests and peers are rejected by exact
+version negotiation
+
 At shutdown, stop accepting new work, cancel or finish active Runs, and then
 call `Host.CloseContext` to drain and stop every owned Extension process
 

@@ -138,13 +138,44 @@ func TestToolProxyRejectsInvalidInputBeforeCapabilitiesAndPolicy(t *testing.T) {
 	}
 }
 
-type recordingTool struct{}
+func TestToolProxyRejectsInvalidContextOperation(t *testing.T) {
+	t.Parallel()
+
+	policy, err := capability.NewStaticPolicy(capability.StaticPolicyOptions{
+		Allow: []capability.Name{capability.FilesystemRead},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := extension.NewTool(extension.ToolOptions{
+		Tool: recordingTool{
+			operation: &agent.ContextOperation{Kind: "unknown"},
+		},
+		Policy: policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := proxy.Execute(context.Background(), agent.ToolCall{
+		ID: "invalid-context-operation", Name: "record", Arguments: json.RawMessage(`{}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported Context operation") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.ContextOperation != nil {
+		t.Fatalf("invalid Context operation escaped Tool proxy = %#v", result.ContextOperation)
+	}
+}
+
+type recordingTool struct {
+	operation *agent.ContextOperation
+}
 
 func (recordingTool) Definition() agent.ToolDefinition {
 	return agent.ToolDefinition{Name: "record", Capabilities: []string{string(capability.FilesystemRead)}}
 }
 
-func (recordingTool) Execute(_ context.Context, call agent.ToolCall) (agent.ToolResult, error) {
+func (tool recordingTool) Execute(_ context.Context, call agent.ToolCall) (agent.ToolResult, error) {
 	var input struct {
 		Value string `json:"value"`
 	}
@@ -153,7 +184,7 @@ func (recordingTool) Execute(_ context.Context, call agent.ToolCall) (agent.Tool
 			return agent.ToolResult{}, err
 		}
 	}
-	return agent.ToolResult{Output: input.Value}, nil
+	return agent.ToolResult{Output: input.Value, ContextOperation: tool.operation}, nil
 }
 
 type validationBoundaryTool struct {

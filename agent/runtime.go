@@ -831,6 +831,7 @@ func (runtime *Runtime) execute(
 			sessionRevision,
 			activeCheckpoint,
 			&activeLedger,
+			ledgerEvents,
 			latestWorldState,
 		)
 		if err != nil {
@@ -1194,6 +1195,7 @@ func (runtime *Runtime) compileContext(
 	sessionRevision uint64,
 	checkpoint *ContextCheckpoint,
 	ledger *ContextLedger,
+	events []Event,
 	worldState *CurrentWorldState,
 ) (CompiledContext, PrefixManifest, error) {
 	model := ""
@@ -1207,6 +1209,7 @@ func (runtime *Runtime) compileContext(
 		SessionRevision:   sessionRevision,
 		Checkpoint:        cloneContextCheckpointPointer(checkpoint),
 		Ledger:            cloneContextLedgerPointer(ledger),
+		Events:            cloneEvents(events),
 		CurrentWorldState: cloneCurrentWorldStatePointer(worldState),
 	})
 	if err != nil {
@@ -1521,13 +1524,24 @@ func (runtime *Runtime) executeTool(ctx context.Context, toolSet runtimeToolSet,
 		result.IsError = true
 		return result
 	}
+	if err := ValidateContextOperation(toolResult.ContextOperation); err != nil {
+		result.Output = fmt.Sprintf("tool %q returned invalid context operation: %v", call.Name, err)
+		result.IsError = true
+		return result
+	}
 
 	result.Output = toolResult.Output
 	result.IsError = toolResult.IsError
+	result.ContextOperation = cloneContextOperation(toolResult.ContextOperation)
 	return result
 }
 
-func (runtime *Runtime) executeToolWithDebug(ctx context.Context, runID string, toolSet runtimeToolSet, call ToolCall) ToolResult {
+func (runtime *Runtime) executeToolWithDebug(
+	ctx context.Context,
+	runID string,
+	toolSet runtimeToolSet,
+	call ToolCall,
+) ToolResult {
 	startedAt := time.Now()
 	tool := toolSet.tools[call.Name]
 	var definition ToolDefinition
@@ -1741,6 +1755,7 @@ func cloneToolResults(results []ToolResult) []ToolResult {
 	for index := range results {
 		cloned[index] = results[index]
 		cloned[index].Policy = cloneToolPolicyDecision(results[index].Policy)
+		cloned[index].ContextOperation = cloneContextOperation(results[index].ContextOperation)
 	}
 	return cloned
 }
@@ -1787,6 +1802,7 @@ func cloneEvent(event Event) Event {
 	if event.ToolResult != nil {
 		result := *event.ToolResult
 		result.Policy = cloneToolPolicyDecision(event.ToolResult.Policy)
+		result.ContextOperation = cloneContextOperation(event.ToolResult.ContextOperation)
 		event.ToolResult = &result
 	}
 	if event.WaitRequest != nil {

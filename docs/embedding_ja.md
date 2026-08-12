@@ -240,6 +240,11 @@ strictな外部JSON decoderはこれらの追加fieldを受理する必要があ
 Ledger schema v2はFact stateとtransition provenanceを追加し、replayではLedger v1が作成したCheckpoint参照も引き続き検証します
 `ValidateContextLedger`は現在schemaと比較するため、standaloneなv1 Ledger snapshotは検証前にEventから再構築する必要があります
 
+safe cut annotationによりTool resultへ任意の`context_operation` metadata、`ContextCompileRequest`へ`Events`が追加されます
+Runtimeはisolatedなexact Event prefixを渡し、semantic cutの前にLedgerと照合します
+directなCompiler callerはEventsを省略してToolだけのboundaryを維持できます
+Extension peerはProtocol v2を実装する必要があり、v1 manifestとpeerはexact version negotiationで拒否されます
+
 shutdown時は新規workの受付を停止し、active Runをcancelまたは完了させてから`Host.CloseContext`で所有する全Extension processをdrainして停止します
 
 読み込まれたCoding Profileはbounded automatic Extension restartを使います
