@@ -391,7 +391,53 @@ start and validate candidate
 
 Any failure before publication closes the candidate and retains the active
 generation. Process crash fails pending RPC requests without terminating the
-Host. Automatic restart is not implemented
+Host
+
+Automatic restart is opt-in for a directly constructed Manager
+
+```go
+manager, err := host.NewManager(ctx, host.ManagerOptions{
+    Process:       processOptions,
+    Policy:        policy,
+    StateStore:    stateStore,
+    RestartPolicy: host.DefaultRestartPolicy(),
+})
+```
+
+Coding Profiles and the development host use `DefaultRestartPolicy` when their
+policy pointer is nil. The default allows three replacement candidates, starts
+with 100 milliseconds of backoff, caps exponential backoff at 2 seconds, and
+resets the consecutive count after one generation survives for 30 seconds. A
+direct Manager's zero-value policy disables automatic restart. Set a Coding
+Profile or development host policy pointer to a zero `host.RestartPolicy` to
+disable it there
+
+Unexpected exit follows this order
+
+```text
+fail RPC requests pinned to the crashed generation
+  -> remove that generation from new lease selection
+  -> return ErrExtensionRestarting to new acquisition
+  -> wait for bounded backoff
+  -> start with the last successfully published ProcessOptions
+  -> revalidate identity and the locked manifest when configured
+  -> load and Restore the latest host-owned Snapshot when configured
+  -> HealthCheck and, when a State Store is configured, Snapshot and persist
+  -> publish the next generation for new Runs
+```
+
+Existing Run leases never migrate and QED never replays an interrupted Tool
+call because its side effect may already have occurred. Failed candidates do
+not consume generation numbers. Candidate startup failures and replacement
+generations that exit before the stability window consume the same attempt
+limit. Exhaustion returns `ErrExtensionCircuitOpen` to new acquisition. A
+successful explicit `Manager.Reload` validates a candidate and closes the
+circuit
+
+`Manager.RestartStatus` reports `disabled`, `ready`, `restarting`,
+`circuit_open`, or `closed`, the consecutive attempt count, current generation,
+and a payload-free last error type. Verbose lifecycle logs contain the same
+safe identifiers and counters without RPC payloads
 
 ## Host-owned Extension state
 
@@ -400,8 +446,11 @@ key. QED includes a concurrent memory store and a private atomic JSON store with
 a 1 MiB value limit
 
 Manager restores the `snapshot` key on initial startup, updates it during
-reload, and persists the current process during orderly close. Declarative
-Coding Profiles scope it to a digest of workspace and Profile ID, preventing
+reload, and persists the current process during orderly close. With automatic
+restart enabled, initial startup and every replacement also persist a baseline
+Snapshot before publication. A crash can therefore restore the latest
+host-owned Snapshot but not process state created after it. Declarative Coding
+Profiles scope state to a digest of workspace and Profile ID, preventing
 unrelated Profiles from sharing state accidentally
 
 Snapshot and Restore are for necessary process-local state. Durable Agent

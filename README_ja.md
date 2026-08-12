@@ -14,7 +14,7 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - active Runへのsteering、永続Session、terminal後のfollow-up、永続的な承認resume
 - process分離Extension内のcapability制御されたCoding Tool
 - 複数のRun固定Extension generation、Hook、Command、host所有state
-- manifest discoveryと開発時のatomic reload
+- manifest discovery、開発時のatomic reload、bounded crash restart
 - fork不要でapplicationが所有する`extensions.lock` catalogとlive manifest validation
 - host所有Evidence Bundle
 - Evidence preservingなContext圧縮、Prefix Manifest、prompt cache Plan、正規化cache Usage
@@ -514,7 +514,8 @@ go build ./...
 
 ## 現在の制限
 
-- Extension processはcrash隔離されますが自動restartされません
+- Extension automatic restartは中断したTool callを再実行せず、最新のhost所有Snapshotだけを
+  restoreします
 - `run_command`とExtension child processはhost account権限で動作し、OS sandboxではありません
 - Tool Trace recordはhashを使いますが、Bundleのpublic Eventはprompt、message、Tool引数、Tool output、errorを含む場合があるためEvidence Storeを機密データとして保護する必要があります
 - Evidenceは完全なworkspace archiveではありません

@@ -300,7 +300,8 @@ testはGit `HEAD`が変わらないこと、正確な最終worktree state、別�
 
 ## 現在の制限
 
-- Extension crashは隔離されますが自動restartされません
+- Extension restartは中断したTool callを再実行せず、最新のhost所有Snapshotだけを
+  restoreします
 - `git_diff`はuntracked file内容を含みません
 - 公式Tool enforcementは汎用JSON Schema engineではなく具象strict decoderを使います
 - 標準network、Git write、GitHub、host-wide filesystem、shell-expansion Toolは含まれません

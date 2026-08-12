@@ -17,7 +17,7 @@ executable today
   approval resume
 - capability-controlled Coding Tools behind process-isolated Extensions
 - multiple Run-pinned Extension generations, Hooks, Commands, and host-owned state
-- manifest discovery and atomic development reload
+- manifest discovery, atomic development reload, and bounded crash restart
 - fork-free, application-owned `extensions.lock` catalogs with live manifest validation
 - host-owned Evidence Bundles
 - Evidence-preserving Context compression, Prefix Manifests, prompt-cache Plans,
@@ -555,7 +555,8 @@ go build ./...
 
 ## Current limitations
 
-- Extension processes are crash-isolated but are not automatically restarted
+- Automatic Extension restart does not replay an interrupted Tool call and can
+  restore only the latest host-owned Snapshot
 - `run_command` and Extension child processes use host-account authority and are not OS sandboxes
 - Tool Trace records use hashes, but the Bundle's public Events may contain prompts, messages, Tool arguments, Tool output, and errors; protect the Evidence Store as sensitive data
 - Evidence is not a complete workspace archive

@@ -303,6 +303,10 @@ QED catalogの`qed.process`と`qed.git`はcommand実行に利用し、`qed.works
 
 manifestとlifecycleは[Extension process](extensions_ja.md)を参照してください
 
+declarative Coding Profileは選択した各Extensionへ`host.DefaultRestartPolicy`を使います
+restart policyはversion 1 JSON fieldではありません
+programmatic Coding Profileは`Options.ExtensionRestartPolicy`を指定でき、nilは既定値、zero policyへのpointerはautomatic restart無効を表します
+
 ## Execution Profile
 
 version 1は`kind: "coding"`をサポートします

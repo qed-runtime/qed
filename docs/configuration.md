@@ -320,6 +320,11 @@ variables for either environment
 
 See [Extension processes](extensions.md) for the manifest and lifecycle
 
+Declarative Coding Profiles use `host.DefaultRestartPolicy` for every selected
+Extension. Restart policy is not a version 1 JSON field. Programmatic Coding
+Profiles can provide `Options.ExtensionRestartPolicy`; nil selects the default,
+while a pointer to the zero policy disables automatic restart
+
 ## Execution Profiles
 
 Version 1 supports `kind: "coding"`

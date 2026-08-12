@@ -343,7 +343,8 @@ another temporary directory
 
 ## Current limitations
 
-- Extension crash is isolated but is not automatically restarted
+- Extension restart never replays the interrupted Tool call and restores only
+  the latest host-owned Snapshot
 - `git_diff` does not include untracked file content
 - official Tool enforcement uses concrete strict decoders rather than a general JSON Schema engine
 - no standard network, Git write, GitHub, host-wide filesystem, or shell-expansion Tool is included

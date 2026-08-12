@@ -178,6 +178,11 @@ Goの`agent.Event` structにはexported fieldが増えるため、外部のcompo
 
 shutdown時は新規workの受付を停止し、active Runをcancelまたは完了させてから`Host.CloseContext`で所有する全Extension processをdrainして停止します
 
+読み込まれたCoding Profileはbounded automatic Extension restartを使います
+中断したRunはcrashしたgenerationのRPC failureを受け取り、自動再実行されません
+新しいRunはcomponent acquisitionで一時的に`host.ErrExtensionRestarting`を受け取り、attempt上限後は`host.ErrExtensionCircuitOpen`を受け取る場合があります
+`host.Manager`を直接構築するapplicationは`host.DefaultRestartPolicy`でopt-inし、`Manager.RestartStatus`を確認できます
+
 ## security境界
 
 Extension process境界はcrashとprotocol stateを隔離しますがOS-level sandboxではありません

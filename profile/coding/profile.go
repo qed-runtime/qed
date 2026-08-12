@@ -51,7 +51,10 @@ type Options struct {
 	ExtensionStartupTimeout  time.Duration
 	ExtensionShutdownTimeout time.Duration
 	ExtensionRetireTimeout   time.Duration
-	Policy                   capability.Policy
+	// ExtensionRestartPolicy defaults to host.DefaultRestartPolicy when nil
+	ExtensionRestartPolicy *host.RestartPolicy
+
+	Policy capability.Policy
 	// ToolInputValidator compiles Tool schemas for host-side Extension proxies
 	ToolInputValidator    agent.ToolInputValidator
 	Approver              capability.Approver
@@ -122,6 +125,10 @@ func New(ctx context.Context, options Options) (*Profile, error) {
 	if len(options.Extensions) == 0 {
 		return nil, errors.New("Coding Profile requires at least one Extension")
 	}
+	restartPolicy := host.DefaultRestartPolicy()
+	if options.ExtensionRestartPolicy != nil {
+		restartPolicy = *options.ExtensionRestartPolicy
+	}
 	managers := make([]host.ManagedExtension, 0, len(options.Extensions))
 	processes := make(map[string]host.ProcessOptions, len(options.Extensions))
 	closeManagers := func() {
@@ -180,6 +187,7 @@ func New(ctx context.Context, options Options) (*Profile, error) {
 			StateScope:         options.StateScope,
 			Logger:             options.Logger,
 			RetireTimeout:      options.ExtensionRetireTimeout,
+			RestartPolicy:      restartPolicy,
 		})
 		if err != nil {
 			closeManagers()

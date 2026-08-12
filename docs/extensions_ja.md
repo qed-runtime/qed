@@ -353,7 +353,46 @@ start and validate candidate
 
 publication前のfailureはcandidateを閉じてactive generationを維持します
 process crashはHostを終了させずpending RPC requestをfailさせます
-automatic restartは未実装です
+
+直接構築するManagerではautomatic restartはopt-inです
+
+```go
+manager, err := host.NewManager(ctx, host.ManagerOptions{
+    Process:       processOptions,
+    Policy:        policy,
+    StateStore:    stateStore,
+    RestartPolicy: host.DefaultRestartPolicy(),
+})
+```
+
+Coding Profileとdevelopment hostはpolicy pointerがnilの場合に`DefaultRestartPolicy`を使います
+既定値はreplacement candidate 3回、initial backoff 100ms、exponential backoff上限2秒、generationが30秒生存した後の連続count resetです
+直接構築するManagerではzero-value policyがautomatic restartを無効にします
+Coding Profileまたはdevelopment hostで無効にする場合はzero-value `host.RestartPolicy`へのpointerを設定します
+
+unexpected exitは次の順序で処理します
+
+```text
+fail RPC requests pinned to the crashed generation
+  -> remove that generation from new lease selection
+  -> return ErrExtensionRestarting to new acquisition
+  -> wait for bounded backoff
+  -> start with the last successfully published ProcessOptions
+  -> revalidate identity and the locked manifest when configured
+  -> load and Restore the latest host-owned Snapshot when configured
+  -> HealthCheck and, when a State Store is configured, Snapshot and persist
+  -> publish the next generation for new Runs
+```
+
+既存Run leaseは別generationへ移動せず、QEDは中断したTool callを再実行しません
+Toolの副作用がcrash前に発生している可能性があるためです
+失敗candidateはgeneration番号を消費しません
+candidate startup failureとstability window前に終了したreplacement generationは同じattempt上限を消費します
+上限到達後の新規acquisitionは`ErrExtensionCircuitOpen`を返します
+明示的な`Manager.Reload`がcandidate検証に成功するとcircuitを閉じます
+
+`Manager.RestartStatus`は`disabled`、`ready`、`restarting`、`circuit_open`、`closed`、連続attempt数、current generation、payloadを含まないlast error typeを返します
+verbose lifecycle logもRPC payloadを含めず同じ安全なIDとcounterを記録します
 
 ## Host所有Extension state
 
@@ -361,6 +400,8 @@ automatic restartは未実装です
 QEDはconcurrent memory storeと、1 MiB value上限を持つprivateかつatomicなJSON storeを提供します
 
 Managerはinitial startupで`snapshot` keyをrestoreし、reload時に更新し、orderly closeでcurrent processをpersistします
+automatic restart有効時はinitial startupと各replacementもpublication前にbaseline Snapshotをpersistします
+crash後にrestoreできるのは最新のhost所有Snapshotであり、それより新しいprocess stateは失われる場合があります
 declarative Coding ProfileはworkspaceとProfile IDのdigestでscopeを分け、無関係なProfile間の意図しないstate共有を防ぎます
 
 SnapshotとRestoreは必要なprocess-local stateに利用します

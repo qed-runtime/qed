@@ -205,6 +205,13 @@ should use field names
 At shutdown, stop accepting new work, cancel or finish active Runs, and then
 call `Host.CloseContext` to drain and stop every owned Extension process
 
+Loaded Coding Profiles use bounded automatic Extension restart. An interrupted
+Run still observes its crashed generation's RPC failure and is never replayed
+automatically. A new Run can temporarily fail component acquisition with
+`host.ErrExtensionRestarting`, or with `host.ErrExtensionCircuitOpen` after the
+attempt limit. An application that constructs `host.Manager` directly opts in
+with `host.DefaultRestartPolicy` and can inspect `Manager.RestartStatus`
+
 ## Security boundary
 
 The Extension process boundary isolates crashes and protocol state. It is not

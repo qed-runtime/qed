@@ -231,6 +231,24 @@ Host atomically publish the candidate for new Runs. Existing leases retain the
 old process until it can Drain and Shutdown. Any pre-swap failure leaves the
 old generation active
 
+An enabled `RestartPolicy` makes Manager watch the published child process. An
+unexpected exit fails requests already pinned to that generation without
+replaying Tool calls, withdraws it from new leases, and starts replacement
+candidates with bounded exponential backoff. Each candidate reuses the exact
+validated `ProcessOptions`, including a locked manifest when configured,
+restores the latest host-owned Snapshot, passes HealthCheck, and persists a new
+Snapshot before publication when a State Store is configured. Only successful
+publication advances the generation number
+
+Candidates that fail startup and published generations that exit before the
+stability window share one attempt count. Exhaustion opens the circuit until a
+successful explicit Reload. New acquisition returns
+`ErrExtensionRestarting` while recovery is active and
+`ErrExtensionCircuitOpen` after exhaustion. Coding Profiles and the development
+host use the bounded default of three attempts, 100 millisecond initial and 2
+second maximum backoff, and a 30 second stability window. A direct Manager uses
+the zero-value policy to disable restart
+
 `GenerationSet` takes a read lock while acquiring one generation from every
 configured Extension. Reload takes the corresponding write lock, so a Run sees
 the complete set before or after a swap, never a partially acquired set
@@ -273,6 +291,9 @@ stderr is never copied into verbose output
 - Old and new Extension processes may overlap during retirement and do not
   share process-local Workspace locks, so edit digests remain the cross-process
   stale-write defense
+- Automatic Extension restart never replays an interrupted Tool call and can
+  restore only the latest Host-owned Snapshot, so state newer than that
+  Snapshot may be lost after a crash
 - `run_command` is deliberately broad and must be governed as a host permission
   or wrapped in an external sandbox
 - Tool Trace records hash raw payloads, but Bundle Events preserve public Run

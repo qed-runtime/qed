@@ -51,9 +51,12 @@ type DevOptions struct {
 	StartupTimeout       time.Duration
 	ShutdownTimeout      time.Duration
 	RetireTimeout        time.Duration
-	Verbose              bool
-	DebugWriter          io.Writer
-	Logger               *slog.Logger
+	// RestartPolicy defaults to host.DefaultRestartPolicy when nil
+	RestartPolicy *host.RestartPolicy
+
+	Verbose     bool
+	DebugWriter io.Writer
+	Logger      *slog.Logger
 }
 
 // Developer builds, watches, and atomically reloads one external Extension
@@ -138,6 +141,7 @@ func StartDev(ctx context.Context, options DevOptions) (*Developer, error) {
 		StateStore:    configured.StateStore,
 		StateScope:    configured.StateScope,
 		RetireTimeout: configured.RetireTimeout,
+		RestartPolicy: configuredRestartPolicy(configured.RestartPolicy),
 		Logger:        configured.Logger,
 	})
 	if err != nil {
@@ -154,6 +158,13 @@ func StartDev(ctx context.Context, options DevOptions) (*Developer, error) {
 	developer.control = control
 	developer.writeStatus("started Extension %q generation %d version %s\n", resolved.Manifest.ID, manager.CurrentGeneration(), resolved.Manifest.Version)
 	return developer, nil
+}
+
+func configuredRestartPolicy(configured *host.RestartPolicy) host.RestartPolicy {
+	if configured == nil {
+		return host.DefaultRestartPolicy()
+	}
+	return *configured
 }
 
 func configureDev(options DevOptions) (DevOptions, manifest.Resolved, error) {
