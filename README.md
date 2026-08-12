@@ -28,6 +28,8 @@ executable today
 - Evidence-preserving Context compression with approval, subagent,
   edit-verification, commit, and Tool-transaction safe cuts, deterministic
   preservation reports, and pre-Provider rollback
+- hierarchical Session Synopsis, Task, and Episode Checkpoints with
+  model-facing selection of populated levels
 - content-free Context inspect, explain, diff, and aggregate quality metrics
 - opt-in bounded Context search with explainable relevance ranking, scoped
   Evidence fetch, Session timeline, and Ledger history Tools
@@ -362,6 +364,8 @@ The equivalent `qed evidence inspect` and `qed evidence export` commands are
 also available. `qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after
 RUN_ID[@EVENT_SEQUENCE]` compares two compaction decisions without printing
 message, path, command, or Evidence object content
+`context inspect` and `context explain` also report which hierarchical
+Checkpoint levels entered each compiled model view
 
 ## Experimental TUI
 

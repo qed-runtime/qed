@@ -120,6 +120,8 @@ type ContextSnapshot struct {
 	SourceMessageCount int64 `json:"source_message_count"`
 	// RecentMessageCount is the number of raw messages retained after the Checkpoint
 	RecentMessageCount int64 `json:"recent_message_count"`
+	// ModelLevels identifies the Checkpoint levels included in the compiled model view
+	ModelLevels []ContextCheckpointLevel `json:"model_levels,omitempty"`
 	// ExternalizedObjects is the number of newly published Evidence object references
 	ExternalizedObjects int64 `json:"externalized_objects"`
 	// ExternalizedBytes is the byte total of newly published Evidence objects
@@ -401,6 +403,9 @@ func validateContextMetricEvent(event Event) error {
 	if report.SourceMessageCount < 0 || report.RecentMessageCount < 0 {
 		return errors.New("context.compacted message counts must not be negative")
 	}
+	if err := validateCheckpointModelLevels(report.ModelLevels); err != nil {
+		return err
+	}
 	seenEvidence := make(map[string]struct{}, len(report.Externalized))
 	for _, reference := range report.Externalized {
 		if err := ValidateEvidenceObjectRef(reference); err != nil || strings.TrimSpace(reference.MediaType) == "" {
@@ -454,6 +459,7 @@ func contextSnapshotFromEvent(event Event, active *ContextCheckpoint, activeKnow
 		CompressionRatio:     contextRatio(report.CompiledBytes, report.OriginalBytes),
 		SourceMessageCount:   int64(report.SourceMessageCount),
 		RecentMessageCount:   int64(report.RecentMessageCount),
+		ModelLevels:          append([]ContextCheckpointLevel(nil), report.ModelLevels...),
 		ExternalizedObjects:  int64(len(report.Externalized)),
 		ExternalizedBytes:    externalizedBytes,
 		Fallback:             contextReportFallback(report.Fallback),
@@ -621,6 +627,7 @@ func cloneContextSnapshot(snapshot ContextSnapshot) ContextSnapshot {
 	cloned.Fallback = contextReportFallback(snapshot.Fallback)
 	cloned.CheckpointGeneration = cloneUint64Pointer(snapshot.CheckpointGeneration)
 	cloned.CandidateGeneration = cloneUint64Pointer(snapshot.CandidateGeneration)
+	cloned.ModelLevels = append([]ContextCheckpointLevel(nil), snapshot.ModelLevels...)
 	if snapshot.CompressionRatio != nil {
 		ratio := *snapshot.CompressionRatio
 		cloned.CompressionRatio = &ratio

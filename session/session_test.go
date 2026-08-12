@@ -537,11 +537,17 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			checkpoint := agent.ContextCheckpoint{
-				Version:              1,
+				Version:              agent.ContextCheckpointVersion,
 				Generation:           2,
 				LastRebaseGeneration: 2,
 				SourceMessageCount:   3,
 				SourceHash:           "sha256:" + strings.Repeat("1", 64),
+				Layers: []agent.ContextCheckpointLayer{
+					{Level: agent.ContextCheckpointLevelSessionSynopsis, SourceMessageEnd: 1},
+					{Level: agent.ContextCheckpointLevelEpisode, SourceMessageEnd: 3},
+				},
+				Facts: []agent.CheckpointFact{{SourceMessage: 0, Summary: "session"}},
+				Goal:  &agent.CheckpointFact{SourceMessage: 2, Summary: "episode"},
 				Ledger: &agent.ContextLedgerReference{
 					Version: 1, Digest: "sha256:" + strings.Repeat("3", 64),
 					SourceEventCount: 2, SourceHash: "sha256:" + strings.Repeat("4", 64), SessionRevision: 2,
@@ -555,9 +561,13 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 				OriginalBytes:      100,
 				CompiledBytes:      40,
 				SourceMessageCount: 3,
-				Rebased:            true,
-				RebaseReason:       agent.ContextRebaseGenerationInterval,
-				Externalized:       append([]agent.EvidenceObjectRef(nil), checkpoint.Evidence...),
+				ModelLevels: []agent.ContextCheckpointLevel{
+					agent.ContextCheckpointLevelSessionSynopsis,
+					agent.ContextCheckpointLevelEpisode,
+				},
+				Rebased:      true,
+				RebaseReason: agent.ContextRebaseGenerationInterval,
+				Externalized: append([]agent.EvidenceObjectRef(nil), checkpoint.Evidence...),
 				Validation: &agent.ContextValidationReport{
 					Version: agent.ContextValidationVersion, CandidateGeneration: 2,
 					CandidateSourceMessageCount: 3, Passed: true,
@@ -576,9 +586,11 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			checkpoint.Narrative = "mutated"
+			checkpoint.Layers[0].SourceMessageEnd = 2
 			checkpoint.Ledger.Digest = "mutated"
 			checkpoint.Evidence[0].Scope.RequiredCapabilities[0] = "mutated"
 			report.Externalized[0].Digest = "mutated"
+			report.ModelLevels[0] = agent.ContextCheckpointLevelTask
 			report.Validation.ActiveConstraints.Required = 99
 			snapshot, err := store.Load(context.Background(), "checkpoint")
 			if err != nil {
@@ -586,6 +598,7 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 			}
 			if snapshot.Checkpoint == nil || snapshot.Checkpoint.Narrative != "checkpoint" ||
 				snapshot.Checkpoint.LastRebaseGeneration != 2 ||
+				len(snapshot.Checkpoint.Layers) != 2 || snapshot.Checkpoint.Layers[0].SourceMessageEnd != 1 ||
 				snapshot.Checkpoint.Ledger == nil || snapshot.Checkpoint.Ledger.Digest == "mutated" ||
 				len(snapshot.EvidenceObjects) != 1 || snapshot.EvidenceObjects[0].Digest == "mutated" ||
 				snapshot.Checkpoint.Evidence[0].Scope == nil ||
@@ -593,19 +606,47 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 				t.Fatalf("Checkpoint Snapshot = %#v", snapshot)
 			}
 			snapshot.Checkpoint.Evidence[0].Scope.RequiredCapabilities[0] = "caller-mutated"
+			snapshot.Checkpoint.Layers[0].SourceMessageEnd = 2
+			snapshot.Events[0].ContextCompaction.ModelLevels[0] = agent.ContextCheckpointLevelTask
 			again, err := store.Load(context.Background(), "checkpoint")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if again.Checkpoint.Evidence[0].Scope.RequiredCapabilities[0] != agent.EvidenceReadCapability {
-				t.Fatal("Checkpoint Evidence scope aliases a loaded snapshot")
+			if again.Checkpoint.Evidence[0].Scope.RequiredCapabilities[0] != agent.EvidenceReadCapability ||
+				again.Checkpoint.Layers[0].SourceMessageEnd != 1 ||
+				again.Events[0].ContextCompaction.ModelLevels[0] != agent.ContextCheckpointLevelSessionSynopsis {
+				t.Fatal("Checkpoint hierarchy or Evidence aliases a loaded snapshot")
 			}
-			if len(snapshot.Events) != 1 || snapshot.Events[0].ContextCompaction == nil ||
-				!snapshot.Events[0].ContextCompaction.Rebased ||
-				snapshot.Events[0].ContextCompaction.RebaseReason != agent.ContextRebaseGenerationInterval ||
-				snapshot.Events[0].ContextCompaction.Validation == nil ||
-				snapshot.Events[0].ContextCompaction.Validation.ActiveConstraints.Required != 1 {
-				t.Fatalf("Checkpoint Rebase Event = %#v", snapshot.Events)
+			if len(again.Events) != 1 || again.Events[0].ContextCompaction == nil ||
+				!again.Events[0].ContextCompaction.Rebased ||
+				len(again.Events[0].ContextCompaction.ModelLevels) != 2 ||
+				again.Events[0].ContextCompaction.ModelLevels[0] != agent.ContextCheckpointLevelSessionSynopsis ||
+				again.Events[0].ContextCompaction.RebaseReason != agent.ContextRebaseGenerationInterval ||
+				again.Events[0].ContextCompaction.Validation == nil ||
+				again.Events[0].ContextCompaction.Validation.ActiveConstraints.Required != 1 {
+				t.Fatalf("Checkpoint Rebase Event = %#v", again.Events)
+			}
+
+			legacy := agent.ContextCheckpoint{
+				Version: 1, Generation: 1, LastRebaseGeneration: 1,
+				SourceMessageCount: 1, SourceHash: "sha256:" + strings.Repeat("5", 64),
+				Narrative: "legacy", Evidence: []agent.EvidenceObjectRef{reference},
+			}
+			if _, err := store.Append(context.Background(), "legacy-checkpoint", 0, []agent.Event{{
+				Type: agent.EventContextCompacted, ContextCheckpoint: &legacy,
+				ContextCompaction: &agent.ContextCompactionReport{
+					Applied: true, Reason: "input_limit", SourceMessageCount: 1,
+				},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			legacySnapshot, err := store.Load(context.Background(), "legacy-checkpoint")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if legacySnapshot.Checkpoint == nil || legacySnapshot.Checkpoint.Version != 1 ||
+				len(legacySnapshot.Checkpoint.Layers) != 0 {
+				t.Fatalf("legacy Checkpoint replay = %#v", legacySnapshot.Checkpoint)
 			}
 		})
 	}

@@ -54,6 +54,18 @@ supplies an isolated copy of the exact Event prefix. The compiler validates that
 prefix against the Ledger and derives safe cuts without relying on Tool names in
 Runtime Core
 
+Checkpoint schema v2 treats hierarchy as a derived view, never as another
+source of truth. Core partitions the exact compacted message prefix into
+ordered, non-overlapping Session Synopsis, Task, and Episode ranges. The
+current Run boundary separates Session from Task, and the existing safe-cut
+plan selects the Episode boundary. The Provider projection includes only
+levels containing retained typed state, while the stored Checkpoint, Event,
+Ledger, and Evidence retain complete validation provenance. Schema v1 remains
+replayable and is upgraded only when a later generation is published. A
+follow-up request reprojects the unchanged stored source against its new Run
+boundary, so prior Task and Episode state becomes Session Synopsis without a
+spurious Checkpoint generation
+
 The first Checkpoint is a Raw Event Rebase. Later generations may update from a
 validated previous semantic view, while a deterministic generation interval,
 an explicit Fact lifecycle change, or a Checkpoint Fact contradicted by the

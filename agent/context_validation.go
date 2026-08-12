@@ -436,6 +436,11 @@ func validateCompiledContextValidation(
 
 func validateContextValidationEvent(event Event) error {
 	report := event.ContextCompaction
+	if report != nil {
+		if err := validateCheckpointModelLevels(report.ModelLevels); err != nil {
+			return err
+		}
+	}
 	if report == nil || report.Validation == nil {
 		return nil
 	}

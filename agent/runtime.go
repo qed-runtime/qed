@@ -1152,7 +1152,11 @@ func (runtime *Runtime) execute(
 		if checkpointChanged || len(newEvidence) > 0 || validationRollback != "" {
 			report := cloneContextCompactionReport(compiled.Compaction)
 			if report == nil {
-				report = &ContextCompactionReport{Applied: true, Reason: "checkpoint"}
+				report = &ContextCompactionReport{
+					Applied:     true,
+					Reason:      "checkpoint",
+					ModelLevels: checkpointModelLevels(compiled.Checkpoint),
+				}
 			}
 			report.Externalized = cloneEvidenceObjectRefs(newEvidence)
 			event := Event{Type: EventContextCompacted, ContextCompaction: report}
@@ -1677,6 +1681,7 @@ func predictiveCandidateReport(
 		report.RecentMessageCount = 0
 	}
 	if compiled.Compaction != nil {
+		report.ModelLevels = append([]ContextCheckpointLevel(nil), compiled.Compaction.ModelLevels...)
 		report.Externalized = uniqueEvidenceRefs(append(
 			report.Externalized,
 			compiled.Compaction.Externalized...,

@@ -11,22 +11,50 @@ import (
 )
 
 const (
-	contextCheckpointVersion    = 1
-	checkpointSourceHashDomain  = "qed.context.checkpoint.source.v1"
-	checkpointMediaType         = "application/vnd.qed.context-messages+json"
-	checkpointMessageKind       = "qed_context_checkpoint"
-	defaultRecentMessages       = 12
-	defaultEvidenceThreshold    = 16 << 10
-	defaultEvidenceExcerptBytes = 2 << 10
-	defaultCheckpointMaxBytes   = 8 << 10
-	defaultRebaseGenerations    = 4
-	maximumRebaseGenerations    = 64
-	maximumCheckpointFacts      = 16
-	maximumCheckpointDecisions  = 12
-	maximumCheckpointExecutions = 24
-	maximumCheckpointSummary    = 512
-	contextCheckpointPriority   = 80
+	// ContextCheckpointVersion is the schema version published by CompactingContextCompiler
+	ContextCheckpointVersion uint32 = 2
+
+	legacyContextCheckpointVersion = 1
+	checkpointSourceHashDomain     = "qed.context.checkpoint.source.v1"
+	checkpointMediaType            = "application/vnd.qed.context-messages+json"
+	checkpointMessageKind          = "qed_context_checkpoint"
+	defaultRecentMessages          = 12
+	defaultEvidenceThreshold       = 16 << 10
+	defaultEvidenceExcerptBytes    = 2 << 10
+	defaultCheckpointMaxBytes      = 8 << 10
+	defaultRebaseGenerations       = 4
+	maximumRebaseGenerations       = 64
+	maximumCheckpointFacts         = 16
+	maximumCheckpointDecisions     = 12
+	maximumCheckpointExecutions    = 24
+	maximumCheckpointSummary       = 512
+	contextCheckpointPriority      = 80
 )
+
+// ContextCheckpointLevel identifies one model-facing context granularity
+type ContextCheckpointLevel string
+
+// Context Checkpoint levels ordered from broadest to most local
+const (
+	// ContextCheckpointLevelSessionSynopsis represents compacted messages before the current Run
+	ContextCheckpointLevelSessionSynopsis ContextCheckpointLevel = "session_synopsis"
+	// ContextCheckpointLevelTask represents earlier compacted messages in the current Run
+	ContextCheckpointLevelTask ContextCheckpointLevel = "task"
+	// ContextCheckpointLevelEpisode represents the most recent transaction-safe compacted range
+	ContextCheckpointLevelEpisode ContextCheckpointLevel = "episode"
+)
+
+// ContextCheckpointLayer maps one level to a contiguous raw message range
+//
+// Layers are ordered, non-overlapping, and together cover the complete
+// Checkpoint source prefix. A layer starts at zero or the preceding layer's
+// SourceMessageEnd. SourceMessageEnd is exclusive.
+type ContextCheckpointLayer struct {
+	// Level identifies the semantic granularity of this range
+	Level ContextCheckpointLevel `json:"level"`
+	// SourceMessageEnd is the exclusive zero-based raw Session message index
+	SourceMessageEnd int `json:"end"`
+}
 
 // CheckpointBuildMode identifies whether a Strategy may use the previous semantic view
 type CheckpointBuildMode string
@@ -95,6 +123,11 @@ type ContextCheckpoint struct {
 	SourceMessageCount int `json:"source_message_count"`
 	// SourceHash identifies the exact ordered raw message prefix
 	SourceHash string `json:"source_hash"`
+	// Layers partition the source prefix into model-facing context granularities
+	//
+	// Version 1 Checkpoints omit Layers. Runtime accepts them for replay and
+	// upgrades the next published generation to the current schema.
+	Layers []ContextCheckpointLayer `json:"layers,omitempty"`
 	// Ledger references the deterministic Event-derived state observed at creation
 	Ledger *ContextLedgerReference `json:"ledger,omitempty"`
 	// Goal contains the latest compacted user request when available
@@ -125,6 +158,8 @@ type ContextCompactionReport struct {
 	SourceMessageCount int `json:"source_message_count,omitempty"`
 	// RecentMessageCount is the number of raw messages retained after the Checkpoint
 	RecentMessageCount int `json:"recent_message_count"`
+	// ModelLevels identifies the Checkpoint levels included in the compiled model view
+	ModelLevels []ContextCheckpointLevel `json:"model_levels,omitempty"`
 	// Externalized contains immutable objects created during compilation
 	Externalized []EvidenceObjectRef `json:"externalized,omitempty"`
 	// Fallback identifies a failed custom strategy when the deterministic strategy succeeded
@@ -205,7 +240,10 @@ type CheckpointStrategy interface {
 // records Tool outcomes, and relies on Evidence for the exact source text.
 type DeterministicCheckpointStrategy struct{}
 
-// BuildCheckpoint builds one bounded Checkpoint directly from raw messages
+// BuildCheckpoint builds one bounded flat candidate directly from raw messages
+//
+// CompactingContextCompiler derives the protected hierarchy and publishes the
+// candidate with ContextCheckpointVersion after Strategy execution.
 func (DeterministicCheckpointStrategy) BuildCheckpoint(
 	ctx context.Context,
 	request CheckpointRequest,
@@ -231,7 +269,7 @@ func (DeterministicCheckpointStrategy) BuildCheckpoint(
 		lastRebaseGeneration = checkpointLastRebaseGeneration(request.Previous)
 	}
 	checkpoint := ContextCheckpoint{
-		Version:              contextCheckpointVersion,
+		Version:              legacyContextCheckpointVersion,
 		Generation:           generation,
 		LastRebaseGeneration: lastRebaseGeneration,
 		SessionRevision:      request.SessionRevision,
@@ -408,7 +446,14 @@ func (compiler *CompactingContextCompiler) compile(
 	}
 	originalBytes := contextSegmentBytes(originalSegments) + worldStateBytes
 	if request.Checkpoint != nil {
-		if err := validateCheckpoint(*request.Checkpoint, canonical.Messages, request.Ledger, compiler.policy.CheckpointMaxBytes); err != nil {
+		if err := validateCheckpoint(
+			ctx,
+			*request.Checkpoint,
+			canonical.Messages,
+			request.Events,
+			request.Ledger,
+			compiler.policy.CheckpointMaxBytes,
+		); err != nil {
 			return CompiledContext{}, fmt.Errorf("validate active Context Checkpoint: %w", err)
 		}
 		if err := compiler.validateCheckpointEvidence(
@@ -422,8 +467,14 @@ func (compiler *CompactingContextCompiler) compile(
 		return CompiledContext{}, fmt.Errorf("select Raw Event Rebase: %w", err)
 	}
 
-	baseline, baselineRefs, err := compiler.compiledView(
-		ctx, request.EvidenceAccess, request.EvidenceSensitivity, canonical, request.Checkpoint, request.Ledger,
+	baseline, baselineRefs, baselineLevels, err := compiler.compiledView(
+		ctx,
+		request.EvidenceAccess,
+		request.EvidenceSensitivity,
+		canonical,
+		request.Checkpoint,
+		request.Ledger,
+		request.Events,
 	)
 	if err != nil {
 		return CompiledContext{}, err
@@ -488,8 +539,14 @@ func (compiler *CompactingContextCompiler) compile(
 			failedValidation = cloneContextValidationReport(validation)
 			validationFallback = fallback
 		} else {
-			candidate, refs, viewErr := compiler.compiledView(
-				ctx, request.EvidenceAccess, request.EvidenceSensitivity, canonical, &checkpoint, request.Ledger,
+			candidate, refs, candidateLevels, viewErr := compiler.compiledView(
+				ctx,
+				request.EvidenceAccess,
+				request.EvidenceSensitivity,
+				canonical,
+				&checkpoint,
+				request.Ledger,
+				request.Events,
 			)
 			if viewErr != nil {
 				return CompiledContext{}, viewErr
@@ -531,6 +588,7 @@ func (compiler *CompactingContextCompiler) compile(
 						CompiledBytes:      compiledBytes,
 						SourceMessageCount: cut,
 						RecentMessageCount: len(canonical.Messages) - cut,
+						ModelLevels:        candidateLevels,
 						Externalized:       refs,
 						Fallback:           fallback,
 						Rebased:            true,
@@ -580,6 +638,7 @@ func (compiler *CompactingContextCompiler) compile(
 				CompiledBytes:      baselineBytes,
 				SourceMessageCount: checkpointSourceCount(request.Checkpoint),
 				RecentMessageCount: len(canonical.Messages) - checkpointSourceCount(request.Checkpoint),
+				ModelLevels:        baselineLevels,
 				Externalized:       cloneEvidenceObjectRefs(baselineRefs),
 				Validation:         cloneContextValidationReport(validation),
 			}
@@ -606,6 +665,7 @@ func (compiler *CompactingContextCompiler) compile(
 				baseline,
 				baselineSegments,
 				baselineRefs,
+				baselineLevels,
 				originalBytes,
 				baselineBytes,
 				maxInputTokens,
@@ -662,8 +722,14 @@ func (compiler *CompactingContextCompiler) compile(
 			validationFallback = fallback
 			continue
 		}
-		candidate, refs, viewErr := compiler.compiledView(
-			ctx, request.EvidenceAccess, request.EvidenceSensitivity, canonical, &checkpoint, request.Ledger,
+		candidate, refs, candidateLevels, viewErr := compiler.compiledView(
+			ctx,
+			request.EvidenceAccess,
+			request.EvidenceSensitivity,
+			canonical,
+			&checkpoint,
+			request.Ledger,
+			request.Events,
 		)
 		if viewErr != nil {
 			return CompiledContext{}, viewErr
@@ -707,6 +773,7 @@ func (compiler *CompactingContextCompiler) compile(
 			CompiledBytes:      compiledBytes,
 			SourceMessageCount: cut,
 			RecentMessageCount: len(canonical.Messages) - cut,
+			ModelLevels:        candidateLevels,
 			Externalized:       refs,
 			Fallback:           fallback,
 			Rebased:            checkpoint.LastRebaseGeneration == checkpoint.Generation,
@@ -728,6 +795,7 @@ func (compiler *CompactingContextCompiler) compile(
 			baseline,
 			baselineSegments,
 			baselineRefs,
+			baselineLevels,
 			originalBytes,
 			baselineBytes,
 			maxInputTokens,
@@ -802,8 +870,33 @@ func (compiler *CompactingContextCompiler) buildCheckpoint(
 	if mode == CheckpointBuildIncremental {
 		expectedLastRebaseGeneration = checkpointLastRebaseGeneration(request.Checkpoint)
 	}
+	prepareCandidate := func(checkpoint *ContextCheckpoint) error {
+		checkpoint.LastRebaseGeneration = expectedLastRebaseGeneration
+		if request.Ledger != nil {
+			reference := request.Ledger.Reference()
+			checkpoint.Ledger = &reference
+		}
+		if err := attachCheckpointHierarchy(
+			ctx,
+			checkpoint,
+			messages,
+			request.Events,
+			request.Ledger,
+			compiler.policy.RecentMessages,
+		); err != nil {
+			return err
+		}
+		return fitCheckpoint(checkpoint, compiler.policy.CheckpointMaxBytes, request.Ledger)
+	}
 	validateCandidate := func(checkpoint ContextCheckpoint) (ContextValidationReport, error) {
-		if err := validateCheckpoint(checkpoint, messages, request.Ledger, compiler.policy.CheckpointMaxBytes); err != nil {
+		if err := validateCheckpoint(
+			ctx,
+			checkpoint,
+			messages,
+			request.Events,
+			request.Ledger,
+			compiler.policy.CheckpointMaxBytes,
+		); err != nil {
 			return ContextValidationReport{}, err
 		}
 		if checkpoint.Generation != expectedGeneration {
@@ -844,10 +937,8 @@ func (compiler *CompactingContextCompiler) buildCheckpoint(
 		)
 	}
 	checkpoint, err := compiler.strategy.BuildCheckpoint(ctx, checkpointRequest)
-	checkpoint.LastRebaseGeneration = expectedLastRebaseGeneration
-	if err == nil && request.Ledger != nil {
-		reference := request.Ledger.Reference()
-		checkpoint.Ledger = &reference
+	if err == nil {
+		err = prepareCandidate(&checkpoint)
 	}
 	fallback := ""
 	var validation ContextValidationReport
@@ -864,10 +955,8 @@ func (compiler *CompactingContextCompiler) buildCheckpoint(
 	}
 	if err != nil {
 		checkpoint, err = compiler.fallback.BuildCheckpoint(ctx, checkpointRequest)
-		checkpoint.LastRebaseGeneration = expectedLastRebaseGeneration
-		if err == nil && request.Ledger != nil {
-			reference := request.Ledger.Reference()
-			checkpoint.Ledger = &reference
+		if err == nil {
+			err = prepareCandidate(&checkpoint)
 		}
 		if err == nil {
 			validation, err = validateCandidate(checkpoint)
@@ -889,6 +978,7 @@ func (compiler *CompactingContextCompiler) rollbackContextValidation(
 	baseline ModelRequest,
 	baselineSegments []ContextSegment,
 	baselineRefs []EvidenceObjectRef,
+	baselineLevels []ContextCheckpointLevel,
 	originalBytes int64,
 	baselineBytes int64,
 	maxInputTokens int64,
@@ -937,6 +1027,7 @@ func (compiler *CompactingContextCompiler) rollbackContextValidation(
 			CompiledBytes:      baselineBytes,
 			SourceMessageCount: checkpointSourceCount(request.Checkpoint),
 			RecentMessageCount: len(canonical.Messages) - checkpointSourceCount(request.Checkpoint),
+			ModelLevels:        append([]ContextCheckpointLevel(nil), baselineLevels...),
 			Externalized:       cloneEvidenceObjectRefs(baselineRefs),
 			Fallback:           fallback,
 			Validation:         report,
@@ -982,18 +1073,35 @@ func (compiler *CompactingContextCompiler) compiledView(
 	request ModelRequest,
 	checkpoint *ContextCheckpoint,
 	ledger *ContextLedger,
-) (ModelRequest, []EvidenceObjectRef, error) {
+	events []Event,
+) (ModelRequest, []EvidenceObjectRef, []ContextCheckpointLevel, error) {
 	view := cloneModelRequest(request)
 	start := checkpointSourceCount(checkpoint)
+	var modelLevels []ContextCheckpointLevel
 	if checkpoint != nil {
 		currentView, err := checkpointLifecycleView(*checkpoint, ledger)
 		if err != nil {
-			return ModelRequest{}, nil, err
+			return ModelRequest{}, nil, nil, err
+		}
+		if currentView.Version == ContextCheckpointVersion {
+			layers, err := buildCheckpointLayers(
+				ctx,
+				request.Messages,
+				events,
+				ledger,
+				currentView.SourceMessageCount,
+				compiler.policy.RecentMessages,
+			)
+			if err != nil {
+				return ModelRequest{}, nil, nil, err
+			}
+			currentView.Layers = layers
 		}
 		rendered, err := renderContextCheckpoint(currentView)
 		if err != nil {
-			return ModelRequest{}, nil, err
+			return ModelRequest{}, nil, nil, err
 		}
+		modelLevels = checkpointModelLevels(&currentView)
 		view.Messages = append([]Message{{Role: RoleUser, Text: rendered}}, cloneMessages(request.Messages[start:])...)
 	}
 	var references []EvidenceObjectRef
@@ -1009,7 +1117,7 @@ func (compiler *CompactingContextCompiler) compiledView(
 			[]byte(view.Messages[index].Text),
 		)
 		if err != nil {
-			return ModelRequest{}, nil, fmt.Errorf("externalize Tool output: %w", err)
+			return ModelRequest{}, nil, nil, fmt.Errorf("externalize Tool output: %w", err)
 		}
 		view.Messages[index].Text = externalizedToolText(
 			view.Messages[index].Text,
@@ -1018,7 +1126,7 @@ func (compiler *CompactingContextCompiler) compiledView(
 		)
 		references = append(references, reference)
 	}
-	return view, uniqueEvidenceRefs(references), nil
+	return view, uniqueEvidenceRefs(references), modelLevels, nil
 }
 
 func (compiler *CompactingContextCompiler) putEvidenceObject(
@@ -1231,9 +1339,16 @@ func activeConstraintSourceMessages(ledger *ContextLedger, messageLimit int) (ma
 	return active, nil
 }
 
-func validateCheckpoint(checkpoint ContextCheckpoint, messages []Message, ledger *ContextLedger, maxBytes int) error {
-	if checkpoint.Version != contextCheckpointVersion {
-		return fmt.Errorf("Checkpoint version = %d, want %d", checkpoint.Version, contextCheckpointVersion)
+func validateCheckpoint(
+	ctx context.Context,
+	checkpoint ContextCheckpoint,
+	messages []Message,
+	events []Event,
+	ledger *ContextLedger,
+	maxBytes int,
+) error {
+	if err := validateCheckpointHierarchy(ctx, checkpoint, messages, events, ledger); err != nil {
+		return err
 	}
 	if checkpoint.Generation == 0 {
 		return errors.New("Checkpoint generation must be positive")
@@ -1436,7 +1551,11 @@ func safeCheckpointCuts(ctx context.Context, plan contextSafeCutPlan, minimum in
 }
 
 func renderContextCheckpoint(checkpoint ContextCheckpoint) (string, error) {
-	encoded, err := json.Marshal(checkpoint)
+	var value any = checkpoint
+	if checkpoint.Version == ContextCheckpointVersion {
+		value = checkpointModelView(checkpoint)
+	}
+	encoded, err := json.Marshal(value)
 	if err != nil {
 		return "", fmt.Errorf("encode Context Checkpoint: %w", err)
 	}
@@ -1608,6 +1727,7 @@ func cloneContextCheckpointPointer(checkpoint *ContextCheckpoint) *ContextCheckp
 	cloned.Facts = append([]CheckpointFact(nil), checkpoint.Facts...)
 	cloned.Decisions = append([]CheckpointFact(nil), checkpoint.Decisions...)
 	cloned.Executions = append([]CheckpointExecution(nil), checkpoint.Executions...)
+	cloned.Layers = append([]ContextCheckpointLayer(nil), checkpoint.Layers...)
 	cloned.Evidence = cloneEvidenceObjectRefs(checkpoint.Evidence)
 	return &cloned
 }
@@ -1617,6 +1737,7 @@ func cloneContextCompactionReport(report *ContextCompactionReport) *ContextCompa
 		return nil
 	}
 	cloned := *report
+	cloned.ModelLevels = append([]ContextCheckpointLevel(nil), report.ModelLevels...)
 	cloned.Externalized = cloneEvidenceObjectRefs(report.Externalized)
 	cloned.Validation = cloneContextValidationReport(report.Validation)
 	return &cloned

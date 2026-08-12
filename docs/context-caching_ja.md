@@ -144,9 +144,29 @@ Constraint entryはuser本文を保持するためLedgerはprivateなcontent-bea
 - mutationから最初のannotation付きverificationまたはcommit attemptまでの後続workを保持し、どちらもない場合は次のuser Messageまで保持
 - compact対象の正確なraw prefixをEvidence Objectへ保存
 - 型付きでsize上限のある`ContextCheckpoint`を生成
+- compact済みprefixを重複しないSession Synopsis、Task、Episode layerへ分割
 - source hash、message参照、Tool outcome、generation、Session revision、encoded size、Evidence実在性を検証
 - active Constraint、現在のGit change、保持済みfailed check、pending Tool、required Evidenceの本文なし保存件数を公開
 - 検証済みCheckpointの後ろへrecent raw message tailを配置
+
+新規Checkpointはschema version 2を使います
+ordered `Layers`はcompact済みprefix全体を一度だけcoverします
+Session Synopsisはcurrent Runの開始位置まで、Taskは同じRunのうち以前にcompactされたmessage、Episodeはprefix内で最新のtransaction safeな範囲です
+`recent_messages`はraw tail幅に加えてEpisode幅の目安にもなります
+Tool、approval、subagent、mutation-verification、commit境界を守るためEpisodeが広くなる場合があります
+Run境界がないmessage-only direct callerではTaskとEpisodeだけに分割します
+
+保存済みCheckpointは利用可能な全layerと検証metadataを保持します
+Provider向けJSONにはretained Goal、Fact、Decision、Executionを持つlevelだけを選択し、空のTaskまたはSession layerは送りません
+選択済みitemはどれも1つのlevelにだけ現れます
+Rebase generation、Session revision、source hash、Ledger referenceは保存済みCheckpointとpublic Eventに残し、model向けprojectionには入れません
+`ContextCompactionReport.ModelLevels`が選択済みlevelの順序を記録し、`qed context inspect`と`qed context explain`でmessage本文なしに確認できます
+Compilerはimmutableなsource rangeをcurrent requestのRun境界に対して再projectionします
+follow-upでは保存済みgenerationをpublishし直したり変更したりせず、以前のRunのCheckpointをSession Synopsisとして提示します
+
+Coreはcustom `CheckpointStrategy`の返却後にlayer境界を導出して検証します
+Strategyはprotected transactionを分割したり別のsource partitionを偽装したりできません
+Version 1 CheckpointはSession replayと従来のflatなProvider viewで引き続き有効で、次にpublishするgenerationからversion 2へ更新します
 
 CompilerはSession messageを削除も書き換えもしません
 検証済みCheckpointのpublish時に`context.compacted`を発行し、`SessionSnapshot.Checkpoint`が最新generationを保持します

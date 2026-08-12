@@ -265,11 +265,18 @@ func TestContextAdversarialRepeatedCompactionRebasesFromRawEvents(t *testing.T) 
 					t.Fatalf("generation %d Compile() error = %v", generation, err)
 				}
 				if compiled.Checkpoint == nil || compiled.Checkpoint.Generation != uint64(generation) ||
+					compiled.Checkpoint.Version != ContextCheckpointVersion || len(compiled.Checkpoint.Layers) == 0 ||
+					compiled.Checkpoint.Layers[len(compiled.Checkpoint.Layers)-1].SourceMessageEnd != compiled.Checkpoint.SourceMessageCount ||
 					compiled.Checkpoint.Ledger == nil || *compiled.Checkpoint.Ledger != ledger.Reference() ||
 					compiled.Compaction == nil || compiled.Compaction.Validation == nil ||
+					len(compiled.Compaction.ModelLevels) == 0 ||
 					!compiled.Compaction.Validation.Passed ||
 					compiled.Compaction.Validation.ActiveConstraints != (ContextPreservationCount{Required: 1, Preserved: 1}) {
 					t.Fatalf("generation %d Context = %#v", generation, compiled)
+				}
+				if len(compiled.ModelRequest.Messages) == 0 ||
+					!strings.Contains(compiled.ModelRequest.Messages[0].Text, "active-requirement-marker") {
+					t.Fatalf("generation %d model view lost active requirement", generation)
 				}
 				wantRebase := generation == 1 || (generation-1)%3 == 0
 				if compiled.Compaction.Rebased != wantRebase {
@@ -324,6 +331,16 @@ func TestContextAdversarialRepeatedCompactionRebasesFromRawEvents(t *testing.T) 
 				MaxBytes:        checkpointMaxBytes,
 			})
 			if err != nil {
+				t.Fatal(err)
+			}
+			if err := attachCheckpointHierarchy(
+				context.Background(),
+				&rawRebuild,
+				messages,
+				finalEvents,
+				&finalLedger,
+				1,
+			); err != nil {
 				t.Fatal(err)
 			}
 			if !reflect.DeepEqual(checkpointSemanticState(*checkpoint), checkpointSemanticState(rawRebuild)) {

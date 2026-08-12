@@ -526,6 +526,7 @@ func cloneEvent(event agent.Event) agent.Event {
 	event.ContextCheckpoint = cloneContextCheckpoint(event.ContextCheckpoint)
 	if event.ContextCompaction != nil {
 		report := *event.ContextCompaction
+		report.ModelLevels = append([]agent.ContextCheckpointLevel(nil), event.ContextCompaction.ModelLevels...)
 		report.Externalized = cloneEvidenceObjectRefs(event.ContextCompaction.Externalized)
 		if event.ContextCompaction.Validation != nil {
 			validation := *event.ContextCompaction.Validation
@@ -676,6 +677,7 @@ func cloneContextCheckpoint(checkpoint *agent.ContextCheckpoint) *agent.ContextC
 	cloned.Facts = append([]agent.CheckpointFact(nil), checkpoint.Facts...)
 	cloned.Decisions = append([]agent.CheckpointFact(nil), checkpoint.Decisions...)
 	cloned.Executions = append([]agent.CheckpointExecution(nil), checkpoint.Executions...)
+	cloned.Layers = append([]agent.ContextCheckpointLayer(nil), checkpoint.Layers...)
 	cloned.Evidence = cloneEvidenceObjectRefs(checkpoint.Evidence)
 	return &cloned
 }
@@ -685,6 +687,7 @@ func cloneContextCompaction(report *agent.ContextCompactionReport) *agent.Contex
 		return nil
 	}
 	cloned := *report
+	cloned.ModelLevels = append([]agent.ContextCheckpointLevel(nil), report.ModelLevels...)
 	cloned.Externalized = cloneEvidenceObjectRefs(report.Externalized)
 	if report.Validation != nil {
 		validation := *report.Validation

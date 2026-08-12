@@ -295,13 +295,14 @@ func writeContextInspect(writer io.Writer, output string, report agent.ContextRe
 		}
 		if _, err := fmt.Fprintf(
 			writer,
-			"  sequence=%d effective_generation=%s candidate_generation=%s reason=%s applied=%t ratio=%s validation=%s%s\n",
+			"  sequence=%d effective_generation=%s candidate_generation=%s reason=%s applied=%t ratio=%s levels=%s validation=%s%s\n",
 			snapshot.EventSequence,
 			formatContextGeneration(snapshot.CheckpointGeneration),
 			formatContextGeneration(snapshot.CandidateGeneration),
 			snapshot.Reason,
 			snapshot.Applied,
 			formatContextRatio(snapshot.CompressionRatio),
+			formatContextLevels(snapshot.ModelLevels),
 			validation,
 			rollback,
 		); err != nil {
@@ -317,7 +318,7 @@ func writeContextExplain(writer io.Writer, output string, snapshot agent.Context
 	}
 	if _, err := fmt.Fprintf(
 		writer,
-		"Run: %s\nEvent sequence: %d\nReason: %s\nApplied: %t\nPublished checkpoint: %t\nCheckpoint: effective_generation=%s candidate_generation=%s source_messages=%d recent_messages=%d\n",
+		"Run: %s\nEvent sequence: %d\nReason: %s\nApplied: %t\nPublished checkpoint: %t\nCheckpoint: effective_generation=%s candidate_generation=%s source_messages=%d recent_messages=%d levels=%s\n",
 		snapshot.RunID,
 		snapshot.EventSequence,
 		snapshot.Reason,
@@ -327,6 +328,7 @@ func writeContextExplain(writer io.Writer, output string, snapshot agent.Context
 		formatContextGeneration(snapshot.CandidateGeneration),
 		snapshot.SourceMessageCount,
 		snapshot.RecentMessageCount,
+		formatContextLevels(snapshot.ModelLevels),
 	); err != nil {
 		return err
 	}
@@ -386,6 +388,17 @@ func writeContextExplain(writer io.Writer, output string, snapshot agent.Context
 		fallback,
 	)
 	return err
+}
+
+func formatContextLevels(levels []agent.ContextCheckpointLevel) string {
+	if len(levels) == 0 {
+		return "none"
+	}
+	values := make([]string, len(levels))
+	for index, level := range levels {
+		values[index] = string(level)
+	}
+	return strings.Join(values, ",")
 }
 
 func writeContextValidationCounts(writer io.Writer, report agent.ContextValidationReport) error {

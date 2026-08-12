@@ -21,6 +21,7 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - ordered Session Eventから明示的なFact lifecycleを含めて再構築するdeterministicなArtifact、Execution、Constraint、Policy、Task Ledger
 - relevant file hash、Git state、観測済みcheck freshnessを持つcanonical Current World State snapshot
 - approval、subagent、edit-verification、commit、Tool transactionを分断しないsafe cut、決定的なpreservation report、Provider call前rollbackを持つEvidence preservingなContext圧縮
+- populatedなlevelだけをmodel viewへ選択するSession Synopsis、Task、Episodeの階層Checkpoint
 - 本文を含まないContext inspect、explain、diff、品質metrics集計
 - opt-inでboundedかつ説明可能なrelevance rankingを持つContext search、scope付きEvidence fetch、Session timeline、Ledger history Tool
 - hostまたはProvider注入のToken Estimator、決定的なbyte fallback、本文を含まないProvider Usage比較
@@ -323,6 +324,7 @@ go run ./cmd/qed context explain <run-id> --store .qed/evidence
 
 同じ機能を`qed evidence inspect`と`qed evidence export`でも利用できます
 `qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after RUN_ID[@EVENT_SEQUENCE]`はmessage、path、command、Evidence object contentを出力せず2つのcompaction判断を比較します
+`context inspect`と`context explain`では各compiled model viewへ入った階層Checkpoint levelも確認できます
 
 ## 実験的TUI
 

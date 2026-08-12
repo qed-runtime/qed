@@ -436,7 +436,7 @@ output as content-addressed objects
 | Context field | Required | Meaning and default |
 | --- | --- | --- |
 | `max_input_bytes` | yes | Hard canonical logical-input byte limit |
-| `recent_messages` | no | Preferred raw tail length, default `12` |
+| `recent_messages` | no | Preferred raw tail and hierarchical Episode lengths, default `12` |
 | `evidence_threshold_bytes` | no | Externalize Tool output at this size, default `16384` |
 | `evidence_excerpt_bytes` | no | Retain this many bytes from both ends, default `2048` |
 | `checkpoint_max_bytes` | no | Maximum encoded Checkpoint size, default `8192` |

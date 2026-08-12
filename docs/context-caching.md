@@ -191,11 +191,41 @@ raw messages
   verification or commit attempt, or until the next user Message
 - it stores the exact compacted raw prefix as an Evidence Object
 - it creates a typed, size-bounded `ContextCheckpoint`
+- it partitions the compacted prefix into non-overlapping Session Synopsis,
+  Task, and Episode layers
 - it validates source hashes, message references, Tool outcomes, generation,
   Session revision, encoded size, and exact Evidence availability
 - it publishes content-free preservation counts for active Constraints, current
   Git changes, retained failed checks, pending Tools, and required Evidence
 - it injects the validated Checkpoint followed by the recent raw message tail
+
+New Checkpoints use schema version 2. Their ordered `Layers` cover the complete
+compacted prefix exactly once. Session Synopsis ends where the current Run
+starts, Task contains earlier compacted messages from that Run, and Episode is
+the latest transaction-safe range inside the prefix. `recent_messages` is the
+preferred Episode width as well as the preferred raw-tail width; Tool,
+approval, subagent, mutation-verification, and commit boundaries may make the
+Episode wider. A direct message-only caller has no Run boundary, so its source
+is divided between Task and Episode only
+
+The stored Checkpoint retains every available layer and all validation
+metadata. Its Provider-facing JSON selects only layers that contain a retained
+Goal, Fact, Decision, or Execution. This avoids sending an empty Task or
+Session layer while preserving every selected item exactly once. Rebase
+generation, Session revision, source hash, and Ledger references remain in the
+stored Checkpoint and public Event, not in the model-facing projection.
+`ContextCompactionReport.ModelLevels` records the selected ordered levels, and
+`qed context inspect` and `qed context explain` expose them without copying
+message content. The Compiler reprojects the immutable source ranges against
+the current request's Run boundary. A follow-up therefore sees a reused prior
+Run Checkpoint as Session Synopsis without publishing or mutating its stored
+generation
+
+Core derives and validates layer boundaries after a custom
+`CheckpointStrategy` returns. A Strategy cannot split a protected transaction
+or forge a second source partition. Version 1 Checkpoints remain valid for
+Session replay and retain their original flat Provider view; the next
+published generation is upgraded to version 2
 
 The Compiler never deletes or rewrites Session messages. A successfully
 published Checkpoint emits `context.compacted`; `SessionSnapshot.Checkpoint`

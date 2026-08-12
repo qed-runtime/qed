@@ -63,6 +63,10 @@ func TestBuildContextReportAggregatesValidatedTimeline(t *testing.T) {
 		report.Snapshots[1].Validation.Rollback != agent.ContextValidationRollbackPrevious {
 		t.Fatalf("rollback snapshot = %#v", report.Snapshots[1])
 	}
+	if got := report.Snapshots[2].ModelLevels; len(got) != 2 ||
+		got[0] != agent.ContextCheckpointLevelTask || got[1] != agent.ContextCheckpointLevelEpisode {
+		t.Fatalf("hierarchical model levels = %#v", got)
+	}
 
 	encoded, err := json.Marshal(report)
 	if err != nil {
@@ -265,6 +269,16 @@ func TestBuildContextReportRejectsMalformedEvents(t *testing.T) {
 				},
 			}),
 		},
+		"unordered model levels": {
+			{RunID: "run-bad", Sequence: 1, Type: agent.EventRunStarted},
+			contextEventWithReport("run-bad", 2, &agent.ContextCompactionReport{
+				Reason: "input_limit", OriginalBytes: 10, CompiledBytes: 5,
+				ModelLevels: []agent.ContextCheckpointLevel{
+					agent.ContextCheckpointLevelEpisode,
+					agent.ContextCheckpointLevelTask,
+				},
+			}),
+		},
 	}
 	for name, events := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -284,12 +298,16 @@ func contextReportEvents() []agent.Event {
 		{
 			RunID: "run-context", Sequence: 2, Type: agent.EventContextCompacted,
 			ContextCheckpoint: &agent.ContextCheckpoint{
-				Generation: 1, LastRebaseGeneration: 1, SourceMessageCount: 2,
+				Version: agent.ContextCheckpointVersion, Generation: 1,
+				LastRebaseGeneration: 1, SourceMessageCount: 2,
+				Layers:    []agent.ContextCheckpointLayer{{Level: agent.ContextCheckpointLevelEpisode, SourceMessageEnd: 2}},
+				Goal:      &agent.CheckpointFact{SourceMessage: 1},
 				Narrative: "secret narrative",
 			},
 			ContextCompaction: &agent.ContextCompactionReport{
 				Applied: true, Reason: "raw_event_rebase", OriginalBytes: 100, CompiledBytes: 40,
 				SourceMessageCount: 2, RecentMessageCount: 2,
+				ModelLevels: []agent.ContextCheckpointLevel{agent.ContextCheckpointLevelEpisode},
 				Externalized: []agent.EvidenceObjectRef{{
 					Digest: digestA, MediaType: "application/json", Bytes: 10,
 				}},
@@ -312,7 +330,8 @@ func contextReportEvents() []agent.Event {
 			ContextCompaction: &agent.ContextCompactionReport{
 				Reason: "validation_rollback", OriginalBytes: 120, CompiledBytes: 50,
 				SourceMessageCount: 2, RecentMessageCount: 3,
-				Fallback: "checkpoint_strategy_validation_failed",
+				ModelLevels: []agent.ContextCheckpointLevel{agent.ContextCheckpointLevelEpisode},
+				Fallback:    "checkpoint_strategy_validation_failed",
 				Validation: &agent.ContextValidationReport{
 					Version: agent.ContextValidationVersion, CandidateGeneration: 2,
 					CandidateSourceMessageCount: 4,
@@ -325,11 +344,22 @@ func contextReportEvents() []agent.Event {
 		{
 			RunID: "run-context", Sequence: 4, Type: agent.EventContextCompacted,
 			ContextCheckpoint: &agent.ContextCheckpoint{
-				Generation: 2, LastRebaseGeneration: 1, SourceMessageCount: 4,
+				Version: agent.ContextCheckpointVersion, Generation: 2,
+				LastRebaseGeneration: 1, SourceMessageCount: 4,
+				Layers: []agent.ContextCheckpointLayer{
+					{Level: agent.ContextCheckpointLevelTask, SourceMessageEnd: 2},
+					{Level: agent.ContextCheckpointLevelEpisode, SourceMessageEnd: 4},
+				},
+				Facts: []agent.CheckpointFact{{SourceMessage: 1}},
+				Goal:  &agent.CheckpointFact{SourceMessage: 3},
 			},
 			ContextCompaction: &agent.ContextCompactionReport{
 				Applied: true, Reason: "input_limit", OriginalBytes: 160, CompiledBytes: 64,
 				SourceMessageCount: 4, RecentMessageCount: 2,
+				ModelLevels: []agent.ContextCheckpointLevel{
+					agent.ContextCheckpointLevelTask,
+					agent.ContextCheckpointLevelEpisode,
+				},
 				Externalized: []agent.EvidenceObjectRef{{
 					Digest: digestB, MediaType: "application/json", Bytes: 20,
 				}},

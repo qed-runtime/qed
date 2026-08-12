@@ -412,7 +412,7 @@ QEDは正確なcompact済みmessage prefixと外部化したTool outputをconten
 | Context field | 必須 | 意味と既定値 |
 | --- | --- | --- |
 | `max_input_bytes` | yes | canonical logical inputのhard byte上限 |
-| `recent_messages` | no | 優先するraw tail長、既定値`12` |
+| `recent_messages` | no | 優先するraw tailと階層Episodeの長さ、既定値`12` |
 | `evidence_threshold_bytes` | no | Tool outputを外部化するsize、既定値`16384` |
 | `evidence_excerpt_bytes` | no | 両端に保持するbyte数、既定値`2048` |
 | `checkpoint_max_bytes` | no | encoded Checkpoint上限、既定値`8192` |

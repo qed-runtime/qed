@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -82,6 +83,127 @@ func TestCompactingContextCompilerCreatesRebuildableCheckpoint(t *testing.T) {
 	}
 	if len(compiled.Segments) < 3 || compiled.Segments[2].Kind != agent.SegmentKindCheckpoint {
 		t.Fatalf("Context Segments = %#v", compiled.Segments)
+	}
+}
+
+func TestCompactingContextCompilerRendersHierarchyAndReplaysLegacyCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	objects := evidence.NewMemoryObjectStore()
+	compiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
+		MaxInputBytes:          2600,
+		RecentMessages:         2,
+		EvidenceThresholdBytes: 4096,
+		EvidenceExcerptBytes:   256,
+		CheckpointMaxBytes:     1200,
+	}, objects, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := make([]agent.Message, 0, 12)
+	for index := 0; index < 6; index++ {
+		messages = append(messages,
+			agent.Message{Role: agent.RoleUser, Text: strings.Repeat(string(rune('a'+index)), 600)},
+			agent.Message{Role: agent.RoleAssistant, Text: strings.Repeat(string(rune('A'+index)), 600)},
+		)
+	}
+	compiled, err := compiler.Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: messages},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := compiled.Checkpoint
+	if checkpoint == nil || checkpoint.Version != agent.ContextCheckpointVersion || len(checkpoint.Layers) != 2 ||
+		checkpoint.Layers[0].Level != agent.ContextCheckpointLevelTask ||
+		checkpoint.Layers[1].Level != agent.ContextCheckpointLevelEpisode ||
+		checkpoint.Layers[len(checkpoint.Layers)-1].SourceMessageEnd != checkpoint.SourceMessageCount {
+		t.Fatalf("hierarchical Checkpoint = %#v", checkpoint)
+	}
+	view := decodeCheckpointModelView(t, compiled.ModelRequest.Messages[0].Text)
+	levels := checkpointViewLevels(t, view)
+	if !reflect.DeepEqual(levels, compiled.Compaction.ModelLevels) || !reflect.DeepEqual(levels, []agent.ContextCheckpointLevel{
+		agent.ContextCheckpointLevelEpisode,
+	}) {
+		t.Fatalf("model levels = %#v, report = %#v", levels, compiled.Compaction.ModelLevels)
+	}
+	for _, field := range []string{"goal", "facts", "decisions", "executions", "ledger", "source_hash"} {
+		if _, exists := view[field]; exists {
+			t.Fatalf("hierarchical model view retained top-level %q: %#v", field, view)
+		}
+	}
+
+	followUpMessages := append([]agent.Message(nil), messages...)
+	followUpMessages = append(followUpMessages, agent.Message{Role: agent.RoleUser, Text: "follow up"})
+	events := safeCutCompilerEvents(messages, nil)
+	events = append(events, agent.Event{
+		RunID: "run-safe-cut-compiler", Sequence: uint64(len(events) + 1), Type: agent.EventRunCompleted,
+	})
+	followUp := followUpMessages[len(followUpMessages)-1]
+	events = append(events,
+		agent.Event{RunID: "run-follow-up", Sequence: 1, Type: agent.EventRunStarted},
+		agent.Event{RunID: "run-follow-up", Sequence: 2, Type: agent.EventUserMessageAdded, Message: &followUp},
+	)
+	ledger, err := agent.BuildContextLedger(context.Background(), events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reuseCompiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
+		MaxInputBytes:          1 << 20,
+		RecentMessages:         2,
+		EvidenceThresholdBytes: 4096,
+		EvidenceExcerptBytes:   256,
+		CheckpointMaxBytes:     4096,
+	}, objects, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	followUpCompiled, err := reuseCompiler.Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: followUpMessages},
+		Checkpoint:   checkpoint,
+		Ledger:       &ledger,
+		Events:       events,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	followUpView := decodeCheckpointModelView(t, followUpCompiled.ModelRequest.Messages[0].Text)
+	if got := checkpointViewLevels(t, followUpView); !reflect.DeepEqual(got, []agent.ContextCheckpointLevel{
+		agent.ContextCheckpointLevelSessionSynopsis,
+	}) || !reflect.DeepEqual(got, followUpCompiled.Compaction.ModelLevels) {
+		t.Fatalf("follow-up model levels = %#v / %#v", got, followUpCompiled.Compaction)
+	}
+	if followUpCompiled.Checkpoint == nil || followUpCompiled.Checkpoint.Layers[0].Level != agent.ContextCheckpointLevelTask {
+		t.Fatalf("follow-up mutated stored hierarchy = %#v", followUpCompiled.Checkpoint)
+	}
+
+	legacy := *checkpoint
+	legacy.Version = 1
+	legacy.Layers = nil
+	reused, err := compiler.Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: messages},
+		Checkpoint:   &legacy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyView := decodeCheckpointModelView(t, reused.ModelRequest.Messages[0].Text)
+	if version, ok := legacyView["version"].(float64); !ok || version != 1 {
+		t.Fatalf("legacy model view version = %#v", legacyView["version"])
+	}
+	if _, exists := legacyView["layers"]; exists || len(reused.Compaction.ModelLevels) != 0 {
+		t.Fatalf("legacy model view or report gained hierarchy = %#v / %#v", legacyView, reused.Compaction)
+	}
+
+	tampered := *checkpoint
+	tampered.Layers = append([]agent.ContextCheckpointLayer(nil), checkpoint.Layers...)
+	tampered.Layers[0].SourceMessageEnd = 0
+	_, err = compiler.Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: messages},
+		Checkpoint:   &tampered,
+	})
+	if err == nil || !strings.Contains(err.Error(), "hierarchy") {
+		t.Fatalf("tampered hierarchy error = %v", err)
 	}
 }
 
@@ -891,4 +1013,39 @@ func (strategy checkpointStrategyFunc) BuildCheckpoint(
 	request agent.CheckpointRequest,
 ) (agent.ContextCheckpoint, error) {
 	return strategy(ctx, request)
+}
+
+func decodeCheckpointModelView(t *testing.T, rendered string) map[string]any {
+	t.Helper()
+	start := strings.Index(rendered, "{")
+	end := strings.LastIndex(rendered, "\n</qed_context_checkpoint>")
+	if start < 0 || end <= start {
+		t.Fatalf("rendered Checkpoint envelope = %q", rendered)
+	}
+	var view map[string]any
+	if err := json.Unmarshal([]byte(rendered[start:end]), &view); err != nil {
+		t.Fatal(err)
+	}
+	return view
+}
+
+func checkpointViewLevels(t *testing.T, view map[string]any) []agent.ContextCheckpointLevel {
+	t.Helper()
+	values, ok := view["layers"].([]any)
+	if !ok {
+		t.Fatalf("Checkpoint model layers = %#v", view["layers"])
+	}
+	levels := make([]agent.ContextCheckpointLevel, 0, len(values))
+	for _, value := range values {
+		layer, ok := value.(map[string]any)
+		if !ok {
+			t.Fatalf("Checkpoint model layer = %#v", value)
+		}
+		level, ok := layer["level"].(string)
+		if !ok {
+			t.Fatalf("Checkpoint model layer level = %#v", layer)
+		}
+		levels = append(levels, agent.ContextCheckpointLevel(level))
+	}
+	return levels
 }
