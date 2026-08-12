@@ -177,6 +177,11 @@ type ToolResult struct {
 	// It is retained in Run Events and results but is not copied into the
 	// model-facing Tool Message
 	ContextOperation *ContextOperation `json:"context_operation,omitempty"`
+	// ContextRetrieval contains content-free metadata from a built-in retrieval Tool
+	//
+	// It is retained in Run Events and results but is not copied into the
+	// model-facing Tool Message
+	ContextRetrieval *ContextRetrievalMetadata `json:"context_retrieval,omitempty"`
 	// Policy contains content-free host authorization metadata when a host proxy
 	// enforced capabilities for this invocation
 	//

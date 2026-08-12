@@ -352,6 +352,7 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 	persisted := false
 	sourceMessageCount := 0
 	var activeCheckpoint *ContextCheckpoint
+	seenContextCompaction := false
 
 	for index := range events {
 		if err := ctx.Err(); err != nil {
@@ -377,6 +378,22 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 		if event.Type != EventCurrentWorldStateCaptured && event.CurrentWorldState != nil {
 			return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: Event %q must not contain Current World State", index, event.Type)
 		}
+		if event.ToolResult != nil && event.ToolResult.ContextRetrieval != nil {
+			if event.Type != EventToolCompleted {
+				return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: Context retrieval metadata requires tool.completed", index)
+			}
+			if err := ValidateContextRetrievalMetadata(
+				event.ToolResult.Name,
+				event.ToolResult.Output,
+				event.ToolResult.IsError,
+				event.ToolResult.ContextRetrieval,
+			); err != nil {
+				return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: %w", index, err)
+			}
+			if event.ToolResult.ContextRetrieval.PostCompaction != seenContextCompaction {
+				return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: Context retrieval post-compaction status does not match its Event prefix", index)
+			}
+		}
 		if event.Type == EventContextCompacted {
 			if err := validateContextValidationTransition(event, activeCheckpoint); err != nil {
 				return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: %w", index, err)
@@ -384,6 +401,7 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 			if event.ContextCheckpoint != nil {
 				activeCheckpoint = cloneContextCheckpointPointer(event.ContextCheckpoint)
 			}
+			seenContextCompaction = true
 		}
 		ledger.Sources = append(ledger.Sources, source)
 		ref := source.ContextLedgerEventRef

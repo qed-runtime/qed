@@ -238,8 +238,9 @@ QEDのstable allowlistにないcompaction reasonとfallback labelは`unrecognize
 candidate validation reportがないEventはunreported validation countとして表示されます
 対象にはdeterministic validation以前のEventと現在のEvidence-only compaction Eventの両方が含まれます
 選択Bundleが以前のRunから継承したgenerationを確定できない場合もunavailableとして表示します
-scoped Storeのaccess recordはRun単位のpublic Event timelineへjoinされないため、compaction後のmodel rereadは0ではなくunavailableとして表示します
-独立audit logの値をvalidation時のreadから推測しません
+選択Event streamにbuilt-in retrieval metadataがない場合、compaction後のmodel rereadはunavailableのままです
+retrieval completionがある場合は、可視履歴にcompactionが存在した後で成功した`context_fetch`を数えます
+validation時のStore readは数えません
 
 embedding hostは`agent.BuildContextReport`で同じJSON互換構造を構築し、`ContextReport.Snapshot`で選択し、`agent.DiffContextSnapshots`で比較できます
 
@@ -269,7 +270,38 @@ qed evidence fetch sha256:<digest> --run-id <run-id> --store .qed/evidence
 
 `--run-id`なしのcommandは`objects/`配下にあるlegacy unscoped object向けに維持されます
 scope付き参照はlegacy Object Store APIから取得できません
-QEDはscope付きEvidence retrievalをmodel Toolとしてまだ公開していません
+
+## built-in Context retrieval Tool
+
+retrievalは`agent.Options.ContextRetrieval`または宣言的Agentの`context.retrieval` objectでopt-inします
+有効化するとProvider向けのportableな5 Toolを登録します
+
+| Tool | bounded result |
+| --- | --- |
+| `context_search` | 以前のuser、assistant、Tool Event本文をexactなcase-insensitive一致で検索し、source参照とbounded snippetを返す |
+| `context_fetch` | 現在のRunまたはSessionで参照済みのscope付きEvidence Objectから1つのUTF-8 chunkを返す |
+| `session_timeline` | 本文を含まないEvent identityとactivity metadataを新しい順で返す |
+| `artifact_history` | immutable Artifact Ledger entryを新しい順で返す |
+| `execution_history` | 引数と出力本文を含まないProviderとTool execution Ledger entryを新しい順で返す |
+
+listとsearchは現在のEventまたはLedger snapshotに対するnumeric `cursor`を使い、`next_cursor`を返します
+fetchはbyte `offset`を使い、UTF-8境界に制限された`next_offset`を返します
+raw snippetと取得contentは`untrusted: true`を持ち、実行対象の命令ではなく過去dataとして扱います
+searchはrelevance scoringやembedding lookupを行いません
+
+各Runは全試行call数、成功時の返却item数、成功JSON出力全体のbyte数を独立して制限します
+call単位のitemと出力byte上限もRun全体の上限内で適用され、Runtimeの通常Tool call上限も適用されます
+limit、malformed cursor、Store未設定、未対応media type、access拒否はboundedな通常error Tool resultとなり、Runを失敗させずmodelが回復できます
+
+`context_fetch`は要求digestをaccepted `context.compacted` Event内の完全なscope参照に対して最初に解決します
+履歴にないdigestはObject Storeへ到達しません
+Storeはtenant、Sessionまたはephemeral Run、Profile、required Capabilityを認可してaccess attemptを記録します
+valid UTF-8のtext media typeだけを返します
+Runtimeはcontentを公開する前に返却byte長とSHA-256 digestを完全なscope付き参照と照合します
+
+built-in retrieval resultは対応する`tool.completed` Eventに本文を含まない`ToolResult.ContextRetrieval` metadataを持ちます
+Session replayはoperation、outcome、count、truncation、任意のobject digest、post-compaction statusを保持します
+Runtimeはmodel向けTool Messageからmetadataを除外します
 
 設定済みRuntimeはlegacy unscoped参照を含むCheckpointのscopeを推測しません
 旧Sessionはscope付き設定の下で新しく開始する必要があります
@@ -365,7 +397,9 @@ messageごとのUsageは個別resultを保持します
 - deterministic Ledgerは明示的なFact lifecycleとRuntimeから観測できるstateを扱うが、canonical workspace再構築とmodel-based semantic verificationは未実装
 - RuntimeはCompiler call前に完全なEvent prefixからLedgerを再構築し、incremental reducer indexは未実装
 - tokenizer-backed context limitとpredictive output reserveは未実装
-- Evidence retrievalはCLIとAPI経由でありmodel Toolへ自動公開しない
+- Context retrievalはdeterministic lexical searchのみであり、relevance scoring、embedding、自動retrieval policyは未実装
+- `context_search`はaccepted Event本文をlinear scanし、retrieval indexは未実装
+- `context_fetch`はbounded chunkを返す前にscope付きObject全体を検証し、現在のStore contractはrange readを持たない
 - Cache Planは複数stability layer breakpointではなく1つのuser-message breakpointを選ぶ
 - rendered-wire Prefix Manifest、cache compareまたはexplain、keepalive、singleflight warmup、fleet coordinationは未実装
 - pricingとProvider Capabilityはoperator supplied factであり古くなる可能性があるため最新Provider仕様との照合が必要

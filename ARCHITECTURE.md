@@ -81,6 +81,15 @@ does not copy messages, paths, commands, object digests, or object content.
 `agent.DiffContextSnapshots` compares two projections, which lets the CLI and
 embedded hosts share the same observability contract
 
+An opt-in `agent.ContextRetrievalOptions` installs five Runtime-owned,
+read-only Tools. They search accepted Event text, fetch only scoped Evidence
+already referenced by the current Run or Session, and expose content-free
+Session, Artifact, and Execution history. Runtime owns the current Event
+snapshot and per-Run call, item, and output-byte limits. The Object Store still
+owns authorization and audited access. `ToolResult.ContextRetrieval` records
+content-free completion metadata in the existing `tool.completed` Event and is
+never copied into the model-facing Tool Message
+
 `agent.ToolResult.ContextOperation` carries a validated, content-free
 classification for mutation, verification, commit, or subagent work. It never
 enters the model-facing Tool Message and does not grant authority or prove a

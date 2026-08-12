@@ -173,6 +173,16 @@ runtime, err := agent.NewRuntime(agent.Options{
         },
         Sensitivity: agent.EvidenceSensitivityPrivate,
     },
+    ContextRetrieval: &agent.ContextRetrievalOptions{
+        ObjectStore: objects,
+        Limits: agent.ContextRetrievalLimits{
+            MaxCallsPerRun:        16,
+            MaxItemsPerCall:       32,
+            MaxItemsPerRun:        128,
+            MaxOutputBytesPerCall: 64 << 10,
+            MaxOutputBytesPerRun:  256 << 10,
+        },
+    },
 })
 ```
 
@@ -196,6 +206,23 @@ scope付きretrievalには完全なopaque bindingと一致する`EvidenceAccess`
 built-in MemoryとJSON Storeは`ScopedEvidenceObjectStore`を実装し、`secret` contentを拒否してaccess attemptを記録します
 許可済みretrievalもaudit recordをcommitできなければcontentを返しません
 trusted local operatorはoptionalな`EvidenceObjectAdminStore`を利用でき、そのbypassも監査されます
+
+`ContextRetrieval`は`context_search`、`context_fetch`、`session_timeline`、`artifact_history`、`execution_history`を明示的に登録します
+nilの場合はどのToolも登録しません
+searchは以前のEvent本文を決定的なcase-insensitive一致で検索します
+timelineとLedger historyは本文を含まないmetadataを返します
+fetchはcontent digestをlocatorとしてだけ受け取り、現在のRunまたはSession Event履歴から完全な参照を解決し、一致するscope付きaccessを要求してからUTF-8 textを読みます
+Runtimeは返却byte長とSHA-256 digestを完全な参照と照合します
+
+成功resultは完全なJSONとしてcall単位とRun単位のitem数、出力byte数で制限されます
+call回数もRun単位で制限され、通常のRuntime Tool call budgetも消費します
+listとsearchは新しい順で`next_cursor`を返し、fetchはUTF-8境界の`next_offset`を返します
+返却snippetとEvidence contentは`untrusted: true`を持ち、命令として解釈してはいけません
+
+Runtimeは本文を含まない`ToolResult.ContextRetrieval` metadataを`tool.completed` EventとSession replayへ保持します
+metadataはoperation、outcome、item数、出力byte数、truncation、任意のobject digest、call以前にcompactionがあったかを含みます
+model向けTool Messageにはcopyされません
+scope付きfetchはObject Store access audit recordも作成します
 
 embedding hostはProfileと独立してcanonical stateを注入できます
 
@@ -296,6 +323,11 @@ safe cut annotationによりTool resultへ任意の`context_operation` metadata�
 Runtimeはisolatedなexact Event prefixを渡し、semantic cutの前にLedgerと照合します
 directなCompiler callerはEventsを省略してToolだけのboundaryを維持できます
 Extension peerはProtocol v2を実装する必要があり、v1 manifestとpeerはexact version negotiationで拒否されます
+
+built-in Context retrievalはTool resultと`tool.completed` Event JSONへ任意の`context_retrieval` fieldを追加します
+これはExtension Protocol fieldではなくadditiveなhost metadataです
+strict Event decoderはこのfieldを許容する必要があります
+予約済みbuilt-in Tool名はunderscoreを使い、hostが`ContextRetrievalOptions`を設定しない限り登録されません
 
 shutdown時は新規workの受付を停止し、active Runをcancelまたは完了させてから`Host.CloseContext`で所有する全Extension processをdrainして停止します
 

@@ -605,6 +605,68 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 	}
 }
 
+func TestSessionStoresPreserveContextRetrievalMetadata(t *testing.T) {
+	t.Parallel()
+
+	stores := map[string]func(*testing.T) agent.SessionStore{
+		"memory": func(*testing.T) agent.SessionStore { return session.NewMemoryStore() },
+		"jsonl": func(t *testing.T) agent.SessionStore {
+			store, err := session.NewJSONLStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	for name, construct := range stores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			const output = `{"version":1,"items":[],"next_cursor":0,"truncated":false}`
+			call := agent.ToolCall{ID: "timeline", Name: agent.SessionTimelineToolName}
+			result := agent.ToolResult{
+				CallID: call.ID, Name: call.Name, Output: output,
+				ContextRetrieval: &agent.ContextRetrievalMetadata{
+					Version:     agent.ContextRetrievalMetadataVersion,
+					Operation:   agent.ContextRetrievalSessionTimeline,
+					Outcome:     agent.ContextRetrievalSucceeded,
+					OutputBytes: int64(len(output)),
+				},
+			}
+			events := []agent.Event{
+				{RunID: "run-retrieval", Sequence: 1, Type: agent.EventRunStarted},
+				{RunID: "run-retrieval", Sequence: 2, Type: agent.EventToolStarted, ToolCall: &call},
+				{
+					RunID: "run-retrieval", Sequence: 3, Type: agent.EventToolCompleted,
+					ToolCall: &call, ToolResult: &result,
+					Message: &agent.Message{Role: agent.RoleTool, ToolCallID: call.ID, ToolName: call.Name, Text: output},
+				},
+				{RunID: "run-retrieval", Sequence: 4, Type: agent.EventRunCompleted},
+			}
+			store := construct(t)
+			if _, err := store.Append(context.Background(), "retrieval", 0, events); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := store.Load(context.Background(), "retrieval")
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata := snapshot.Events[2].ToolResult.ContextRetrieval
+			if metadata == nil || metadata.Operation != agent.ContextRetrievalSessionTimeline ||
+				metadata.OutputBytes != int64(len(output)) {
+				t.Fatalf("retrieval metadata = %#v", metadata)
+			}
+			metadata.Outcome = agent.ContextRetrievalFailed
+			reloaded, err := store.Load(context.Background(), "retrieval")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.Events[2].ToolResult.ContextRetrieval.Outcome != agent.ContextRetrievalSucceeded {
+				t.Fatal("Session Store returned aliased Context retrieval metadata")
+			}
+		})
+	}
+}
+
 func TestSessionStoresReplayFactLifecycleDirectives(t *testing.T) {
 	t.Parallel()
 

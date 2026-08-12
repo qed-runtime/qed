@@ -265,6 +265,32 @@ func BuildContextReport(ctx context.Context, runID string, events []Event) (Cont
 			)
 		}
 		expectedSequence = event.Sequence
+		if event.ToolResult != nil && event.ToolResult.ContextRetrieval != nil {
+			if event.Type != EventToolCompleted {
+				return ContextReport{}, fmt.Errorf("Context report Event %d: Context retrieval metadata requires tool.completed", event.Sequence)
+			}
+			if err := ValidateContextRetrievalMetadata(
+				event.ToolResult.Name,
+				event.ToolResult.Output,
+				event.ToolResult.IsError,
+				event.ToolResult.ContextRetrieval,
+			); err != nil {
+				return ContextReport{}, fmt.Errorf("Context report Event %d: %w", event.Sequence, err)
+			}
+			if report.Metrics.PostCompactionRereadCount == nil {
+				zero := int64(0)
+				report.Metrics.PostCompactionRereadCount = &zero
+			}
+			metadata := event.ToolResult.ContextRetrieval
+			if metadata.Operation == ContextRetrievalFetch &&
+				metadata.Outcome == ContextRetrievalSucceeded && metadata.PostCompaction {
+				count, err := addContextMetric(*report.Metrics.PostCompactionRereadCount, 1)
+				if err != nil {
+					return ContextReport{}, fmt.Errorf("Context report Event %d: %w", event.Sequence, err)
+				}
+				*report.Metrics.PostCompactionRereadCount = count
+			}
+		}
 		if event.Type != EventContextCompacted {
 			continue
 		}

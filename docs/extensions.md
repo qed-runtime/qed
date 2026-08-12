@@ -156,6 +156,11 @@ model-facing Tool Message. It prevents context compression from splitting
 semantic transactions; it does not authorize a call or attest that the result
 succeeded. The Host and Extension server reject unknown kinds
 
+`ToolResult.ContextRetrieval` is reserved for Runtime-owned built-in retrieval
+Tools and is not part of Extension Protocol v2. Third-party Extensions should
+return ordinary output and optional `ContextOperation`; Runtime emits retrieval
+metadata only for explicitly configured built-in Tools
+
 ### Hooks
 
 An Extension registers exact Agent Event type strings and one handler. Runtime

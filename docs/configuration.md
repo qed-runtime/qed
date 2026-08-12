@@ -76,7 +76,14 @@ The format is used by `qed run`, `qed tui`, and `qed session resume`
       "context": {
         "max_input_bytes": 65536,
         "recent_messages": 12,
-        "rebase_generation_interval": 4
+        "rebase_generation_interval": 4,
+        "retrieval": {
+          "max_calls_per_run": 16,
+          "max_items_per_call": 32,
+          "max_items_per_run": 128,
+          "max_output_bytes_per_call": 65536,
+          "max_output_bytes_per_run": 262144
+        }
       },
       "cache": {
         "mode": "adaptive",
@@ -428,6 +435,22 @@ output as content-addressed objects
 | `checkpoint_max_bytes` | no | Maximum encoded Checkpoint size, default `8192` |
 | `rebase_generation_interval` | no | Rebuild without the previous semantic Checkpoint after this many newer generations, default `4`, maximum `64` |
 | `evidence_sensitivity` | no | `private` or `secret`, default `private`; the built-in JSON Store rejects `secret` because it is not encrypted |
+
+The optional `retrieval` object registers five Runtime-owned read-only Tools:
+`context_search`, `context_fetch`, `session_timeline`, `artifact_history`, and
+`execution_history`. It requires the same scoped JSON Evidence Store as Context
+compression. Omitting `retrieval` registers none of these Tools
+
+| Retrieval field | Required | Meaning and default |
+| --- | --- | --- |
+| `max_calls_per_run` | no | All attempted retrieval Tool calls, default `16` |
+| `max_items_per_call` | no | Records returned by one search or list call, default `32` |
+| `max_items_per_run` | no | Records returned across one Run, default `128` |
+| `max_output_bytes_per_call` | no | Complete successful JSON Tool output bytes per call, default `65536`, minimum `1024` |
+| `max_output_bytes_per_run` | no | Complete successful JSON Tool output bytes across one Run, default `262144` |
+
+The per-Run limits reset for a terminal follow-up Run. Runtime's ordinary
+`max_tool_calls` limit still applies in addition to these retrieval limits
 
 `max_input_bytes` is deterministic and Provider-neutral, not a tokenizer-backed
 model context limit. QED never rewrites raw Session messages. It compiles a

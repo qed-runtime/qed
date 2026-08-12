@@ -317,9 +317,10 @@ Events without a candidate validation report remain visible with an unreported
 validation count. This includes both older Events and current Evidence-only
 compaction Events. A generation inherited from an earlier Run is also
 unavailable when the selected Bundle does not establish it. Post-compaction
-model rereads are reported as unavailable, not zero, because scoped Store
-access records are not joined into the per-Run public Event timeline. The
-separate audit log must not be inferred from validation-time reads
+model rereads remain unavailable when the selected Event stream has no built-in
+retrieval metadata. Once it contains a retrieval completion, the metric counts
+successful `context_fetch` calls whose visible history already contained a
+compaction. Validation-time Store reads are not counted
 
 Embedding hosts can build the same JSON-compatible structures with
 `agent.BuildContextReport`, select with `ContextReport.Snapshot`, and compare
@@ -360,7 +361,48 @@ qed evidence fetch sha256:<digest> --run-id <run-id> --store .qed/evidence
 
 The command without `--run-id` remains available for legacy unscoped objects
 below `objects/`. A scoped reference cannot be read through the legacy Object
-Store API. QED does not yet expose scoped Evidence retrieval as a model Tool
+Store API
+
+## Built-in Context retrieval Tools
+
+Retrieval is opt-in through `agent.Options.ContextRetrieval` or the declarative
+Agent `context.retrieval` object. Enabling it registers five portable
+Provider-facing Tool names
+
+| Tool | Bounded result |
+| --- | --- |
+| `context_search` | Exact case-insensitive matches over prior user, assistant, and Tool Event text with source references and bounded snippets |
+| `context_fetch` | One UTF-8 chunk from a scoped Evidence Object already referenced by the current Run or Session |
+| `session_timeline` | Content-free Event identities and activity metadata, newest first |
+| `artifact_history` | Immutable Artifact Ledger entries, newest first |
+| `execution_history` | Provider and Tool execution Ledger entries without argument or output text, newest first |
+
+List and search calls use an opaque numeric `cursor` over their current Event or
+Ledger snapshot and return `next_cursor`. Fetch uses byte `offset` and returns
+`next_offset`, both restricted to UTF-8 boundaries. Raw snippets and fetched
+content are marked `untrusted: true`; they are historical data, not executable
+instructions. Search does not perform relevance scoring or embedding lookup
+
+Each Run independently bounds attempted calls, successful returned items, and
+complete successful JSON output bytes. Per-call item and output-byte limits
+apply inside those Run totals, and Runtime's normal Tool-call limit still
+applies. A limit, malformed cursor, unavailable Store, unsupported media type,
+or access denial is a normal bounded error Tool result so the model may recover
+without failing the Run
+
+`context_fetch` first resolves the requested digest against complete scoped
+references in accepted `context.compacted` Events. A digest absent from that
+history never reaches the Object Store. The Store then authorizes tenant,
+Session or ephemeral Run, Profile, and required capabilities and records the
+access attempt. Only valid UTF-8 text media types are returned
+Runtime also verifies the returned byte length and SHA-256 digest against the
+complete scoped reference before exposing content
+
+Every built-in retrieval result carries content-free
+`ToolResult.ContextRetrieval` metadata in the corresponding `tool.completed`
+Event. Session replay preserves operation, outcome, counts, truncation,
+optional object digest, and post-compaction status. Runtime omits that metadata
+from the model-facing Tool Message
 
 Configured Runtimes do not infer a scope for Checkpoints created with legacy
 unscoped references. Such a Session must start again under the scoped
@@ -476,8 +518,11 @@ reported a complete breakdown. Per-message Usage keeps each individual result
 - Runtime currently rebuilds a Ledger from the complete Event prefix before
   every Compiler call; no incremental reducer index exists yet
 - no tokenizer-backed context limit or predictive output reserve exists
-- Evidence retrieval is CLI/API based and is not automatically exposed as a
-  model Tool
+- Context retrieval uses deterministic lexical search only; relevance scoring,
+  embeddings, and automatic retrieval policy are not implemented
+- `context_search` linearly scans accepted Event text; no retrieval index exists
+- `context_fetch` verifies the complete scoped Object before returning a bounded
+  chunk; the current Store contract has no ranged-read operation
 - Cache Plans select one user-message breakpoint rather than multiple
   stability-layer breakpoints
 - no rendered-wire Prefix Manifest, cache compare/explain command, keepalive,

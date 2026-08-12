@@ -22,6 +22,7 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - relevant file hash、Git state、観測済みcheck freshnessを持つcanonical Current World State snapshot
 - approval、subagent、edit-verification、commit、Tool transactionを分断しないsafe cut、決定的なpreservation report、Provider call前rollbackを持つEvidence preservingなContext圧縮
 - 本文を含まないContext inspect、explain、diff、品質metrics集計
+- opt-inでboundedなContext search、scope付きEvidence fetch、Session timeline、Ledger history Tool
 - Prefix Manifest、prompt cache Plan、正規化cache Usage
 - NagiベースのCLIとmulti-turn TUI
 - 末端のExtension processまで伝搬する安全な構造化diagnostics

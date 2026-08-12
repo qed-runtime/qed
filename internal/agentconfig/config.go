@@ -291,6 +291,15 @@ type contextProfile struct {
 	CheckpointMaxBytes       int                       `json:"checkpoint_max_bytes,omitempty"`
 	RebaseGenerationInterval uint64                    `json:"rebase_generation_interval,omitempty"`
 	EvidenceSensitivity      agent.EvidenceSensitivity `json:"evidence_sensitivity,omitempty"`
+	Retrieval                *contextRetrievalProfile  `json:"retrieval,omitempty"`
+}
+
+type contextRetrievalProfile struct {
+	MaxCallsPerRun        int   `json:"max_calls_per_run,omitempty"`
+	MaxItemsPerCall       int   `json:"max_items_per_call,omitempty"`
+	MaxItemsPerRun        int   `json:"max_items_per_run,omitempty"`
+	MaxOutputBytesPerCall int64 `json:"max_output_bytes_per_call,omitempty"`
+	MaxOutputBytesPerRun  int64 `json:"max_output_bytes_per_run,omitempty"`
 }
 
 type cacheProfile struct {
@@ -1121,6 +1130,7 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 	instructions = combineInstructions(instructions, specification.Instructions)
 
 	var contextCompiler agent.ContextCompiler
+	var contextRetrieval *agent.ContextRetrievalOptions
 	if specification.Context != nil {
 		if builder.objects == nil {
 			return fmt.Errorf("agent %q context compaction requires a JSON Evidence Store", agentID)
@@ -1137,6 +1147,23 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 			return fmt.Errorf("agent %q context: %w", agentID, err)
 		}
 		contextCompiler = configured
+		if specification.Context.Retrieval != nil {
+			scopedStore, ok := builder.objects.(agent.ScopedEvidenceObjectStore)
+			if !ok {
+				return fmt.Errorf("agent %q context retrieval requires a scoped Evidence Object Store", agentID)
+			}
+			retrieval := specification.Context.Retrieval
+			contextRetrieval = &agent.ContextRetrievalOptions{
+				ObjectStore: scopedStore,
+				Limits: agent.ContextRetrievalLimits{
+					MaxCallsPerRun:        retrieval.MaxCallsPerRun,
+					MaxItemsPerCall:       retrieval.MaxItemsPerCall,
+					MaxItemsPerRun:        retrieval.MaxItemsPerRun,
+					MaxOutputBytesPerCall: retrieval.MaxOutputBytesPerCall,
+					MaxOutputBytesPerRun:  retrieval.MaxOutputBytesPerRun,
+				},
+			}
+		}
 	}
 	cachePolicy := agent.CachePolicy{Pricing: builder.pricing[specification.Provider]}
 	if specification.Cache != nil {
@@ -1220,6 +1247,7 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 		SessionStore:            builder.sessions,
 		ContextCompiler:         contextCompiler,
 		EvidenceAccess:          runtimeEvidenceAccess,
+		ContextRetrieval:        contextRetrieval,
 		CurrentWorldStateSource: currentWorldStateSource,
 		CachePolicy:             cachePolicy,
 		ProviderRetry:           providerRetry,

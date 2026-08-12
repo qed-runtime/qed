@@ -75,7 +75,14 @@ QEDは1つのstrictなJSON documentからProvider profile、process分離Extensi
       "context": {
         "max_input_bytes": 65536,
         "recent_messages": 12,
-        "rebase_generation_interval": 4
+        "rebase_generation_interval": 4,
+        "retrieval": {
+          "max_calls_per_run": 16,
+          "max_items_per_call": 32,
+          "max_items_per_run": 128,
+          "max_output_bytes_per_call": 65536,
+          "max_output_bytes_per_run": 262144
+        }
       },
       "cache": {
         "mode": "adaptive",
@@ -404,6 +411,21 @@ QEDは正確なcompact済みmessage prefixと外部化したTool outputをconten
 | `checkpoint_max_bytes` | no | encoded Checkpoint上限、既定値`8192` |
 | `rebase_generation_interval` | no | 前回semantic Checkpointを使わず再構築するまでの新しいgeneration数、既定値`4`、最大`64` |
 | `evidence_sensitivity` | no | `private`または`secret`、既定値`private`、built-in JSON Storeは暗号化しないため`secret`を拒否 |
+
+任意の`retrieval` objectはRuntime所有のread-only Toolである`context_search`、`context_fetch`、`session_timeline`、`artifact_history`、`execution_history`を登録します
+Context圧縮と同じscope付きJSON Evidence Storeが必要です
+`retrieval`を省略すると5 Toolは登録されません
+
+| Retrieval field | 必須 | 意味と既定値 |
+| --- | --- | --- |
+| `max_calls_per_run` | no | retrieval Toolの全試行回数、既定値`16` |
+| `max_items_per_call` | no | 1回のsearchまたはlistが返すrecord数、既定値`32` |
+| `max_items_per_run` | no | 1 Run全体で返すrecord数、既定値`128` |
+| `max_output_bytes_per_call` | no | 1 callの成功JSON Tool出力全体のbyte数、既定値`65536`、最小値`1024` |
+| `max_output_bytes_per_run` | no | 1 Run全体の成功JSON Tool出力byte数、既定値`262144` |
+
+Run単位の上限はterminal follow-up Runでresetされます
+Runtimeの通常の`max_tool_calls`もretrieval上限とは別に適用されます
 
 `max_input_bytes`は決定的なProvider neutral値でありtokenizer basedなmodel context limitではありません
 QEDはraw Session messageを書き換えません

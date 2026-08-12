@@ -2,12 +2,14 @@ package agentconfig_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,6 +105,45 @@ func TestLoadBuildsProviderProfilesAndAgentGraph(t *testing.T) {
 	}
 	if result.AgentID != "coordinator" || result.Messages[len(result.Messages)-1].Text != "hello" {
 		t.Errorf("Run result = %#v", result)
+	}
+}
+
+func TestLoadEnablesContextRetrievalTools(t *testing.T) {
+	t.Parallel()
+
+	validator := &countingToolInputValidator{}
+	path := writeConfig(t, `{
+		"version": 1,
+		"providers": {"local": {"protocol": "echo"}},
+		"evidence": {"store": "json", "path": "evidence"},
+		"agents": {"main": {
+			"provider": "local",
+			"context": {
+				"max_input_bytes": 4096,
+				"checkpoint_max_bytes": 512,
+				"retrieval": {
+					"max_calls_per_run": 2,
+					"max_items_per_call": 2,
+					"max_items_per_run": 4,
+					"max_output_bytes_per_call": 1024,
+					"max_output_bytes_per_run": 2048
+				}
+			}
+		}}
+	}`)
+	configuration, err := agentconfig.Load(path, agentconfig.LoadOptions{ToolInputValidator: validator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer configuration.Close()
+	if validator.Count() != 5 {
+		t.Fatalf("compiled Tool schemas = %d, want 5 Context retrieval Tools", validator.Count())
+	}
+	result, err := configuration.Registry.Run(context.Background(), agent.RunRequest{
+		AgentID: "main", Input: []agent.Message{{Role: agent.RoleUser, Text: "hello"}},
+	})
+	if err != nil || result.Status != agent.RunStatusCompleted {
+		t.Fatalf("configured Run = %#v, %v", result, err)
 	}
 }
 
@@ -438,6 +479,23 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 				}}
 			}`,
 			want: "Context Rebase generation interval exceeds 64",
+		},
+		{
+			name: "invalid Context retrieval call limit",
+			document: `{
+				"version": 1,
+				"providers": {"local": {"protocol": "echo"}},
+				"evidence": {"store": "json", "path": "evidence"},
+				"agents": {"main": {
+					"provider": "local",
+					"context": {
+						"max_input_bytes": 4096,
+						"checkpoint_max_bytes": 512,
+						"retrieval": {"max_calls_per_run": -1}
+					}
+				}}
+			}`,
+			want: "Context retrieval max calls per Run",
 		},
 		{
 			name: "Evidence isolation key with surrounding whitespace",
@@ -870,4 +928,28 @@ func lookup(values map[string]string) agentconfig.LookupEnv {
 		value, ok := values[name]
 		return value, ok
 	}
+}
+
+type countingToolInputValidator struct {
+	mu    sync.Mutex
+	count int
+}
+
+func (validator *countingToolInputValidator) Compile(
+	schema json.RawMessage,
+) (agent.CompiledToolInputValidator, error) {
+	compiled, err := (agent.JSONSchemaSubsetValidator{}).Compile(schema)
+	if err != nil {
+		return nil, err
+	}
+	validator.mu.Lock()
+	validator.count++
+	validator.mu.Unlock()
+	return compiled, nil
+}
+
+func (validator *countingToolInputValidator) Count() int {
+	validator.mu.Lock()
+	defer validator.mu.Unlock()
+	return validator.count
 }

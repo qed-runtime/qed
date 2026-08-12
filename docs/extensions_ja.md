@@ -135,6 +135,10 @@ Runtimeはこのcontent-free metadataをEventとSession replayへ保持します
 context圧縮がsemantic transactionを分断しないための分類であり、callをauthorizeせずresult成功も証明しません
 HostとExtension serverは未知のkindを拒否します
 
+`ToolResult.ContextRetrieval`はRuntime所有のbuilt-in retrieval Tool向けに予約され、Extension Protocol v2には含まれません
+third-party Extensionは通常outputと任意の`ContextOperation`を返してください
+Runtimeは明示的に設定されたbuilt-in Toolだけにretrieval metadataを付与します
+
 ### Hook
 
 Extensionはexact Agent Event type文字列と1つのhandlerを登録します

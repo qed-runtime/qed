@@ -84,6 +84,10 @@ type Options struct {
 	// A nil value preserves legacy unscoped compilation unless a parent context
 	// carries EvidenceAccess.
 	EvidenceAccess *RuntimeEvidenceAccess
+	// ContextRetrieval enables Runtime-owned read-only Context and Evidence Tools
+	//
+	// A nil value leaves the reserved Tools unregistered
+	ContextRetrieval *ContextRetrievalOptions
 	// CurrentWorldStateSource reads canonical host state before each logical Provider request
 	//
 	// A nil Source disables Current World State capture
@@ -120,6 +124,7 @@ type Runtime struct {
 	sessionStore            SessionStore
 	contextCompiler         ContextCompiler
 	evidenceAccess          *RuntimeEvidenceAccess
+	contextRetrieval        *normalizedContextRetrievalOptions
 	currentWorldStateSource CurrentWorldStateSource
 	cachePlanner            CachePlanner
 	cachePolicy             CachePolicy
@@ -168,7 +173,13 @@ func NewRuntime(options Options) (*Runtime, error) {
 		return nil, errors.New("max tool calls must be positive")
 	}
 
-	staticTools, err := newRuntimeToolSet(options.Tools, options.ToolInputValidator)
+	contextRetrieval, err := normalizeContextRetrievalOptions(options.ContextRetrieval)
+	if err != nil {
+		return nil, fmt.Errorf("configure Context retrieval: %w", err)
+	}
+	configuredTools := append([]Tool(nil), options.Tools...)
+	configuredTools = append(configuredTools, newContextRetrievalTools(contextRetrieval)...)
+	staticTools, err := newRuntimeToolSet(configuredTools, options.ToolInputValidator)
 	if err != nil {
 		return nil, err
 	}
@@ -223,6 +234,7 @@ func NewRuntime(options Options) (*Runtime, error) {
 		sessionStore:            options.SessionStore,
 		contextCompiler:         contextCompiler,
 		evidenceAccess:          evidenceAccess,
+		contextRetrieval:        contextRetrieval,
 		currentWorldStateSource: options.CurrentWorldStateSource,
 		cachePlanner:            cachePlanner,
 		cachePolicy:             cachePolicy,
@@ -632,6 +644,11 @@ func (runtime *Runtime) execute(
 		SessionID:    request.SessionID,
 		Capabilities: append([]string(nil), request.Capabilities...),
 	})
+	var contextRetrievalState *contextRetrievalRunState
+	if runtime.contextRetrieval != nil {
+		contextRetrievalState = newContextRetrievalRunState(ledgerEvents, runtime.contextRetrieval.limits)
+		ctx = withContextRetrievalRunState(ctx, contextRetrievalState)
+	}
 	runtime.debug("run.execution.started",
 		"run_id", runID,
 		"agent_id", request.AgentID,
@@ -735,6 +752,9 @@ func (runtime *Runtime) execute(
 		}
 		sequence = event.Sequence
 		ledgerEvents = append(ledgerEvents, cloneEvent(event))
+		if contextRetrievalState != nil {
+			contextRetrievalState.appendEvent(event)
+		}
 		handle.events <- cloneEvent(event)
 		runtime.debug("run.event.emitted",
 			"run_id", runID,
@@ -1740,6 +1760,27 @@ func (runtime *Runtime) executeTool(ctx context.Context, toolSet runtimeToolSet,
 		arguments = json.RawMessage(`{}`)
 	}
 	if err := ValidateToolInput(toolSet.validators[call.Name], arguments); err != nil {
+		if retrievalTool, builtIn := tool.(contextRetrievalTool); builtIn {
+			toolResult := retrievalTool.inputValidationError(
+				ctx,
+				call,
+				fmt.Sprintf("tool %q input validation: %v", call.Name, err),
+			)
+			if metadataErr := ValidateContextRetrievalMetadata(
+				call.Name,
+				toolResult.Output,
+				toolResult.IsError,
+				toolResult.ContextRetrieval,
+			); metadataErr != nil {
+				result.Output = fmt.Sprintf("tool %q returned invalid Context retrieval metadata: %v", call.Name, metadataErr)
+				result.IsError = true
+				return result
+			}
+			result.Output = toolResult.Output
+			result.IsError = toolResult.IsError
+			result.ContextRetrieval = cloneContextRetrievalMetadata(toolResult.ContextRetrieval)
+			return result
+		}
 		result.Output = fmt.Sprintf("tool %q input validation: %v", call.Name, err)
 		result.IsError = true
 		return result
@@ -1758,10 +1799,22 @@ func (runtime *Runtime) executeTool(ctx context.Context, toolSet runtimeToolSet,
 		result.IsError = true
 		return result
 	}
+	_, builtInContextRetrieval := tool.(contextRetrievalTool)
+	if toolResult.ContextRetrieval != nil && !builtInContextRetrieval {
+		result.Output = fmt.Sprintf("tool %q returned reserved Context retrieval metadata", call.Name)
+		result.IsError = true
+		return result
+	}
+	if err := ValidateContextRetrievalMetadata(call.Name, toolResult.Output, toolResult.IsError, toolResult.ContextRetrieval); err != nil {
+		result.Output = fmt.Sprintf("tool %q returned invalid Context retrieval metadata: %v", call.Name, err)
+		result.IsError = true
+		return result
+	}
 
 	result.Output = toolResult.Output
 	result.IsError = toolResult.IsError
 	result.ContextOperation = cloneContextOperation(toolResult.ContextOperation)
+	result.ContextRetrieval = cloneContextRetrievalMetadata(toolResult.ContextRetrieval)
 	return result
 }
 
@@ -1985,6 +2038,7 @@ func cloneToolResults(results []ToolResult) []ToolResult {
 		cloned[index] = results[index]
 		cloned[index].Policy = cloneToolPolicyDecision(results[index].Policy)
 		cloned[index].ContextOperation = cloneContextOperation(results[index].ContextOperation)
+		cloned[index].ContextRetrieval = cloneContextRetrievalMetadata(results[index].ContextRetrieval)
 	}
 	return cloned
 }
@@ -2032,6 +2086,7 @@ func cloneEvent(event Event) Event {
 		result := *event.ToolResult
 		result.Policy = cloneToolPolicyDecision(event.ToolResult.Policy)
 		result.ContextOperation = cloneContextOperation(event.ToolResult.ContextOperation)
+		result.ContextRetrieval = cloneContextRetrievalMetadata(event.ToolResult.ContextRetrieval)
 		event.ToolResult = &result
 	}
 	if event.WaitRequest != nil {

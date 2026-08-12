@@ -538,6 +538,10 @@ func cloneEvent(event agent.Event) agent.Event {
 			operation := *event.ToolResult.ContextOperation
 			result.ContextOperation = &operation
 		}
+		if event.ToolResult.ContextRetrieval != nil {
+			retrieval := *event.ToolResult.ContextRetrieval
+			result.ContextRetrieval = &retrieval
+		}
 		if event.ToolResult.Policy != nil {
 			policy := *event.ToolResult.Policy
 			policy.Capabilities = append([]string(nil), event.ToolResult.Policy.Capabilities...)

@@ -192,6 +192,16 @@ runtime, err := agent.NewRuntime(agent.Options{
         },
         Sensitivity: agent.EvidenceSensitivityPrivate,
     },
+    ContextRetrieval: &agent.ContextRetrievalOptions{
+        ObjectStore: objects,
+        Limits: agent.ContextRetrievalLimits{
+            MaxCallsPerRun:        16,
+            MaxItemsPerCall:       32,
+            MaxItemsPerRun:        128,
+            MaxOutputBytesPerCall: 64 << 10,
+            MaxOutputBytesPerRun:  256 << 10,
+        },
+    },
 })
 ```
 
@@ -219,6 +229,28 @@ JSON Stores implement `ScopedEvidenceObjectStore`, reject `secret` content,
 and record access attempts. An allowed retrieval returns no content when its
 audit record cannot be committed. A trusted local operator may use the
 optional `EvidenceObjectAdminStore`; that bypass is also audited
+
+`ContextRetrieval` explicitly registers `context_search`, `context_fetch`,
+`session_timeline`, `artifact_history`, and `execution_history`. A nil option
+registers none of them. Search reads exact earlier Event text with deterministic
+case-insensitive matching. Timeline and Ledger history return content-free
+metadata. Fetch accepts a content digest only as a locator, resolves the full
+reference from the current Run or Session Event history, and then requires the
+matching scoped access before reading UTF-8 text. Runtime verifies the returned
+byte length and SHA-256 digest against that complete reference
+
+Every successful result is complete JSON bounded by per-call and per-Run item
+and output-byte limits. Calls are also bounded per Run and still consume the
+ordinary Runtime Tool-call budget. List and search results are newest first and
+use `next_cursor`; fetch uses a UTF-8-boundary `next_offset`. Returned snippets
+and Evidence content carry `untrusted: true` and must not be interpreted as
+instructions
+
+Runtime retains content-free `ToolResult.ContextRetrieval` metadata in
+`tool.completed` Events and Session replay. It contains operation, outcome,
+item and output-byte counts, truncation, optional object digest, and whether a
+compaction preceded the call. It is not copied into the model-facing Tool
+Message. Scoped fetch also creates the Object Store access audit record
 
 An embedding host can inject canonical state independently of any Profile
 
@@ -348,6 +380,12 @@ Event prefix and validates it against the Ledger before semantic cuts. A direct
 compiler caller may omit Events to retain Tool-only boundaries. Extension peers
 must implement Protocol v2; v1 manifests and peers are rejected by exact
 version negotiation
+
+Built-in Context retrieval adds the optional `context_retrieval` field to Tool
+results and `tool.completed` Event JSON. It is additive host metadata rather
+than an Extension Protocol field. Strict Event decoders must accept it. The
+reserved built-in Tool names use underscores and remain absent unless the host
+configures `ContextRetrievalOptions`
 
 At shutdown, stop accepting new work, cancel or finish active Runs, and then
 call `Host.CloseContext` to drain and stop every owned Extension process

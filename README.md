@@ -29,6 +29,8 @@ executable today
   edit-verification, commit, and Tool-transaction safe cuts, deterministic
   preservation reports, and pre-Provider rollback
 - content-free Context inspect, explain, diff, and aggregate quality metrics
+- opt-in bounded Context search, scoped Evidence fetch, Session timeline, and
+  Ledger history Tools
 - Prefix Manifests, prompt-cache Plans, and normalized cache Usage
 - Nagi-based CLI and multi-turn TUI
 - safe structured diagnostics propagated to the final Extension process
