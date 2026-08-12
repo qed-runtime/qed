@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/qed-runtime/qed/agent"
 	"github.com/qed-runtime/qed/capability"
@@ -32,6 +33,7 @@ const (
 	defaultTimeout        = 30 * time.Second
 	defaultMaxOutputBytes = 1 << 20
 	maximumArgumentBytes  = 64 << 10
+	maximumUntrackedFiles = 128
 )
 
 var objectIDPattern = regexp.MustCompile(`\A[0-9a-fA-F]{40,64}\z`)
@@ -81,8 +83,13 @@ type gitTool struct {
 }
 
 func (tool *gitTool) run(ctx context.Context, arguments ...string) (command.Result, error) {
+	return tool.runBounded(ctx, tool.maxOutputBytes, arguments...)
+}
+
+func (tool *gitTool) runBounded(ctx context.Context, maxOutputBytes int, arguments ...string) (command.Result, error) {
 	base := []string{
 		"--no-optional-locks",
+		"--literal-pathspecs",
 		"-c", "core.pager=cat",
 		"-c", "color.ui=false",
 		"-c", "core.fsmonitor=false",
@@ -93,7 +100,7 @@ func (tool *gitTool) run(ctx context.Context, arguments ...string) (command.Resu
 		Directory:      tool.workspace.Root(),
 		Environment:    append([]string(nil), tool.environment...),
 		Timeout:        tool.timeout,
-		MaxOutputBytes: tool.maxOutputBytes,
+		MaxOutputBytes: maxOutputBytes,
 	})
 }
 
@@ -202,10 +209,15 @@ func (tool *diffTool) Execute(ctx context.Context, call agent.ToolCall) (agent.T
 	if contextLines < 0 || contextLines > 100 {
 		return agent.ToolResult{}, errors.New("git_diff context_lines must be between 0 and 100")
 	}
+	if ctx == nil {
+		return agent.ToolResult{}, errors.New("git_diff context must not be nil")
+	}
 
+	operationContext, cancel := context.WithTimeout(ctx, tool.timeout)
+	defer cancel()
 	release := tool.workspace.AcquireRead()
 	defer release()
-	if err := tool.ensureRepositoryRoot(ctx); err != nil {
+	if err := tool.ensureRepositoryRoot(operationContext); err != nil {
 		return agent.ToolResult{}, err
 	}
 	paths, err := tool.resolvePaths(input.Paths)
@@ -226,7 +238,7 @@ func (tool *diffTool) Execute(ctx context.Context, call agent.ToolCall) (agent.T
 	case "staged":
 		arguments = append(arguments, "--cached")
 	case "base":
-		resolvedBase, err = tool.resolveRevision(ctx, input.Base)
+		resolvedBase, err = tool.resolveRevision(operationContext, input.Base)
 		if err != nil {
 			return agent.ToolResult{}, err
 		}
@@ -234,26 +246,131 @@ func (tool *diffTool) Execute(ctx context.Context, call agent.ToolCall) (agent.T
 	}
 	arguments = append(arguments, "--")
 	arguments = append(arguments, paths...)
-	result, err := tool.run(ctx, arguments...)
+	result, err := tool.run(operationContext, arguments...)
 	if err != nil {
 		return agent.ToolResult{}, err
 	}
 	if result.ExitCode != 0 {
 		return agent.ToolResult{}, fmt.Errorf("git diff failed with exit code %d: %s", result.ExitCode, strings.TrimSpace(result.Stderr))
 	}
-	sum := sha256.Sum256([]byte(result.Stdout))
+	patch := result.Stdout
+	truncated := result.StdoutTruncated
+	if !truncated && input.Scope != "staged" {
+		untrackedPatch, untrackedTruncated, err := tool.untrackedPatch(operationContext, paths, contextLines, len(patch))
+		if err != nil {
+			return agent.ToolResult{}, err
+		}
+		patch += untrackedPatch
+		truncated = untrackedTruncated
+	}
+	var invalidUTF8 bool
+	patch, invalidUTF8 = validUTF8Prefix(patch)
+	truncated = truncated || invalidUTF8
+	sum := sha256.Sum256([]byte(patch))
 	response := diffResponse{
 		Scope:     input.Scope,
 		Base:      resolvedBase,
-		Patch:     result.Stdout,
+		Patch:     patch,
 		Digest:    "sha256:" + hex.EncodeToString(sum[:]),
-		Truncated: result.StdoutTruncated,
+		Truncated: truncated,
 	}
 	encoded, err := json.Marshal(response)
 	if err != nil {
 		return agent.ToolResult{}, fmt.Errorf("encode git_diff result: %w", err)
 	}
 	return agent.ToolResult{Output: string(encoded)}, nil
+}
+
+func (tool *diffTool) untrackedPatch(ctx context.Context, paths []string, contextLines, usedBytes int) (string, bool, error) {
+	arguments := []string{"ls-files", "--others", "--exclude-standard", "-z", "--"}
+	arguments = append(arguments, paths...)
+	listed, err := tool.run(ctx, arguments...)
+	if err != nil {
+		return "", false, err
+	}
+	if listed.ExitCode != 0 {
+		return "", false, fmt.Errorf("list untracked Git files failed with exit code %d: %s", listed.ExitCode, strings.TrimSpace(listed.Stderr))
+	}
+	untracked, incompleteRecord := parseNULTerminatedPaths(listed.Stdout)
+	truncated := listed.StdoutTruncated || incompleteRecord
+	if len(untracked) > maximumUntrackedFiles {
+		untracked = untracked[:maximumUntrackedFiles]
+		truncated = true
+	}
+
+	var patch strings.Builder
+	for _, path := range untracked {
+		if err := ctx.Err(); err != nil {
+			return "", false, err
+		}
+		if !utf8.ValidString(path) {
+			truncated = true
+			continue
+		}
+		info, err := tool.workspace.Lstat(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				truncated = true
+				continue
+			}
+			return "", false, fmt.Errorf("inspect untracked Git path %q: %w", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			truncated = true
+			continue
+		}
+		remaining := tool.maxOutputBytes - usedBytes - patch.Len()
+		if remaining <= 0 {
+			truncated = true
+			break
+		}
+		result, err := tool.runBounded(ctx, remaining,
+			"diff",
+			"--no-index",
+			"--no-ext-diff",
+			"--no-textconv",
+			"--no-color",
+			"--src-prefix=a/",
+			"--dst-prefix=b/",
+			"--unified="+strconv.Itoa(contextLines),
+			"--",
+			os.DevNull,
+			filepath.FromSlash(path),
+		)
+		if err != nil {
+			return "", false, err
+		}
+		if result.ExitCode != 0 && result.ExitCode != 1 {
+			return "", false, fmt.Errorf("diff untracked Git path %q failed with exit code %d: %s", path, result.ExitCode, strings.TrimSpace(result.Stderr))
+		}
+		patch.WriteString(result.Stdout)
+		if result.StdoutTruncated {
+			truncated = true
+			break
+		}
+	}
+	return patch.String(), truncated, nil
+}
+
+func parseNULTerminatedPaths(output string) ([]string, bool) {
+	if output == "" {
+		return nil, false
+	}
+	records := strings.Split(output, "\x00")
+	complete := strings.HasSuffix(output, "\x00")
+	records = records[:len(records)-1]
+	return records, !complete
+}
+
+func validUTF8Prefix(value string) (string, bool) {
+	for offset := 0; offset < len(value); {
+		_, size := utf8.DecodeRuneInString(value[offset:])
+		if size == 1 && value[offset] >= utf8.RuneSelf {
+			return value[:offset], true
+		}
+		offset += size
+	}
+	return value, false
 }
 
 func (tool *diffTool) resolveRevision(ctx context.Context, revision string) (string, error) {

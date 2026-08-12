@@ -48,6 +48,10 @@ type Options struct {
 	//
 	// Initialize and InitializeComponents are mutually exclusive
 	InitializeComponents ComponentInitializer
+	// ToolInputValidator compiles schemas enforced at the Extension RPC boundary
+	//
+	// A nil Validator uses agent.JSONSchemaSubsetValidator
+	ToolInputValidator agent.ToolInputValidator
 	// Snapshot returns opaque process-local state, or nil for an empty state object
 	Snapshot func(ctx context.Context) (json.RawMessage, error)
 	// Restore accepts state produced by a compatible older generation
@@ -110,18 +114,19 @@ type state struct {
 	options Options
 	writer  *protocol.Writer
 
-	mu           sync.Mutex
-	handshaken   bool
-	initializing bool
-	initialized  bool
-	draining     bool
-	tools        map[string]agent.Tool
-	hooks        map[string]struct{}
-	hookHandler  HookHandler
-	commands     map[string]extension.Command
-	manifest     protocol.Manifest
-	active       int
-	idle         chan struct{}
+	mu             sync.Mutex
+	handshaken     bool
+	initializing   bool
+	initialized    bool
+	draining       bool
+	tools          map[string]agent.Tool
+	toolValidators map[string]agent.CompiledToolInputValidator
+	hooks          map[string]struct{}
+	hookHandler    HookHandler
+	commands       map[string]extension.Command
+	manifest       protocol.Manifest
+	active         int
+	idle           chan struct{}
 
 	requestsMu sync.Mutex
 	requests   map[string]context.CancelFunc
@@ -135,14 +140,15 @@ func newState(ctx context.Context, options Options, writer *protocol.Writer) *st
 	idle := make(chan struct{})
 	close(idle)
 	return &state{
-		ctx:      ctx,
-		options:  options,
-		writer:   writer,
-		tools:    make(map[string]agent.Tool),
-		hooks:    make(map[string]struct{}),
-		commands: make(map[string]extension.Command),
-		idle:     idle,
-		requests: make(map[string]context.CancelFunc),
+		ctx:            ctx,
+		options:        options,
+		writer:         writer,
+		tools:          make(map[string]agent.Tool),
+		toolValidators: make(map[string]agent.CompiledToolInputValidator),
+		hooks:          make(map[string]struct{}),
+		commands:       make(map[string]extension.Command),
+		idle:           idle,
+		requests:       make(map[string]context.CancelFunc),
 	}
 }
 
@@ -345,7 +351,10 @@ func (state *state) initialize(ctx context.Context, params json.RawMessage) (any
 		state.mu.Unlock()
 		return nil, mapCallError(err)
 	}
-	toolMap, manifestTools, toolCapabilities, err := validateTools(components.Tools)
+	toolMap, toolValidators, manifestTools, toolCapabilities, err := validateTools(
+		components.Tools,
+		state.options.ToolInputValidator,
+	)
 	if err != nil {
 		state.mu.Lock()
 		state.initializing = false
@@ -372,6 +381,7 @@ func (state *state) initialize(ctx context.Context, params json.RawMessage) (any
 	state.initializing = false
 	state.initialized = true
 	state.tools = toolMap
+	state.toolValidators = toolValidators
 	state.hooks = hooks
 	state.hookHandler = components.HandleEvent
 	state.commands = commands
@@ -434,13 +444,13 @@ func (state *state) requiredCapabilities(ctx context.Context, params json.RawMes
 	if err := protocol.Unmarshal(params, &request); err != nil {
 		return nil, rpcErrorFrom(protocol.ErrorCodeInvalidParams, err)
 	}
-	tool, finish, rpcFailure := state.beginToolCall(request.Call)
+	tool, call, finish, rpcFailure := state.beginToolCall(request.Call)
 	if rpcFailure != nil {
 		return nil, rpcFailure
 	}
 	defer finish()
 	if dynamic, ok := tool.(extension.DynamicCapabilities); ok {
-		capabilities, err := dynamic.RequiredCapabilities(ctx, toAgentToolCall(request.Call))
+		capabilities, err := dynamic.RequiredCapabilities(ctx, call)
 		if err != nil {
 			return nil, mapCallError(err)
 		}
@@ -464,7 +474,7 @@ func (state *state) invokeTool(ctx context.Context, params json.RawMessage) (any
 	if err := protocol.Unmarshal(params, &request); err != nil {
 		return nil, rpcErrorFrom(protocol.ErrorCodeInvalidParams, err)
 	}
-	tool, finish, rpcFailure := state.beginToolCall(request.Call)
+	tool, call, finish, rpcFailure := state.beginToolCall(request.Call)
 	if rpcFailure != nil {
 		return nil, rpcFailure
 	}
@@ -475,7 +485,7 @@ func (state *state) invokeTool(ctx context.Context, params json.RawMessage) (any
 		AgentID:     request.Run.AgentID,
 		SessionID:   request.Run.SessionID,
 	})
-	result, err := tool.Execute(ctx, toAgentToolCall(request.Call))
+	result, err := tool.Execute(ctx, call)
 	if err != nil {
 		return nil, mapCallError(err)
 	}
@@ -591,28 +601,31 @@ func (state *state) beginCommand(name string) (extension.Command, func(), *proto
 	return command, state.endOperation, nil
 }
 
-func (state *state) beginToolCall(call protocol.ToolCall) (agent.Tool, func(), *protocol.RPCError) {
+func (state *state) beginToolCall(
+	call protocol.ToolCall,
+) (agent.Tool, agent.ToolCall, func(), *protocol.RPCError) {
 	if call.ID == "" || call.Name == "" {
-		return nil, nil, rpcError(protocol.ErrorCodeInvalidParams, "Tool call ID and name are required")
-	}
-	arguments := call.Arguments
-	if len(arguments) == 0 {
-		arguments = json.RawMessage(`{}`)
-	}
-	if !json.Valid(arguments) {
-		return nil, nil, rpcError(protocol.ErrorCodeInvalidParams, "Tool arguments must be valid JSON")
+		return nil, agent.ToolCall{}, nil, rpcError(protocol.ErrorCodeInvalidParams, "Tool call ID and name are required")
 	}
 	state.mu.Lock()
-	defer state.mu.Unlock()
 	if failure := state.beginOperationLocked(); failure != nil {
-		return nil, nil, failure
+		state.mu.Unlock()
+		return nil, agent.ToolCall{}, nil, failure
 	}
 	tool, ok := state.tools[call.Name]
 	if !ok {
 		state.endOperationLocked()
-		return nil, nil, rpcError(protocol.ErrorCodeInvalidParams, fmt.Sprintf("Tool %q is not registered", call.Name))
+		state.mu.Unlock()
+		return nil, agent.ToolCall{}, nil, rpcError(protocol.ErrorCodeInvalidParams, fmt.Sprintf("Tool %q is not registered", call.Name))
 	}
-	return tool, state.endOperation, nil
+	validator := state.toolValidators[call.Name]
+	state.mu.Unlock()
+	agentCall := toAgentToolCall(call)
+	if err := agent.ValidateToolInput(validator, agentCall.Arguments); err != nil {
+		state.endOperation()
+		return nil, agent.ToolCall{}, nil, rpcErrorFrom(protocol.ErrorCodeInvalidParams, err)
+	}
+	return tool, agentCall, state.endOperation, nil
 }
 
 func (state *state) beginOperationLocked() *protocol.RPCError {
@@ -752,32 +765,44 @@ func (state *state) cancelRequests() {
 	state.requestsMu.Unlock()
 }
 
-func validateTools(tools []agent.Tool) (map[string]agent.Tool, []protocol.ToolDefinition, []string, error) {
+func validateTools(
+	tools []agent.Tool,
+	validator agent.ToolInputValidator,
+) (
+	map[string]agent.Tool,
+	map[string]agent.CompiledToolInputValidator,
+	[]protocol.ToolDefinition,
+	[]string,
+	error,
+) {
 	toolMap := make(map[string]agent.Tool, len(tools))
+	validators := make(map[string]agent.CompiledToolInputValidator, len(tools))
 	definitions := make([]protocol.ToolDefinition, 0, len(tools))
 	capabilitySet := make(map[string]struct{})
 	for _, tool := range tools {
 		if tool == nil {
-			return nil, nil, nil, errors.New("Extension Tool must not be nil")
+			return nil, nil, nil, nil, errors.New("Extension Tool must not be nil")
 		}
 		definition := tool.Definition()
 		if strings.TrimSpace(definition.Name) != definition.Name || definition.Name == "" {
-			return nil, nil, nil, errors.New("Extension Tool name is required")
+			return nil, nil, nil, nil, errors.New("Extension Tool name is required")
 		}
 		if _, duplicate := toolMap[definition.Name]; duplicate {
-			return nil, nil, nil, fmt.Errorf("Extension Tool %q is registered more than once", definition.Name)
+			return nil, nil, nil, nil, fmt.Errorf("Extension Tool %q is registered more than once", definition.Name)
 		}
-		if len(definition.InputSchema) > 0 && !json.Valid(definition.InputSchema) {
-			return nil, nil, nil, fmt.Errorf("Extension Tool %q has invalid input schema", definition.Name)
+		compiled, err := agent.CompileToolInputSchema(validator, definition.InputSchema)
+		if err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("Extension Tool %q input schema: %w", definition.Name, err)
 		}
 		capabilities := append([]string(nil), definition.Capabilities...)
 		for _, value := range capabilities {
 			if err := capability.ValidateName(capability.Name(value)); err != nil {
-				return nil, nil, nil, fmt.Errorf("Extension Tool %q: %w", definition.Name, err)
+				return nil, nil, nil, nil, fmt.Errorf("Extension Tool %q: %w", definition.Name, err)
 			}
 			capabilitySet[value] = struct{}{}
 		}
 		toolMap[definition.Name] = tool
+		validators[definition.Name] = compiled
 		_, dynamic := tool.(extension.DynamicCapabilities)
 		definitions = append(definitions, protocol.ToolDefinition{
 			Name:                definition.Name,
@@ -792,7 +817,7 @@ func validateTools(tools []agent.Tool) (map[string]agent.Tool, []protocol.ToolDe
 		capabilities = append(capabilities, name)
 	}
 	sort.Strings(capabilities)
-	return toolMap, definitions, capabilities, nil
+	return toolMap, validators, definitions, capabilities, nil
 }
 
 func validateHooks(hooks []string, handler HookHandler) (map[string]struct{}, error) {

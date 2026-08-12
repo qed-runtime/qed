@@ -154,6 +154,80 @@ func TestExtensionGenerateWritesAndChecksCatalog(t *testing.T) {
 	}
 }
 
+func TestExtensionScaffoldCreatesGoReferenceAndRejectsExistingDestination(t *testing.T) {
+	t.Parallel()
+
+	moduleRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(moduleRoot, "go.mod"), []byte("module example.com/scaffold\n\ngo 1.25.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(moduleRoot, "sample")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run(context.Background(), []string{
+		"extension", "scaffold", directory,
+		"--id", "example.sample",
+		"--extension-version", "1.2.3",
+	}, &stdout, &stderr)
+	if exitCode != 0 || stderr.Len() != 0 ||
+		!strings.Contains(stdout.String(), "Created Go Extension scaffold") ||
+		!strings.Contains(stdout.String(), "example.com/scaffold/sample/extension") {
+		t.Fatalf("scaffold exit/stdout/stderr = %d/%q/%q", exitCode, stdout.String(), stderr.String())
+	}
+	for _, relative := range []string{
+		".gitignore",
+		"README.md",
+		"extension/extension.go",
+		"main.go",
+		"main_test.go",
+		"qed-extension.json",
+	} {
+		if _, err := os.Stat(filepath.Join(directory, filepath.FromSlash(relative))); err != nil {
+			t.Fatalf("generated file %s: %v", relative, err)
+		}
+	}
+	manifestData, err := os.ReadFile(filepath.Join(directory, "qed-extension.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generatedManifest struct {
+		ID      string `json:"id"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(manifestData, &generatedManifest); err != nil {
+		t.Fatal(err)
+	}
+	if generatedManifest.ID != "example.sample" || generatedManifest.Version != "1.2.3" {
+		t.Fatalf("generated manifest = %#v", generatedManifest)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = run(context.Background(), []string{
+		"extension", "scaffold", directory,
+		"--id", "example.changed",
+	}, &stdout, &stderr)
+	if exitCode == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "destination already exists") {
+		t.Fatalf("second scaffold exit/stdout/stderr = %d/%q/%q", exitCode, stdout.String(), stderr.String())
+	}
+}
+
+func TestExtensionScaffoldHelp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run(context.Background(), []string{"extension", "scaffold", "--help"}, &stdout, &stderr)
+	if exitCode != 0 || stderr.Len() != 0 {
+		t.Fatalf("help exit/stdout/stderr = %d/%q/%q", exitCode, stdout.String(), stderr.String())
+	}
+	for _, expected := range []string{"qed extension scaffold", "DIRECTORY", "--id", "--extension-version"} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Errorf("help output does not contain %q:\n%s", expected, stdout.String())
+		}
+	}
+}
+
 func TestAuthLoginUsesNamedBrowserProfile(t *testing.T) {
 	t.Parallel()
 
@@ -629,8 +703,18 @@ func TestTUICommandLoadsConfiguredAgentAndSession(t *testing.T) {
 		}
 		received = request
 		return tuiapp.Outcome{
-			Result: agent.RunResult{RunID: "tui_evidence", AgentID: "main", Status: agent.RunStatusCompleted},
-			Events: []agent.Event{{RunID: "tui_evidence", AgentID: "main", Type: agent.EventRunCompleted}},
+			Result: agent.RunResult{RunID: "tui_evidence_2", AgentID: "main", Status: agent.RunStatusCompleted},
+			Events: []agent.Event{{RunID: "tui_evidence_2", AgentID: "main", Type: agent.EventRunCompleted}},
+			Runs: []tuiapp.RunOutcome{
+				{
+					Result: agent.RunResult{RunID: "tui_evidence_1", AgentID: "main", Status: agent.RunStatusCompleted},
+					Events: []agent.Event{{RunID: "tui_evidence_1", AgentID: "main", Type: agent.EventRunCompleted}},
+				},
+				{
+					Result: agent.RunResult{RunID: "tui_evidence_2", AgentID: "main", Status: agent.RunStatusCompleted},
+					Events: []agent.Event{{RunID: "tui_evidence_2", AgentID: "main", Type: agent.EventRunCompleted}},
+				},
+			},
 		}, nil
 	}
 	var stdout bytes.Buffer
@@ -648,8 +732,10 @@ func TestTUICommandLoadsConfiguredAgentAndSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Load(context.Background(), "tui_evidence"); err != nil {
-		t.Fatalf("load TUI Evidence = %v", err)
+	for _, runID := range []string{"tui_evidence_1", "tui_evidence_2"} {
+		if _, err := store.Load(context.Background(), runID); err != nil {
+			t.Fatalf("load TUI Evidence %q = %v", runID, err)
+		}
 	}
 }
 

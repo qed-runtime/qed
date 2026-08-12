@@ -110,46 +110,65 @@ func (stream *sliceModelStream) Close() error {
 	return nil
 }
 
-func consumeModelStream(ctx context.Context, stream ModelStream, onDelta func(string) error) (Message, error) {
+func consumeModelStream(
+	ctx context.Context,
+	stream ModelStream,
+	onStart func() error,
+	onDelta func(string) error,
+) (Message, bool, bool, error) {
 	if stream == nil {
-		return Message{}, errors.New("provider returned a nil stream")
+		return Message{}, false, true, errors.New("provider returned a nil stream")
 	}
 	defer stream.Close()
 	var completed *Message
+	started := false
+	start := func() error {
+		if started {
+			return nil
+		}
+		started = true
+		return onStart()
+	}
 	for {
 		if err := ctx.Err(); err != nil {
-			return Message{}, err
+			return Message{}, started, false, err
 		}
 		event, err := stream.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return Message{}, err
+			return Message{}, started, true, err
 		}
 		switch event.Type {
 		case ModelStreamTextDelta:
 			if event.TextDelta == "" {
 				continue
 			}
+			if err := start(); err != nil {
+				return Message{}, started, false, err
+			}
 			if err := onDelta(event.TextDelta); err != nil {
-				return Message{}, err
+				return Message{}, started, false, err
 			}
 		case ModelStreamMessageComplete:
 			if event.Message == nil {
-				return Message{}, errors.New("provider completed stream without a message")
+				return Message{}, started, true, errors.New("provider completed stream without a message")
 			}
 			if completed != nil {
-				return Message{}, errors.New("provider completed stream more than once")
+				return Message{}, started, true, errors.New("provider completed stream more than once")
+			}
+			if err := start(); err != nil {
+				return Message{}, started, false, err
 			}
 			message := cloneMessage(*event.Message)
 			completed = &message
 		default:
-			return Message{}, errors.New("provider returned an unsupported stream event")
+			return Message{}, started, true, errors.New("provider returned an unsupported stream event")
 		}
 	}
 	if completed == nil {
-		return Message{}, errors.New("provider stream ended without a completed message")
+		return Message{}, started, true, incompleteProviderStreamError{}
 	}
-	return *completed, nil
+	return *completed, started, false, nil
 }

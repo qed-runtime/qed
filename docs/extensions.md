@@ -25,6 +25,54 @@ Process separation provides lifecycle and crash isolation. It is not a security
 sandbox: an Extension and programs it starts retain their child-process account
 authority
 
+## Go Extension scaffold
+
+Create the initial Go layout inside an existing Go module
+
+```sh
+mkdir -p ./extensions
+qed extension scaffold \
+  ./extensions/example-extension \
+  --id example.extension
+```
+
+The nearest `go.mod` above the destination supplies the generated import path.
+The parent directory must already exist, while the destination itself must not
+exist. IDs must start with an ASCII letter or digit and then use letters,
+digits, dots, underscores, or hyphens, with a 256-byte limit. The implementation
+version uses the same starting rule and character set, additionally permits `+`
+after its first character, has a 128-byte limit, defaults to `0.1.0`, and can be
+selected with `--extension-version`. Generated import path
+elements follow the [Go Modules Reference](https://go.dev/ref/mod); hidden,
+underscore-prefixed, and `testdata` destination elements are rejected because
+they do not form a normal buildable package layout. Module discovery reads at
+most 1 MiB from a regular non-symlink `go.mod`
+
+The command creates this layout
+
+```text
+example-extension/
+  .gitignore
+  README.md
+  extension/
+    extension.go
+  main.go
+  main_test.go
+  qed-extension.json
+```
+
+`main.go` is the external process entrypoint. The nested `extension` package
+exports `Declaration` and `ServerOptions`, so the same implementation can be
+selected by an application-owned `extensions.lock` for self-exec. The generated
+test runs `contracttest.RunLifecycle` against the actual test process. Add
+component behavior tests when adding Tools, Hooks, or Commands
+
+Scaffolding creates only a new directory. It rejects an existing destination,
+including an empty directory, and rolls back files it created if generation
+fails. It does not run Go dependency commands or modify `go.mod`, `go.sum`, or
+`extensions.lock`. The owning module must add its QED dependency through its
+normal dependency workflow
+
 ## Protocol v1
 
 Each message is one UTF-8 JSON object prefixed by a 4-byte unsigned big-endian
@@ -63,6 +111,31 @@ whether it has invocation-specific capabilities. The Host asks for dynamic
 capabilities, evaluates the combined set through `capability.Policy`, obtains
 approval if required, and sends `invoke_tool` only after authorization
 
+Runtime validates Provider-supplied arguments before dynamic capability
+resolution, Policy, approval, or Tool execution. The Extension server validates
+the same arguments again at the RPC boundary, including direct protocol calls.
+A validation failure is an ordinary failed Tool result and can be corrected by
+the model on its next normal turn; it is not a Provider failure and does not
+activate Provider retry
+
+Every validator path limits schemas to 1 MiB, arguments to 8 MiB, and nesting
+to 64, and rejects duplicate JSON keys, trailing values, and malformed JSON.
+The dependency-free default adds a JSON Schema subset supporting every JSON
+`type` value, including `integer`, plus `properties`, `required`,
+`additionalProperties` as a boolean, `items` as one schema, `minItems`,
+`minimum`, `maximum`, and `enum`. `description` and `title` are accepted as
+annotations. The default limits compiled schema nodes and `required` names to
+4096 and `enum` entries to 256. Invalid schemas and unsupported keywords are
+rejected rather than ignored. An omitted schema defaults to an object schema
+
+Applications that need another dialect can implement
+`agent.ToolInputValidator` and `agent.CompiledToolInputValidator`. Injection is
+available through `agent.Options`, `qed.HostLoadOptions`,
+`extension.ToolOptions`, `host.ManagerOptions`, `coding.Options`, and
+`server.Options`. A custom host validator is process-local; a process-isolated
+Extension must configure its own `server.Options.ToolInputValidator`. Concrete
+Tool decoders remain required as defense in depth
+
 Tool definitions receive Extension ID and generation metadata before entering
 Runtime. Evidence records that origin plus hashes of arguments and output
 
@@ -77,6 +150,11 @@ set for the complete Run
 Hook handlers must honor context cancellation and should avoid long-running or
 irreversible side effects. A successful Hook can still be followed by a Session
 Store failure because Extension RPC and Store append are not one transaction
+
+Active-Run steering retains the `user.message.added` Event type and sets the
+optional `user_message_origin` field to `steering`. A Hook subscribed to that
+type receives both Run input and steering Messages, so strict protocol decoders
+must include the optional field
 
 ### Commands
 
@@ -328,6 +406,11 @@ The Coding Profile composes all three, while another Host repository selects
 only the packages it needs in its own lock. Each self-exec Extension still has
 an independent process, identity, generation, reload, and state namespace
 
+Testing remains a use of the generic `qed.process` command Tool rather than a
+special Test Extension. Permission decisions remain in Host Policy and the
+optional Approver rather than a Permission Extension. These ownership choices
+apply equally to first-party and third-party Extensions
+
 ## Host enforcement and lifecycle
 
 Initial startup
@@ -361,7 +444,53 @@ start and validate candidate
 
 Any failure before publication closes the candidate and retains the active
 generation. Process crash fails pending RPC requests without terminating the
-Host. Automatic restart is not implemented
+Host
+
+Automatic restart is opt-in for a directly constructed Manager
+
+```go
+manager, err := host.NewManager(ctx, host.ManagerOptions{
+    Process:       processOptions,
+    Policy:        policy,
+    StateStore:    stateStore,
+    RestartPolicy: host.DefaultRestartPolicy(),
+})
+```
+
+Coding Profiles and the development host use `DefaultRestartPolicy` when their
+policy pointer is nil. The default allows three replacement candidates, starts
+with 100 milliseconds of backoff, caps exponential backoff at 2 seconds, and
+resets the consecutive count after one generation survives for 30 seconds. A
+direct Manager's zero-value policy disables automatic restart. Set a Coding
+Profile or development host policy pointer to a zero `host.RestartPolicy` to
+disable it there
+
+Unexpected exit follows this order
+
+```text
+fail RPC requests pinned to the crashed generation
+  -> remove that generation from new lease selection
+  -> return ErrExtensionRestarting to new acquisition
+  -> wait for bounded backoff
+  -> start with the last successfully published ProcessOptions
+  -> revalidate identity and the locked manifest when configured
+  -> load and Restore the latest host-owned Snapshot when configured
+  -> HealthCheck and, when a State Store is configured, Snapshot and persist
+  -> publish the next generation for new Runs
+```
+
+Existing Run leases never migrate and QED never replays an interrupted Tool
+call because its side effect may already have occurred. Failed candidates do
+not consume generation numbers. Candidate startup failures and replacement
+generations that exit before the stability window consume the same attempt
+limit. Exhaustion returns `ErrExtensionCircuitOpen` to new acquisition. A
+successful explicit `Manager.Reload` validates a candidate and closes the
+circuit
+
+`Manager.RestartStatus` reports `disabled`, `ready`, `restarting`,
+`circuit_open`, or `closed`, the consecutive attempt count, current generation,
+and a payload-free last error type. Verbose lifecycle logs contain the same
+safe identifiers and counters without RPC payloads
 
 ## Host-owned Extension state
 
@@ -370,8 +499,11 @@ key. QED includes a concurrent memory store and a private atomic JSON store with
 a 1 MiB value limit
 
 Manager restores the `snapshot` key on initial startup, updates it during
-reload, and persists the current process during orderly close. Declarative
-Coding Profiles scope it to a digest of workspace and Profile ID, preventing
+reload, and persists the current process during orderly close. With automatic
+restart enabled, initial startup and every replacement also persist a baseline
+Snapshot before publication. A crash can therefore restore the latest
+host-owned Snapshot but not process state created after it. Declarative Coding
+Profiles scope state to a digest of workspace and Profile ID, preventing
 unrelated Profiles from sharing state accidentally
 
 Snapshot and Restore are for necessary process-local state. Durable Agent

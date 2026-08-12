@@ -16,7 +16,7 @@ Three reusable official Extensions contribute six Tools
 | `apply_patch` | `qed.workspace` | `filesystem.write` | Apply a unified diff when every path precondition matches |
 | `run_command` | `qed.process` | `process.execute` | Run one executable directly without shell evaluation |
 | `git_status` | `qed.git` | `git.read` | Return bounded porcelain v2 status |
-| `git_diff` | `qed.git` | `git.read` | Return a bounded worktree, staged, or base-relative patch |
+| `git_diff` | `qed.git` | `git.read` | Return a bounded worktree, staged, or base-relative patch, including bounded untracked content for worktree and base |
 
 Deleting through `apply_patch` additionally requires `filesystem.delete`.
 Official Tool arguments use strict bounded decoders that reject unknown fields,
@@ -29,6 +29,13 @@ schema and Coding Profile instructions recommend the prefixed canonical form,
 require `@@` unified diff hunks rather than `*** Begin Patch` markers, and tell
 the model to copy the complete `sha256:...` value returned by `read_file`
 without modification
+
+Testing does not require a dedicated Test Extension. A Profile exposes the
+generic `run_command` Tool from `qed.process`, while the Host Policy limits the
+allowed executable, arguments, directory, and capabilities for that use case.
+Permission decisions are not model-facing Extension components: the Host
+Policy and optional Approver decide before dispatch, so an Extension never
+authorizes its own call
 
 The QED `extensions.lock` selects these three for self-exec. Additional linked
 or external Extensions attached to the same Profile may contribute Tools and
@@ -222,6 +229,15 @@ set selected by the next Run
 - Git Tools require workspace root to equal repository root
 - Git optional locks, pagers, external diff drivers, text conversion, and global configuration are disabled
 
+`git_diff` treats each requested path literally. The `worktree` and `base`
+scopes append new-file patches for untracked regular files that pass standard
+Git ignore rules and the requested path filter. The `staged` scope remains
+index-only. Tracked and untracked patches share one `MaxOutputBytes` limit,
+untracked file enumeration has a fixed count limit, and the digest covers the
+exact combined patch returned to the caller. During untracked discovery,
+symlinks and non-regular files are not read, binary data is represented by
+Git's binary marker, and any skipped or incomplete discovery sets `truncated`
+
 Workspace locks coordinate `search_text`, `read_file`, and `apply_patch` within
 one `qed.workspace` process. The `qed.process` and `qed.git` processes do not
 share that lock. Old and new processes can also overlap during reload, and
@@ -343,8 +359,8 @@ another temporary directory
 
 ## Current limitations
 
-- Extension crash is isolated but is not automatically restarted
-- `git_diff` does not include untracked file content
+- Extension restart never replays the interrupted Tool call and restores only
+  the latest host-owned Snapshot
 - official Tool enforcement uses concrete strict decoders rather than a general JSON Schema engine
 - no standard network, Git write, GitHub, host-wide filesystem, or shell-expansion Tool is included
 - multiple Extension processes and unrelated host processes require digest preconditions rather than one global filesystem lock

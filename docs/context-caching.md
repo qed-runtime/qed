@@ -43,6 +43,18 @@ The default compiler emits `instructions`, `tool-abi`, one append-only Segment
 per message, and optional volatile `request-metadata`. Each Segment contains a
 domain-separated SHA-256 digest and canonical byte count without prompt text
 
+Steering never mutates or recompiles an in-flight Provider request or retry.
+Runtime first completes the assistant response and its entire Tool batch, then
+emits each queued steering Message as `user.message.added` before the next
+compile. An end-turn response follows the same boundary instead of completing
+the Run when steering is already queued. Queue acceptance without that Event
+does not change the Session, Checkpoint, Prefix Manifest, or Cache Plan
+
+A terminal follow-up is a new Run whose configured same-Session replay supplies
+the previous append-only messages. Its new input becomes another raw tail
+Segment; no previous Segment is rewritten. Without a Session Store, the caller
+must provide prior context explicitly
+
 ## Evidence-preserving compression
 
 `agent.CompactingContextCompiler` adds a bounded model view above the immutable

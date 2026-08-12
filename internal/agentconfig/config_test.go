@@ -3,10 +3,13 @@ package agentconfig_test
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/qed-runtime/qed/agent"
 	"github.com/qed-runtime/qed/extension/selfexec"
@@ -43,7 +46,10 @@ func TestLoadBuildsProviderProfilesAndAgentGraph(t *testing.T) {
 			"max_provider_calls": 24
 		},
 		"providers": {
-			"primary": {"protocol": "echo"},
+			"primary": {
+				"protocol": "echo",
+				"rate_limit": {"max_concurrency": 2}
+			},
 			"review": {"protocol": "echo"}
 		},
 		"agents": {
@@ -54,6 +60,11 @@ func TestLoadBuildsProviderProfilesAndAgentGraph(t *testing.T) {
 			"coordinator": {
 				"provider": "primary",
 				"instructions": "Coordinate the answer",
+				"provider_retry": {
+					"max_attempts": 2,
+					"initial_backoff": "1ms",
+					"max_backoff": "2ms"
+				},
 				"delegations": [{
 					"name": "consult_specialist",
 					"description": "Ask the specialist",
@@ -92,6 +103,131 @@ func TestLoadBuildsProviderProfilesAndAgentGraph(t *testing.T) {
 	}
 	if result.AgentID != "coordinator" || result.Messages[len(result.Messages)-1].Text != "hello" {
 		t.Errorf("Run result = %#v", result)
+	}
+}
+
+func TestLoadSharesRateLimiterAcrossAgentsUsingOneProviderProfile(t *testing.T) {
+	t.Parallel()
+
+	providerStarted := make(chan struct{}, 2)
+	releaseProvider := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/responses" {
+			t.Errorf("request path = %q, want /responses", request.URL.Path)
+		}
+		providerStarted <- struct{}{}
+		select {
+		case <-request.Context().Done():
+			return
+		case <-releaseProvider:
+		}
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(writer, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"rate-test\",\"model\":\"test-model\",\"status\":\"completed\",\"output\":[]}}\n\n")
+	}))
+	defer server.Close()
+	defer close(releaseProvider)
+
+	path := writeConfig(t, fmt.Sprintf(`{
+		"version": 1,
+		"providers": {
+			"shared": {
+				"protocol": "openai-responses",
+				"base_url": %q,
+				"model": "test-model",
+				"token_env": "TEST_TOKEN",
+				"rate_limit": {"max_concurrency": 1}
+			}
+		},
+		"agents": {
+			"first": {"provider": "shared"},
+			"second": {"provider": "shared"}
+		}
+	}`, server.URL))
+	configuration, err := agentconfig.Load(path, agentconfig.LoadOptions{
+		LookupEnv: func(name string) (string, bool) {
+			return "test-token", name == "TEST_TOKEN"
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer configuration.Close()
+
+	type runOutcome struct {
+		events []agent.Event
+		result agent.RunResult
+		err    error
+	}
+	start := func(agentID string) (<-chan runOutcome, <-chan struct{}) {
+		handle, startErr := configuration.Registry.Start(context.Background(), agent.RunRequest{
+			AgentID: agentID,
+			Input:   []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+		})
+		if startErr != nil {
+			t.Fatal(startErr)
+		}
+		outcome := make(chan runOutcome, 1)
+		waiting := make(chan struct{}, 1)
+		go func() {
+			var events []agent.Event
+			for event := range handle.Events() {
+				events = append(events, event)
+				if event.Type == agent.EventProviderRateLimitWait {
+					select {
+					case waiting <- struct{}{}:
+					default:
+					}
+				}
+			}
+			result, runErr := handle.Wait()
+			outcome <- runOutcome{events: events, result: result, err: runErr}
+		}()
+		return outcome, waiting
+	}
+
+	first, _ := start("first")
+	select {
+	case <-providerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first Provider request did not start")
+	}
+	second, secondWaiting := start("second")
+	select {
+	case <-secondWaiting:
+	case <-providerStarted:
+		t.Fatal("second Provider request reached the server before waiting")
+	case <-time.After(time.Second):
+		t.Fatal("second Agent did not report Provider capacity wait")
+	}
+
+	releaseProvider <- struct{}{}
+	select {
+	case <-providerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("queued Provider request did not start")
+	}
+	releaseProvider <- struct{}{}
+
+	for index, outcomeChannel := range []<-chan runOutcome{first, second} {
+		outcome := <-outcomeChannel
+		if outcome.err != nil || outcome.result.Status != agent.RunStatusCompleted {
+			t.Fatalf("Run %d = %#v, %v", index+1, outcome.result, outcome.err)
+		}
+		if outcome.result.ProviderCalls != 1 {
+			t.Fatalf("Run %d Provider calls = %d, want 1", index+1, outcome.result.ProviderCalls)
+		}
+		if index == 1 {
+			var wait *agent.ProviderRateLimitWaitInfo
+			for _, event := range outcome.events {
+				if event.Type == agent.EventProviderRateLimitWait {
+					wait = event.ProviderRateLimitWait
+					break
+				}
+			}
+			if wait == nil || wait.Reason != agent.ProviderRateLimitWaitConcurrency || wait.MaxConcurrency != 1 {
+				t.Fatalf("second Run Provider wait = %#v", wait)
+			}
+		}
 	}
 }
 
@@ -207,7 +343,7 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 				},
 				"agents": {"main": {"provider": "primary"}}
 			}`,
-			want: `accepts only protocol, model, auth_profile, and pricing`,
+			want: `accepts only protocol, model, auth_profile, pricing, and rate_limit`,
 		},
 		{
 			name: "delegation cycle",
@@ -235,6 +371,47 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 				"agents": {"main": {"provider": "local"}}
 			}`,
 			want: "unsupported configuration version 2, want 1",
+		},
+		{
+			name: "invalid Provider retry duration",
+			document: `{
+				"version": 1,
+				"providers": {"local": {"protocol": "echo"}},
+				"agents": {"main": {
+					"provider": "local",
+					"provider_retry": {"initial_backoff": "soon"}
+				}}
+			}`,
+			want: `initial_backoff "soon" must be a positive Go duration`,
+		},
+		{
+			name: "Provider retry maximum below initial",
+			document: `{
+				"version": 1,
+				"providers": {"local": {"protocol": "echo"}},
+				"agents": {"main": {
+					"provider": "local",
+					"provider_retry": {
+						"initial_backoff": "2s",
+						"max_backoff": "1s"
+					}
+				}}
+			}`,
+			want: "Provider retry max backoff must not be shorter than initial backoff",
+		},
+		{
+			name: "negative Provider concurrency",
+			document: `{
+				"version": 1,
+				"providers": {
+					"local": {
+						"protocol": "echo",
+						"rate_limit": {"max_concurrency": -1}
+					}
+				},
+				"agents": {"main": {"provider": "local"}}
+			}`,
+			want: "Provider rate limit max concurrency must be between 1 and 1024 when set",
 		},
 		{
 			name: "context without evidence store",

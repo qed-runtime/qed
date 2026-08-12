@@ -20,7 +20,8 @@ The format is used by `qed run`, `qed tui`, and `qed session resume`
     "primary": {
       "protocol": "openai-responses",
       "model": "<openai-model-id>",
-      "token_env": "PRIMARY_API_TOKEN"
+      "token_env": "PRIMARY_API_TOKEN",
+      "rate_limit": {"max_concurrency": 4}
     },
     "review": {
       "protocol": "anthropic",
@@ -67,6 +68,11 @@ The format is used by `qed run`, `qed tui`, and `qed session resume`
       "provider": "primary",
       "profile": "coding",
       "instructions": "Use specialists when useful and return the final answer",
+      "provider_retry": {
+        "max_attempts": 3,
+        "initial_backoff": "1s",
+        "max_backoff": "8s"
+      },
       "context": {
         "max_input_bytes": 65536,
         "recent_messages": 12
@@ -153,8 +159,10 @@ different endpoints of the same dialect
 | `api_version` | no | Anthropic API version override only |
 | `pricing` | no | Host-supplied rates for forecasting and usage-cost estimates |
 | `cache_capabilities` | no | Trusted override for the configured endpoint and model |
+| `rate_limit` | no | QED-side outbound concurrency policy for this profile |
 
-`echo` accepts no endpoint, model, credential, or API options
+`echo` accepts no endpoint, model, credential, or API options. It may use the
+QED-side `rate_limit` policy for deterministic concurrency tests
 
 A custom endpoint may omit `token_env` for an unauthenticated local service.
 Configuration never falls back to `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
@@ -166,9 +174,9 @@ state, preventing state from one endpoint/profile from being reused by another
 
 `openai-codex` reads a separately stored ChatGPT OAuth profile and uses the
 fixed ChatGPT Codex backend. It accepts `protocol`, `model`, `auth_profile`, and
-optional `pricing`; `base_url`, `token_env`, `max_output_tokens`, `api_version`,
-and `cache_capabilities` are rejected. The named profile must already exist
-when configuration is loaded
+optional `pricing` and `rate_limit`; `base_url`, `token_env`,
+`max_output_tokens`, `api_version`, and `cache_capabilities` are rejected. The
+named profile must already exist when configuration is loaded
 
 ```json
 {
@@ -194,6 +202,29 @@ qed run --config qed.json --prompt "Reply with a short greeting"
 
 See [ChatGPT subscription authentication](chatgpt-auth.md) for credential
 storage, refresh, and protocol limitations
+
+### Outbound Provider rate control
+
+`rate_limit` is configured per Provider profile
+
+| Field | Required | Meaning and default |
+| --- | --- | --- |
+| `max_concurrency` | no | Maximum active Provider streams; `0` or omission selects `4`, otherwise range `1` through `1024` |
+
+Every Agent that references the same profile shares one limiter, including
+concurrent top-level `Host` Runs and parallel subagents. Different profiles do
+not share capacity or cooldown state, even when they target the same account or
+endpoint, because QED cannot infer an upstream shared-limit bucket safely
+
+A `rate_limited` response updates the profile-wide cooldown with the effective
+retry delay. `Retry-After` remains the minimum; fallback exponential backoff
+and a small bounded per-Run jitter prevent concentrated retries. A queued Run
+honors cancellation and Deadline and does not consume a Provider call budget
+until it acquires capacity and is ready to start an actual attempt
+
+`max_concurrency` is a local protective bound, not an RPM or token-rate
+guarantee. The Runtime-local call limit and the orchestration-wide Agent Run
+and Provider call limits remain independent hard bounds
 
 ## Extension definitions
 
@@ -289,6 +320,11 @@ variables for either environment
 
 See [Extension processes](extensions.md) for the manifest and lifecycle
 
+Declarative Coding Profiles use `host.DefaultRestartPolicy` for every selected
+Extension. Restart policy is not a version 1 JSON field. Programmatic Coding
+Profiles can provide `Options.ExtensionRestartPolicy`; nil selects the default,
+while a pointer to the zero policy disables automatic restart
+
 ## Execution Profiles
 
 Version 1 supports `kind: "coding"`
@@ -322,6 +358,7 @@ selected `PATH` and does not fall back to the Host environment
 | `instructions` | no | Base instructions for this Agent |
 | `max_provider_calls` | no | Runtime-local Provider call limit |
 | `max_tool_calls` | no | Runtime-local Tool call limit |
+| `provider_retry` | no | Bounded retry policy for transient Provider failures |
 | `context` | no | Evidence-preserving context compression policy |
 | `cache` | no | Provider-neutral prompt-cache policy |
 | `delegations` | no | Subagent Tools exposed to this Agent |
@@ -344,6 +381,29 @@ prompt, not the parent's full conversation, Session ID, or Metadata
 
 Shared limits default to 16 Agent Runs, depth 4, and 64 Provider calls. Parent,
 candidate, and judge Runs count against the same top-level budget
+
+## Provider retry
+
+Provider retry is configured per Agent
+
+| Field | Required | Meaning and default |
+| --- | --- | --- |
+| `max_attempts` | no | Total attempts for one logical model request, default `3`; use `1` to disable retry |
+| `initial_backoff` | no | Positive Go duration used after the first failure, default `1s` |
+| `max_backoff` | no | Positive Go duration capping exponential fallback delay, default `8s` |
+
+QED retries only `retryable` and `rate_limited` failures. A valid
+`Retry-After` response header is a minimum delay and may exceed `max_backoff`.
+QED adds a small bounded per-Run jitter to the effective delay. All attempts
+consume the Runtime-local and shared Provider call budgets and respect Run
+cancellation and Deadline
+
+Automatic retry is limited to failures before the first observable
+`ModelStream` item. QED does not retry after a text delta or completed message,
+so retry cannot duplicate published output or Tool side effects. The ordered
+Event stream emits `provider.retry.scheduled` before each delay. See
+[Provider errors and retry](providers.md#provider-errors-and-retry) for the
+public error codes and Event fields
 
 ## Context compression and prompt caching
 
@@ -449,6 +509,19 @@ Events and reconstructs messages, pending waits, and pending Tool calls. Use
 accepts `--approval prompt|approve|deny`; other wait kinds require
 `--response-json`
 
+Active-Run steering keeps the existing `user.message.added` Event type and sets
+`Event.UserMessageOrigin` to `steering`. Queue acceptance is process-local; the
+Event is the durable Session boundary. Steering that has not emitted that Event
+may be discarded by cancellation, deadline expiry, or terminal Run
+failure
+
+A follow-up is a new Run started with the same Session ID only after the
+previous handle reaches a terminal result. It replays the Session but receives
+a new Run ID and new Runtime-local Provider and Tool limits. Session Stores do
+not persist `agent.Budget`; reuse the same `*agent.Budget` explicitly when one
+budget must span follow-up Runs. Without a configured Session Store, Session ID
+does not retain messages and the caller must supply prior context
+
 ## Evidence Store
 
 ```json
@@ -457,10 +530,11 @@ accepts `--approval prompt|approve|deny`; other wait kinds require
 }
 ```
 
-Configured CLI and TUI Runs save one versioned Bundle after terminal completion,
-including public Events, usage, config/workspace digests, and host-owned Tool
-trace records. The same Store keeps content-addressed objects used by context
-compression. Inspect or export Bundles with either command family
+Configured CLI Runs and every completed Run in a configured multi-turn TUI chat
+save one versioned Bundle after terminal completion, including public Events,
+usage, config/workspace digests, and host-owned Tool trace records. The same
+Store keeps content-addressed objects used by context compression. Inspect or
+export Bundles with either command family
 
 Tool trace payloads are represented by digests, but public Events retain their
 normal observable payload. A Bundle may therefore contain prompts, assistant

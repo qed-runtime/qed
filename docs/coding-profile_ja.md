@@ -14,13 +14,17 @@ bounded project context、1つのcapability Policy、host所有Evidence、1つ�
 | `apply_patch` | `qed.workspace` | `filesystem.write` | すべてのpath preconditionが一致する場合にunified diffを適用 |
 | `run_command` | `qed.process` | `process.execute` | shell評価なしで1つのexecutableを直接実行 |
 | `git_status` | `qed.git` | `git.read` | bounded porcelain v2 statusを返却 |
-| `git_diff` | `qed.git` | `git.read` | boundedなworktree、staged、base-relative patchを返却 |
+| `git_diff` | `qed.git` | `git.read` | boundedなworktree、staged、base-relative patchを返却し、worktreeとbaseではboundedなuntracked contentも追加 |
 
 `apply_patch`での削除には`filesystem.delete`も必要です
 公式Tool argumentはunknown field、duplicate key、trailing value、invalid type、Tool固有limit violationを拒否するstrictかつboundedなdecoderを使います
 
 `apply_patch`は`--- a/path`と`+++ b/path`、および同じ意味のworkspace-relativeな`--- path`と`+++ path` headerを受理します
 model-facing Tool schemaとCoding Profile instructionはprefix付きcanonical形式を推奨し、`*** Begin Patch` markerではなく`@@` unified diff hunkを要求し、`read_file`が返した完全な`sha256:...` valueを変更せず使うようmodelへ伝えます
+
+test実行に専用Test Extensionは必要ありません
+Profileは`qed.process`の汎用`run_command` Toolを公開し、Host Policyが用途に応じて許可するexecutable、argument、directory、capabilityを制限します
+permission判断はmodel-facing Extension componentではなく、dispatch前にHost Policyとoptional Approverが所有するため、Extensionが自身のcallをauthorizeすることはありません
 
 QEDの`extensions.lock`はこの3つをself-exec向けに選択します
 同じProfileへ接続した追加の組み込みまたは外部ExtensionはToolとHookを提供できます
@@ -210,6 +214,12 @@ existing Runはold generationを保持します
 - Git Toolはworkspace rootとrepository rootの一致を要求
 - Git optional lock、pager、external diff driver、text conversion、global configurationを無効化
 
+`git_diff`は要求された各pathをliteralとして扱います
+`worktree`と`base` scopeはstandard Git ignore ruleと指定path filterを通過したuntracked regular fileをnew-file patchとして追加します
+`staged` scopeはindexだけを対象にします
+tracked patchとuntracked patchは1つの`MaxOutputBytes`上限を共有し、untracked file列挙には固定件数上限を設け、digestは返却した合成patch全体を対象にします
+untracked discovery中はsymlinkとnon-regular fileを読まず、binary dataはGitのbinary markerで表現し、skipまたは不完全な列挙があれば`truncated`を設定します
+
 Workspace lockは1つの`qed.workspace` process内で`search_text`、`read_file`、`apply_patch`を調整します
 `qed.process`と`qed.git` processはこのlockを共有しません
 reload中はoldとnew processも重複可能でlockを共有しません
@@ -300,8 +310,8 @@ testはGit `HEAD`が変わらないこと、正確な最終worktree state、別�
 
 ## 現在の制限
 
-- Extension crashは隔離されますが自動restartされません
-- `git_diff`はuntracked file内容を含みません
+- Extension restartは中断したTool callを再実行せず、最新のhost所有Snapshotだけを
+  restoreします
 - 公式Tool enforcementは汎用JSON Schema engineではなく具象strict decoderを使います
 - 標準network、Git write、GitHub、host-wide filesystem、shell-expansion Toolは含まれません
 - 複数Extension processと無関係なhost processには1つのglobal filesystem lockではなくdigest preconditionで対応します

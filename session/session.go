@@ -489,6 +489,18 @@ func cloneEvent(event agent.Event) agent.Event {
 		event.PrefixManifest = &manifest
 	}
 	event.CachePlan = cloneCachePlan(event.CachePlan)
+	if event.ProviderError != nil {
+		providerError := *event.ProviderError
+		event.ProviderError = &providerError
+	}
+	if event.ProviderRetry != nil {
+		providerRetry := *event.ProviderRetry
+		event.ProviderRetry = &providerRetry
+	}
+	if event.ProviderRateLimitWait != nil {
+		providerWait := *event.ProviderRateLimitWait
+		event.ProviderRateLimitWait = &providerWait
+	}
 	event.ContextCheckpoint = cloneContextCheckpoint(event.ContextCheckpoint)
 	if event.ContextCompaction != nil {
 		report := *event.ContextCompaction

@@ -303,6 +303,326 @@ func TestManagerReloadPinsRunGenerationAndRollsBack(t *testing.T) {
 	}
 }
 
+func TestManagerAutomaticallyRestartsCrashedGeneration(t *testing.T) {
+	t.Parallel()
+
+	policy, err := capability.NewStaticPolicy(capability.StaticPolicyOptions{
+		Allow: []capability.Name{"test.execute"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "crashed-once")
+	stateStore := extensionpkg.NewMemoryStateStore()
+	if err := stateStore.Set(
+		context.Background(),
+		testExtensionID,
+		"workspace:restart",
+		"snapshot",
+		[]byte(`{"value":"persisted"}`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	options := processOptions(t, "crash-once", "v1", map[string]string{"MARKER": marker})
+	options.ExpectedVersion = "v1"
+	options.ExpectedManifest = expectedTestManifest("v1")
+	manager, err := host.NewManager(context.Background(), host.ManagerOptions{
+		Process:    options,
+		Policy:     policy,
+		StateStore: stateStore,
+		StateScope: "workspace:restart",
+		RestartPolicy: host.RestartPolicy{
+			MaxAttempts:    3,
+			InitialBackoff: 100 * time.Millisecond,
+			MaxBackoff:     100 * time.Millisecond,
+			StableAfter:    time.Minute,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	defer closeProcessManager(t, manager)
+
+	oldTools, releaseOld, err := manager.AcquireTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseOld()
+	if generation := oldTools[0].Definition().ExtensionGeneration; generation != 1 {
+		t.Fatalf("old Tool generation = %d, want 1", generation)
+	}
+	_, err = oldTools[0].Execute(context.Background(), agent.ToolCall{
+		ID: "crash-old", Name: "identity", Arguments: json.RawMessage(`{}`),
+	})
+	if !errors.Is(err, host.ErrProcessExited) {
+		t.Fatalf("old Execute() error = %v, want ErrProcessExited", err)
+	}
+	if _, _, err := manager.AcquireTools(context.Background()); !errors.Is(err, host.ErrExtensionRestarting) {
+		t.Fatalf("AcquireTools() during restart error = %v, want ErrExtensionRestarting", err)
+	}
+
+	status := waitForRestartGeneration(t, manager, 2)
+	if status.Generation != 2 || status.Attempts != 1 {
+		t.Fatalf("RestartStatus() = %#v, want generation 2 after one attempt", status)
+	}
+	newTools, releaseNew, err := manager.AcquireTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseNew()
+	if generation := newTools[0].Definition().ExtensionGeneration; generation != 2 {
+		t.Fatalf("new Tool generation = %d, want 2", generation)
+	}
+	result, err := newTools[0].Execute(context.Background(), agent.ToolCall{
+		ID: "after-restart", Name: "identity", Arguments: json.RawMessage(`{}`),
+	})
+	if err != nil || result.Output != "v1:persisted" {
+		t.Fatalf("new Execute() = %#v, %v", result, err)
+	}
+	_, err = oldTools[0].Execute(context.Background(), agent.ToolCall{
+		ID: "old-does-not-migrate", Name: "identity", Arguments: json.RawMessage(`{}`),
+	})
+	if !errors.Is(err, host.ErrProcessExited) {
+		t.Fatalf("old Execute() after restart error = %v, want ErrProcessExited", err)
+	}
+}
+
+func TestManagerOpensRestartCircuitAndExplicitReloadRecovers(t *testing.T) {
+	t.Parallel()
+
+	policy, err := capability.NewStaticPolicy(capability.StaticPolicyOptions{
+		Allow: []capability.Name{"test.execute"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "manifest-changed")
+	options := processOptions(t, "crash-then-manifest-mismatch", "v1", map[string]string{"MARKER": marker})
+	options.ExpectedVersion = "v1"
+	options.ExpectedManifest = expectedTestManifest("v1")
+	manager, err := host.NewManager(context.Background(), host.ManagerOptions{
+		Process: options,
+		Policy:  policy,
+		RestartPolicy: host.RestartPolicy{
+			MaxAttempts:    2,
+			InitialBackoff: time.Millisecond,
+			MaxBackoff:     time.Millisecond,
+			StableAfter:    time.Minute,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	defer closeProcessManager(t, manager)
+
+	tools, release, err := manager.AcquireTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tools[0].Execute(context.Background(), agent.ToolCall{
+		ID: "trigger-circuit", Name: "identity", Arguments: json.RawMessage(`{}`),
+	})
+	release()
+	if !errors.Is(err, host.ErrProcessExited) {
+		t.Fatalf("Execute() error = %v, want ErrProcessExited", err)
+	}
+
+	status := waitForRestartState(t, manager, host.RestartStateCircuitOpen)
+	if status.Attempts != 2 || status.Generation != 0 || status.LastErrorType == "" {
+		t.Fatalf("RestartStatus() = %#v, want exhausted circuit", status)
+	}
+	if _, _, err := manager.AcquireTools(context.Background()); !errors.Is(err, host.ErrExtensionCircuitOpen) {
+		t.Fatalf("AcquireTools() circuit error = %v, want ErrExtensionCircuitOpen", err)
+	}
+
+	recovery := processOptions(t, "normal", "v2", nil)
+	recovery.ExpectedVersion = "v2"
+	recovery.ExpectedManifest = expectedTestManifest("v2")
+	generation, err := manager.Reload(context.Background(), recovery)
+	if err != nil || generation != 2 {
+		t.Fatalf("Reload() recovery = %d, %v", generation, err)
+	}
+	status = manager.RestartStatus()
+	if status.State != host.RestartStateReady || status.Attempts != 0 || status.Generation != 2 {
+		t.Fatalf("RestartStatus() after recovery = %#v", status)
+	}
+	tools, release, err = manager.AcquireTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	result, err := tools[0].Execute(context.Background(), agent.ToolCall{
+		ID: "after-recovery", Name: "identity", Arguments: json.RawMessage(`{}`),
+	})
+	if err != nil || result.Output != "v2" {
+		t.Fatalf("Execute() after recovery = %#v, %v", result, err)
+	}
+}
+
+func TestManagerCountsRepeatedCrashesAcrossPublishedGenerations(t *testing.T) {
+	t.Parallel()
+
+	policy, err := capability.NewStaticPolicy(capability.StaticPolicyOptions{
+		Allow: []capability.Name{"test.execute"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := host.NewManager(context.Background(), host.ManagerOptions{
+		Process: processOptions(t, "crash", "v1", nil),
+		Policy:  policy,
+		RestartPolicy: host.RestartPolicy{
+			MaxAttempts:    2,
+			InitialBackoff: time.Millisecond,
+			MaxBackoff:     time.Millisecond,
+			StableAfter:    time.Minute,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeProcessManager(t, manager)
+
+	crashCurrentGeneration(t, manager, 1)
+	status := waitForRestartGeneration(t, manager, 2)
+	if status.Attempts != 1 {
+		t.Fatalf("generation 2 RestartStatus() = %#v", status)
+	}
+	crashCurrentGeneration(t, manager, 2)
+	status = waitForRestartGeneration(t, manager, 3)
+	if status.Attempts != 2 {
+		t.Fatalf("generation 3 RestartStatus() = %#v", status)
+	}
+	crashCurrentGeneration(t, manager, 3)
+	status = waitForRestartState(t, manager, host.RestartStateCircuitOpen)
+	if status.Attempts != 2 || status.Generation != 0 {
+		t.Fatalf("crash loop RestartStatus() = %#v", status)
+	}
+}
+
+func TestManagerResetsAttemptsAfterStableGeneration(t *testing.T) {
+	t.Parallel()
+
+	policy, err := capability.NewStaticPolicy(capability.StaticPolicyOptions{
+		Allow: []capability.Name{"test.execute"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "stable-restart")
+	manager, err := host.NewManager(context.Background(), host.ManagerOptions{
+		Process: processOptions(t, "crash-once", "v1", map[string]string{"MARKER": marker}),
+		Policy:  policy,
+		RestartPolicy: host.RestartPolicy{
+			MaxAttempts:    2,
+			InitialBackoff: time.Millisecond,
+			MaxBackoff:     time.Millisecond,
+			StableAfter:    50 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeProcessManager(t, manager)
+
+	crashCurrentGeneration(t, manager, 1)
+	if status := waitForRestartGeneration(t, manager, 2); status.Attempts != 1 {
+		t.Fatalf("RestartStatus() before stable window = %#v", status)
+	}
+	status := waitForRestartAttempts(t, manager, 0)
+	if status.State != host.RestartStateReady || status.Generation != 2 {
+		t.Fatalf("RestartStatus() after stable window = %#v", status)
+	}
+}
+
+func TestManagerCloseCancelsRestartBackoff(t *testing.T) {
+	t.Parallel()
+
+	policy, err := capability.NewStaticPolicy(capability.StaticPolicyOptions{
+		Allow: []capability.Name{"test.execute"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := host.NewManager(context.Background(), host.ManagerOptions{
+		Process: processOptions(t, "crash", "v1", nil),
+		Policy:  policy,
+		RestartPolicy: host.RestartPolicy{
+			MaxAttempts:    3,
+			InitialBackoff: time.Minute,
+			MaxBackoff:     time.Minute,
+			StableAfter:    time.Minute,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	crashCurrentGeneration(t, manager, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.CloseContext(ctx); err != nil {
+		t.Fatalf("CloseContext() error = %v", err)
+	}
+	if status := manager.RestartStatus(); status.State != host.RestartStateClosed {
+		t.Fatalf("RestartStatus() after Close = %#v", status)
+	}
+}
+
+func TestManagerRejectsInvalidRestartPolicy(t *testing.T) {
+	t.Parallel()
+
+	policy, err := capability.NewStaticPolicy(capability.StaticPolicyOptions{
+		Allow: []capability.Name{"test.execute"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []host.RestartPolicy{
+		{MaxAttempts: -1},
+		{MaxAttempts: 1, InitialBackoff: 2 * time.Second, MaxBackoff: time.Second},
+		{MaxAttempts: 1, StableAfter: -time.Second},
+	}
+	for _, restartPolicy := range tests {
+		_, err := host.NewManager(context.Background(), host.ManagerOptions{
+			Process:       processOptions(t, "normal", "v1", nil),
+			Policy:        policy,
+			RestartPolicy: restartPolicy,
+		})
+		if err == nil {
+			t.Fatalf("NewManager() with RestartPolicy %#v succeeded", restartPolicy)
+		}
+	}
+}
+
+func TestManagerZeroRestartPolicyStaysDisabled(t *testing.T) {
+	t.Parallel()
+
+	policy, err := capability.NewStaticPolicy(capability.StaticPolicyOptions{
+		Allow: []capability.Name{"test.execute"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := host.NewManager(context.Background(), host.ManagerOptions{
+		Process: processOptions(t, "crash", "v1", nil),
+		Policy:  policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeProcessManager(t, manager)
+
+	crashCurrentGeneration(t, manager, 1)
+	status := manager.RestartStatus()
+	if status.State != host.RestartStateDisabled || status.Generation != 1 || status.MaxAttempts != 0 {
+		t.Fatalf("RestartStatus() = %#v, want disabled generation 1", status)
+	}
+	if _, _, err := manager.AcquireTools(context.Background()); !errors.Is(err, host.ErrProcessExited) {
+		t.Fatalf("AcquireTools() after disabled crash error = %v, want ErrProcessExited", err)
+	}
+}
+
 func TestGenerationSetAcquiresAndReleasesEveryExtension(t *testing.T) {
 	t.Parallel()
 
@@ -457,6 +777,15 @@ func processOptions(t *testing.T, mode, version string, initializeEnvironment ma
 		Initialize: protocol.InitializeRequest{
 			Environment: initializeEnvironment,
 		},
+	}
+}
+
+func expectedTestManifest(version string) *protocol.Manifest {
+	return &protocol.Manifest{
+		ID:              testExtensionID,
+		Version:         version,
+		ProtocolVersion: protocol.Version,
+		Capabilities:    []string{"test.execute"},
 	}
 }
 
@@ -636,11 +965,15 @@ type testService struct {
 }
 
 func (service *testService) Definition() agent.ToolDefinition {
+	capabilities := []string{"test.execute"}
+	if service.mode == "crash-then-manifest-mismatch" && fileExists(service.marker) {
+		capabilities = []string{"test.changed"}
+	}
 	return agent.ToolDefinition{
 		Name:         "identity",
 		Description:  "Return the test Extension generation",
-		InputSchema:  json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
-		Capabilities: []string{"test.execute"},
+		InputSchema:  json.RawMessage(`{"type":"object","properties":{"secret":{"type":"string"}},"additionalProperties":false}`),
+		Capabilities: capabilities,
 	}
 }
 
@@ -658,6 +991,16 @@ func (service *testService) Execute(ctx context.Context, _ agent.ToolCall) (agen
 	switch service.mode {
 	case "crash":
 		os.Exit(23)
+	case "crash-once", "crash-then-manifest-mismatch":
+		if service.marker == "" {
+			return agent.ToolResult{}, errors.New("crash marker is required")
+		}
+		if !fileExists(service.marker) {
+			if err := os.WriteFile(service.marker, []byte("crashed"), 0o600); err != nil {
+				return agent.ToolResult{}, err
+			}
+			os.Exit(23)
+		}
 	case "blocking":
 		if service.marker != "" {
 			if err := os.WriteFile(service.marker, []byte("started"), 0o600); err != nil {
@@ -776,4 +1119,76 @@ func waitForFile(t *testing.T, path string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("file %q was not created", path)
+}
+
+func waitForRestartState(t *testing.T, manager *host.Manager, want host.RestartState) host.RestartStatus {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status := manager.RestartStatus()
+		if status.State == want {
+			return status
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	status := manager.RestartStatus()
+	t.Fatalf("RestartStatus() = %#v, want state %q", status, want)
+	return host.RestartStatus{}
+}
+
+func waitForRestartGeneration(t *testing.T, manager *host.Manager, want uint64) host.RestartStatus {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status := manager.RestartStatus()
+		if status.State == host.RestartStateReady && status.Generation == want {
+			return status
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	status := manager.RestartStatus()
+	t.Fatalf("RestartStatus() = %#v, want ready generation %d", status, want)
+	return host.RestartStatus{}
+}
+
+func crashCurrentGeneration(t *testing.T, manager *host.Manager, want uint64) {
+	t.Helper()
+	tools, release, err := manager.AcquireTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation := tools[0].Definition().ExtensionGeneration; generation != want {
+		release()
+		t.Fatalf("Tool generation = %d, want %d", generation, want)
+	}
+	_, err = tools[0].Execute(context.Background(), agent.ToolCall{
+		ID: fmt.Sprintf("crash-generation-%d", want), Name: "identity", Arguments: json.RawMessage(`{}`),
+	})
+	release()
+	if !errors.Is(err, host.ErrProcessExited) {
+		t.Fatalf("Execute() generation %d error = %v, want ErrProcessExited", want, err)
+	}
+}
+
+func waitForRestartAttempts(t *testing.T, manager *host.Manager, want int) host.RestartStatus {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status := manager.RestartStatus()
+		if status.Attempts == want {
+			return status
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	status := manager.RestartStatus()
+	t.Fatalf("RestartStatus() = %#v, want %d attempts", status, want)
+	return host.RestartStatus{}
+}
+
+func fileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }

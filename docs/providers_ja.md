@@ -21,6 +21,79 @@ Provider実装は次を満たす必要があります
 Provider固有response ID、model ID、raw stop reason、`ProviderState`はadapter所有fieldのままです
 Runtimeは`ProviderState`をopaqueとして扱い、同じProvider identityだけへ返します
 
+## Provider errorとretry
+
+`provider.ClassifyError`はwrapされたtransport errorとAPI errorを1つの安定したcodeへ変換します
+custom Provider errorは`provider.ClassifiedError`を実装することでmessage matchingなしに分類へ参加できます
+
+| Code | automatic retry | 意味 |
+| --- | --- | --- |
+| `retryable` | yes | 一時的なnetwork、timeout、overload、server failure |
+| `rate_limited` | yes | 一時的なrequestまたはtoken rate limit |
+| `authentication` | no | credentialの欠落、無効、期限切れ、拒否 |
+| `invalid_request` | no | request shape、size、parameterの変更が必要 |
+| `terminal` | no | permission、billing、quota、conflict、unknown、その他の永続failure |
+
+HTTP Adapterは有効な`Retry-After` headerをparseした`RetryAfter` durationを含む`*provider.HTTPError`を返します
+accepted streamが後からstructured API errorを出した場合はwrapされた`*provider.APIError`を返します
+unknown errorはterminalです
+特にbillingとquotaのerror codeはHTTP statusが429でもterminalのままです
+
+Runtimeはtransient failureをbounded exponential backoffと小さなbounded per-Run jitterでretryします
+server delayを最小値として使い、cancelとDeadlineに従い、すべてのattemptをProvider call budgetへ計上します
+retryは最初の観測可能なstream itemより前だけに許可されます
+deltaまたはcompleted messageを公開した後はoutputやTool副作用の重複を避けるためRunを失敗させます
+
+各actual attemptは`provider_call`と`provider_attempt`を持つ`model.request.started`を出します
+retryはfailure code、失敗attempt、次attempt、server hint、実効delayを`provider_retry`に持つ`provider.retry.scheduled`を出します
+terminalなProvider failureは`run.failed` Eventへ`provider_error`を追加します
+
+分類は現在の[OpenAI API error guidance](https://developers.openai.com/api/docs/guides/error-codes)、
+[OpenAI rate-limit guidance](https://developers.openai.com/api/docs/guides/rate-limits)、
+[Anthropic API error guidance](https://platform.claude.com/docs/en/api/errors)に基づきます
+
+## Provider rate制御
+
+各Runtimeはactive streamを既定で4つに制限する`ProviderRateLimiter`を持ちます
+limiter permitは`Provider.Stream`が戻るまでではなく、Provider streamをconsumeしてcloseするまで保持されます
+宣言設定はProvider profileごとに1つのlimiterを作り、そのprofileを参照する全Agentで共有します
+直接APIを利用する場合は`NewProviderRateLimiter`で作成し、同じpointerを`agent.Options.ProviderRateLimiter`へ渡せます
+
+```go
+limiter, err := agent.NewProviderRateLimiter(agent.ProviderRateLimitPolicy{
+    MaxConcurrency: 2,
+})
+if err != nil {
+    return err
+}
+
+first, err := agent.NewRuntime(agent.Options{
+    Provider:            firstProvider,
+    ProviderRateLimiter: limiter,
+})
+if err != nil {
+    return err
+}
+// Construct every Runtime in the same upstream pool with limiter
+```
+
+別のlocal実装またはdistributed実装が必要な組み込み先は公開`ProviderRateLimitController` contractを注入できます
+
+`rate_limited` failureが発生すると、実効retry delayをprofile共有cooldownにも反映します
+有効な`Retry-After`を最小値とし、存在しない場合はretry policyのexponential fallbackを使います
+これにより、1つ目のRunが観測した制限へ2つ目のRunが即座にrequestを送ることを防ぎます
+
+active capacityまたはcooldownの待機では`provider.rate_limit.waiting`を出します
+`provider_rate_limit_wait` fieldには本文を含まない`reason`、`max_concurrency`、利用可能な場合は残りの`retry_after_ms`が入ります
+`reason`は`concurrency`または`cooldown`です
+待機中のRunはcancelとDeadlineに従います
+permit取得まではRuntime localと共有Provider call budgetを消費せず、後続の`model.request.started`が実際に計上したattemptを識別します
+
+このlimiterはlocalな安全上限であり、RPM、input token、output tokenの完全なschedulerではありません
+endpointとmodelの文字列だけではupstreamの共有bucketを推測できないため、別profileは意図的に独立させます
+この挙動は現在の[OpenAI rate-limit guidance](https://developers.openai.com/api/docs/guides/rate-limits)と
+[Anthropic rate-limit guidance](https://platform.claude.com/docs/en/api/rate-limits)に基づきます
+
 ## Contract test kit
 
 `provider/contracttest`は公開された再利用可能なtest packageです

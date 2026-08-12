@@ -8,6 +8,7 @@ import (
 	"io"
 
 	"github.com/qed-runtime/qed/agent"
+	providerbase "github.com/qed-runtime/qed/provider"
 	"github.com/qed-runtime/qed/provider/internal/httpjson"
 )
 
@@ -91,7 +92,10 @@ func (accumulator *responsesStreamAccumulator) next() (agent.ModelStreamEvent, e
 			}
 			return agent.ModelStreamEvent{}, fmt.Errorf("OpenAI response ended with status %q", envelope.Response.Status)
 		case "error":
-			return agent.ModelStreamEvent{}, fmt.Errorf("OpenAI Responses stream failed %s: %s", envelope.Code, envelope.Message)
+			return agent.ModelStreamEvent{}, fmt.Errorf("OpenAI Responses stream failed: %w", &providerbase.APIError{
+				Code:    envelope.Code,
+				Message: envelope.Message,
+			})
 		default:
 			// The Responses API adds semantic event types over time. Unknown events
 			// do not affect the final response accumulator.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -22,18 +23,21 @@ type DynamicCapabilities interface {
 
 // ToolOptions configures one host-side Extension Tool Proxy
 type ToolOptions struct {
-	Tool     agent.Tool
-	Policy   capability.Policy
-	Approver capability.Approver
-	Recorder evidence.Recorder
+	Tool agent.Tool
+	// ToolInputValidator compiles the Tool schema at the host enforcement boundary
+	ToolInputValidator agent.ToolInputValidator
+	Policy             capability.Policy
+	Approver           capability.Approver
+	Recorder           evidence.Recorder
 }
 
 // ToolProxy enforces Policy and records Evidence around one Extension Tool
 type ToolProxy struct {
-	tool     agent.Tool
-	policy   capability.Policy
-	approver capability.Approver
-	recorder evidence.Recorder
+	tool      agent.Tool
+	validator agent.CompiledToolInputValidator
+	policy    capability.Policy
+	approver  capability.Approver
+	recorder  evidence.Recorder
 }
 
 // NewTool validates options and constructs a ToolProxy
@@ -44,15 +48,21 @@ func NewTool(options ToolOptions) (*ToolProxy, error) {
 	if options.Policy == nil {
 		return nil, errors.New("extension Tool Policy is required")
 	}
+	definition := options.Tool.Definition()
+	validator, err := agent.CompileToolInputSchema(options.ToolInputValidator, definition.InputSchema)
+	if err != nil {
+		return nil, fmt.Errorf("extension Tool %q input schema: %w", definition.Name, err)
+	}
 	recorder := options.Recorder
 	if recorder == nil {
 		recorder = evidence.NopRecorder{}
 	}
 	return &ToolProxy{
-		tool:     options.Tool,
-		policy:   options.Policy,
-		approver: options.Approver,
-		recorder: recorder,
+		tool:      options.Tool,
+		validator: validator,
+		policy:    options.Policy,
+		approver:  options.Approver,
+		recorder:  recorder,
 	}, nil
 }
 
@@ -69,9 +79,15 @@ func (proxy *ToolProxy) Execute(ctx context.Context, call agent.ToolCall) (resul
 	if ctx == nil {
 		return agent.ToolResult{}, errors.New("extension Tool context must not be nil")
 	}
+	if len(call.Arguments) == 0 {
+		call.Arguments = json.RawMessage(`{}`)
+	} else {
+		call.Arguments = append(json.RawMessage(nil), call.Arguments...)
+	}
 	startedAt := time.Now().UTC()
 	definition := proxy.tool.Definition()
-	capabilities, err := proxy.requiredCapabilities(ctx, call)
+	var capabilities []capability.Name
+	var err error
 	decision := capability.Decision{}
 	defer func() {
 		invocation := evidence.ToolInvocation{
@@ -99,6 +115,10 @@ func (proxy *ToolProxy) Execute(ctx context.Context, call agent.ToolCall) (resul
 		}
 		proxy.recorder.RecordToolInvocation(context.WithoutCancel(ctx), invocation)
 	}()
+	if err := agent.ValidateToolInput(proxy.validator, call.Arguments); err != nil {
+		return agent.ToolResult{}, fmt.Errorf("Tool %q input validation: %w", definition.Name, err)
+	}
+	capabilities, err = proxy.requiredCapabilities(ctx, call)
 	if err != nil {
 		return agent.ToolResult{}, err
 	}

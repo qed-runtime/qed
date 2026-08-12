@@ -469,6 +469,19 @@ func (process *Process) call(ctx context.Context, method protocol.Method, params
 	}
 }
 
+func (process *Process) exited() bool {
+	select {
+	case <-process.waitDone:
+		return true
+	default:
+		return false
+	}
+}
+
+func (process *Process) done() <-chan struct{} {
+	return process.waitDone
+}
+
 // Manifest returns an isolated copy of the validated Extension manifest
 func (process *Process) Manifest() protocol.Manifest {
 	return cloneManifest(process.manifest)

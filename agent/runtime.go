@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	providerbase "github.com/qed-runtime/qed/provider"
 )
 
 const (
@@ -40,6 +42,10 @@ type Options struct {
 	//
 	// ComponentSource and ToolSource are mutually exclusive
 	ComponentSource ComponentSource
+	// ToolInputValidator compiles and validates Tool input schemas
+	//
+	// A nil Validator uses JSONSchemaSubsetValidator
+	ToolInputValidator ToolInputValidator
 	// Hooks contains fixed Run Event Hooks shared by every Run
 	Hooks []Hook
 	// MaxProviderCalls bounds one Run and defaults to 16 when zero
@@ -60,6 +66,12 @@ type Options struct {
 	CachePlanner CachePlanner
 	// CachePolicy supplies host cache intent, isolation, and optional pricing
 	CachePolicy CachePolicy
+	// ProviderRetry controls bounded retries before Provider output becomes observable
+	ProviderRetry ProviderRetryPolicy
+	// ProviderRateLimiter bounds active streams and coordinates rate-limit cooldowns
+	//
+	// Share one limiter between Runtimes backed by the same Provider rate-limit pool
+	ProviderRateLimiter ProviderRateLimitController
 	// Logger receives safe structured debug diagnostics without message content,
 	// Tool arguments, Tool output, metadata values, or Provider-private state
 	Logger *slog.Logger
@@ -71,6 +83,7 @@ type Options struct {
 type Runtime struct {
 	provider         Provider
 	staticTools      runtimeToolSet
+	toolValidator    ToolInputValidator
 	toolSource       ToolSource
 	componentSource  ComponentSource
 	staticHooks      []runtimeHook
@@ -80,6 +93,8 @@ type Runtime struct {
 	contextCompiler  ContextCompiler
 	cachePlanner     CachePlanner
 	cachePolicy      CachePolicy
+	providerRetry    ProviderRetryPolicy
+	providerLimiter  ProviderRateLimitController
 	logger           *slog.Logger
 	sessionMu        sync.Mutex
 	sessionLocks     map[string]*runtimeSessionLock
@@ -92,6 +107,7 @@ type runtimeSessionLock struct {
 
 type runtimeToolSet struct {
 	tools       map[string]Tool
+	validators  map[string]CompiledToolInputValidator
 	definitions []ToolDefinition
 }
 
@@ -122,7 +138,7 @@ func NewRuntime(options Options) (*Runtime, error) {
 		return nil, errors.New("max tool calls must be positive")
 	}
 
-	staticTools, err := newRuntimeToolSet(options.Tools)
+	staticTools, err := newRuntimeToolSet(options.Tools, options.ToolInputValidator)
 	if err != nil {
 		return nil, err
 	}
@@ -145,10 +161,26 @@ func NewRuntime(options Options) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("configure Cache Policy: %w", err)
 	}
+	providerRetry, err := normalizeProviderRetryPolicy(options.ProviderRetry)
+	if err != nil {
+		return nil, fmt.Errorf("configure Provider retry: %w", err)
+	}
+	providerLimiter := options.ProviderRateLimiter
+	if providerLimiter == nil {
+		providerLimiter = &ProviderRateLimiter{}
+	}
+	providerMaxConcurrency := providerLimiter.MaxConcurrency()
+	if providerMaxConcurrency <= 0 || providerMaxConcurrency > maximumProviderConcurrency {
+		return nil, fmt.Errorf(
+			"Provider rate limiter max concurrency must be between 1 and %d",
+			maximumProviderConcurrency,
+		)
+	}
 
 	return &Runtime{
 		provider:         options.Provider,
 		staticTools:      staticTools,
+		toolValidator:    options.ToolInputValidator,
 		toolSource:       options.ToolSource,
 		componentSource:  options.ComponentSource,
 		staticHooks:      staticHooks,
@@ -158,6 +190,8 @@ func NewRuntime(options Options) (*Runtime, error) {
 		contextCompiler:  contextCompiler,
 		cachePlanner:     cachePlanner,
 		cachePolicy:      cachePolicy,
+		providerRetry:    providerRetry,
+		providerLimiter:  providerLimiter,
 		logger:           options.Logger,
 		sessionLocks:     make(map[string]*runtimeSessionLock),
 	}, nil
@@ -189,8 +223,9 @@ func newRuntimeHooks(configured []Hook) ([]runtimeHook, error) {
 	return hooks, nil
 }
 
-func newRuntimeToolSet(configured []Tool) (runtimeToolSet, error) {
+func newRuntimeToolSet(configured []Tool, validator ToolInputValidator) (runtimeToolSet, error) {
 	tools := make(map[string]Tool, len(configured))
+	validators := make(map[string]CompiledToolInputValidator, len(configured))
 	definitions := make([]ToolDefinition, 0, len(configured))
 	for _, tool := range configured {
 		if tool == nil {
@@ -201,8 +236,9 @@ func newRuntimeToolSet(configured []Tool) (runtimeToolSet, error) {
 		if strings.TrimSpace(definition.Name) != definition.Name || definition.Name == "" {
 			return runtimeToolSet{}, errors.New("tool name is required")
 		}
-		if len(definition.InputSchema) > 0 && !json.Valid(definition.InputSchema) {
-			return runtimeToolSet{}, fmt.Errorf("tool %q has an invalid input schema", definition.Name)
+		compiled, err := CompileToolInputSchema(validator, definition.InputSchema)
+		if err != nil {
+			return runtimeToolSet{}, fmt.Errorf("tool %q input schema: %w", definition.Name, err)
 		}
 		if _, exists := tools[definition.Name]; exists {
 			return runtimeToolSet{}, fmt.Errorf("tool %q is registered more than once", definition.Name)
@@ -219,9 +255,10 @@ func newRuntimeToolSet(configured []Tool) (runtimeToolSet, error) {
 		}
 
 		tools[definition.Name] = tool
+		validators[definition.Name] = compiled
 		definitions = append(definitions, definition)
 	}
-	return runtimeToolSet{tools: tools, definitions: definitions}, nil
+	return runtimeToolSet{tools: tools, validators: validators, definitions: definitions}, nil
 }
 
 // Run starts an Agent Run and returns immediately with a handle
@@ -269,9 +306,10 @@ func (runtime *Runtime) Run(ctx context.Context, request RunRequest) (*RunHandle
 	}
 
 	handle := &RunHandle{
-		events: make(chan Event, runtime.eventBufferSize()),
-		done:   make(chan struct{}),
-		cancel: cancel,
+		events:       make(chan Event, runtime.eventBufferSize()),
+		done:         make(chan struct{}),
+		cancel:       cancel,
+		steeringOpen: true,
 	}
 
 	request.Input = cloneMessages(request.Input)
@@ -324,7 +362,7 @@ func (runtime *Runtime) acquireComponents(ctx context.Context) (runtimeToolSet, 
 	for _, definition := range runtime.staticTools.definitions {
 		combined = append(combined, runtime.staticTools.tools[definition.Name])
 	}
-	toolSet, err := newRuntimeToolSet(combined)
+	toolSet, err := newRuntimeToolSet(combined, runtime.toolValidator)
 	if err != nil {
 		release()
 		return runtimeToolSet{}, nil, nil, fmt.Errorf("validate acquired Run tools: %w", err)
@@ -481,11 +519,40 @@ func (runtime *Runtime) execute(
 	handle.setWaiter(waiter)
 	defer waiter.close()
 	ctx = context.WithValue(ctx, runWaiterContextKey{}, runWaiter(waiter))
+	applySteering := func(pending []Message) error {
+		for index := range pending {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			message := cloneMessage(pending[index])
+			if err := emit(Event{
+				Type:              EventUserMessageAdded,
+				Message:           &message,
+				UserMessageOrigin: UserMessageOriginSteering,
+			}); err != nil {
+				return err
+			}
+			messages = append(messages, message)
+		}
+		if len(pending) != 0 {
+			runtime.debug("run.steering.applied",
+				"run_id", runID,
+				"message_count", len(pending),
+			)
+		}
+		return nil
+	}
 
 	finish := func(status RunStatus, eventType EventType, runErr error) {
+		handle.discardSteering()
 		event := Event{Type: eventType}
 		if runErr != nil {
 			event.Error = runErr.Error()
+			var providerError *runtimeProviderError
+			if errors.As(runErr, &providerError) {
+				info := providerError.eventInfo()
+				event.ProviderError = &info
+			}
 		}
 		emitErr := emit(event)
 		if emitErr != nil {
@@ -558,7 +625,11 @@ func (runtime *Runtime) execute(
 	}
 	for index := range request.Input {
 		input := cloneMessage(request.Input[index])
-		if err := emit(Event{Type: EventUserMessageAdded, Message: &input}); err != nil {
+		if err := emit(Event{
+			Type:              EventUserMessageAdded,
+			Message:           &input,
+			UserMessageOrigin: UserMessageOriginRunInput,
+		}); err != nil {
 			fail(err)
 			return
 		}
@@ -601,6 +672,19 @@ func (runtime *Runtime) execute(
 	for providerCalls < runtime.maxProviderCalls {
 		if err := ctx.Err(); err != nil {
 			fail(err)
+			return
+		}
+		pendingSteering, canceled := handle.takeSteering()
+		if canceled {
+			fail(context.Canceled)
+			return
+		}
+		if err := ctx.Err(); err != nil {
+			fail(err)
+			return
+		}
+		if err := applySteering(pendingSteering); err != nil {
+			fail(fmt.Errorf("apply steering input: %w", err))
 			return
 		}
 
@@ -673,67 +757,192 @@ func (runtime *Runtime) execute(
 			latestCompaction = cloneContextCompactionReport(compiled.Compaction)
 		}
 
-		if err := request.Budget.consumeProviderCall(); err != nil {
-			fail(err)
-			return
-		}
+		var message Message
+		providerAttempt := 0
+		for {
+			if providerCalls >= runtime.maxProviderCalls {
+				fail(ErrProviderCallLimit)
+				return
+			}
+			releaseProvider, waitDuration, err := runtime.providerLimiter.Acquire(
+				ctx,
+				func(wait ProviderRateLimitWaitInfo) error {
+					if err := validateProviderRateLimitWait(
+						wait,
+						runtime.providerLimiter.MaxConcurrency(),
+					); err != nil {
+						return err
+					}
+					runtime.debug("provider.rate_limit.waiting",
+						"run_id", runID,
+						"provider", runtime.provider.Name(),
+						"attempt", providerAttempt+1,
+						"reason", wait.Reason,
+						"max_concurrency", wait.MaxConcurrency,
+						"retry_after_ms", wait.RetryAfterMilliseconds,
+					)
+					return emit(Event{
+						Type:                  EventProviderRateLimitWait,
+						ProviderAttempt:       providerAttempt + 1,
+						ProviderRateLimitWait: &wait,
+					})
+				},
+			)
+			if err != nil {
+				fail(err)
+				return
+			}
+			if releaseProvider == nil {
+				fail(errors.New("Provider rate limiter returned a nil release function"))
+				return
+			}
+			if err := ctx.Err(); err != nil {
+				releaseProvider()
+				fail(err)
+				return
+			}
+			if waitDuration > 0 {
+				runtime.debug("provider.rate_limit.acquired",
+					"run_id", runID,
+					"provider", runtime.provider.Name(),
+					"attempt", providerAttempt+1,
+					"wait_ms", waitDuration.Milliseconds(),
+				)
+			}
+			if err := request.Budget.consumeProviderCall(); err != nil {
+				releaseProvider()
+				fail(err)
+				return
+			}
 
-		providerCalls++
-		providerStartedAt := time.Now()
-		runtime.debug("provider.stream.started",
-			"run_id", runID,
-			"provider", runtime.provider.Name(),
-			"call", providerCalls,
-		)
-		manifestEvent := clonePrefixManifest(manifest)
-		cachePlanEvent := cloneCachePlanPointer(compiled.ModelRequest.CachePlan)
-		if err := emit(Event{
-			Type:           EventModelRequest,
-			PrefixManifest: &manifestEvent,
-			CachePlan:      cachePlanEvent,
-		}); err != nil {
-			fail(err)
-			return
-		}
-		latestCachePlan = cloneCachePlanPointer(cachePlanEvent)
-		stream, err := runtime.provider.Stream(ctx, compiled.ModelRequest)
-		if err != nil {
+			providerCalls++
+			providerAttempt++
+			providerStartedAt := time.Now()
+			runtime.debug("provider.stream.started",
+				"run_id", runID,
+				"provider", runtime.provider.Name(),
+				"call", providerCalls,
+				"attempt", providerAttempt,
+			)
+			manifestEvent := clonePrefixManifest(manifest)
+			cachePlanEvent := cloneCachePlanPointer(compiled.ModelRequest.CachePlan)
+			if err := emit(Event{
+				Type:            EventModelRequest,
+				PrefixManifest:  &manifestEvent,
+				CachePlan:       cachePlanEvent,
+				ProviderCall:    providerCalls,
+				ProviderAttempt: providerAttempt,
+			}); err != nil {
+				releaseProvider()
+				fail(err)
+				return
+			}
+			latestCachePlan = cloneCachePlanPointer(cachePlanEvent)
+
+			phase := "failed"
+			stream, providerErr := runtime.provider.Stream(ctx, compiled.ModelRequest)
+			outputObserved := false
+			providerFailure := true
+			if providerErr == nil {
+				phase = "stream failed"
+				message, outputObserved, providerFailure, providerErr = consumeModelStream(
+					ctx,
+					stream,
+					func() error { return emit(Event{Type: EventMessageStarted}) },
+					func(delta string) error { return emit(Event{Type: EventMessageDelta, Delta: delta}) },
+				)
+			}
+			var errorInfo providerbase.ErrorInfo
+			var retryDelay time.Duration
+			if providerErr != nil && providerFailure {
+				errorInfo = providerbase.ClassifyError(providerErr)
+				retryDelay = providerRetryDelayWithJitter(
+					runtime.providerRetry,
+					providerAttempt,
+					errorInfo.RetryAfter,
+					runID,
+				)
+				if errorInfo.Code == providerbase.ErrorCodeRateLimited {
+					runtime.providerLimiter.ObserveRateLimit(retryDelay)
+					runtime.debug("provider.rate_limit.updated",
+						"run_id", runID,
+						"provider", runtime.provider.Name(),
+						"attempt", providerAttempt,
+						"cooldown_ms", retryDelay.Milliseconds(),
+					)
+				}
+			}
+			releaseProvider()
+			if providerErr == nil {
+				runtime.debug("provider.stream.completed",
+					"run_id", runID,
+					"provider", runtime.provider.Name(),
+					"call", providerCalls,
+					"attempt", providerAttempt,
+					"duration_ms", time.Since(providerStartedAt).Milliseconds(),
+					"tool_call_count", len(message.ToolCalls),
+				)
+				break
+			}
+			if !providerFailure {
+				fail(providerErr)
+				return
+			}
+
+			classifiedError := &runtimeProviderError{
+				providerName: runtime.provider.Name(),
+				phase:        phase,
+				info:         errorInfo,
+				attempt:      providerAttempt,
+				err:          providerErr,
+			}
 			runtime.debug("provider.stream.failed",
 				"run_id", runID,
 				"provider", runtime.provider.Name(),
 				"call", providerCalls,
+				"attempt", providerAttempt,
 				"duration_ms", time.Since(providerStartedAt).Milliseconds(),
-				"error_type", fmt.Sprintf("%T", err),
+				"error_type", fmt.Sprintf("%T", providerErr),
+				"error_code", errorInfo.Code,
+				"output_observed", outputObserved,
 			)
-			fail(fmt.Errorf("provider %q failed: %w", runtime.provider.Name(), err))
-			return
-		}
-		if err := emit(Event{Type: EventMessageStarted}); err != nil {
-			_ = stream.Close()
-			fail(err)
-			return
-		}
-		message, err := consumeModelStream(ctx, stream, func(delta string) error {
-			return emit(Event{Type: EventMessageDelta, Delta: delta})
-		})
-		if err != nil {
-			runtime.debug("provider.stream.failed",
+			if !errorInfo.Retryable() || outputObserved || providerAttempt >= runtime.providerRetry.MaxAttempts {
+				fail(classifiedError)
+				return
+			}
+			if providerCalls >= runtime.maxProviderCalls {
+				fail(errors.Join(ErrProviderCallLimit, classifiedError))
+				return
+			}
+
+			retry := ProviderRetryInfo{
+				Error:             classifiedError.eventInfo(),
+				NextAttempt:       providerAttempt + 1,
+				DelayMilliseconds: retryDelay.Milliseconds(),
+			}
+			if err := emit(Event{
+				Type:            EventProviderRetry,
+				ProviderCall:    providerCalls,
+				ProviderAttempt: providerAttempt,
+				ProviderRetry:   &retry,
+			}); err != nil {
+				fail(err)
+				return
+			}
+			runtime.debug("provider.retry.scheduled",
 				"run_id", runID,
 				"provider", runtime.provider.Name(),
 				"call", providerCalls,
-				"duration_ms", time.Since(providerStartedAt).Milliseconds(),
-				"error_type", fmt.Sprintf("%T", err),
+				"attempt", providerAttempt,
+				"next_attempt", providerAttempt+1,
+				"delay_ms", retryDelay.Milliseconds(),
+				"error_code", errorInfo.Code,
 			)
-			fail(fmt.Errorf("provider %q stream failed: %w", runtime.provider.Name(), err))
-			return
+			if err := waitForProviderRetry(ctx, retryDelay); err != nil {
+				fail(err)
+				return
+			}
 		}
-		runtime.debug("provider.stream.completed",
-			"run_id", runID,
-			"provider", runtime.provider.Name(),
-			"call", providerCalls,
-			"duration_ms", time.Since(providerStartedAt).Milliseconds(),
-			"tool_call_count", len(message.ToolCalls),
-		)
 		if message.Role != RoleAssistant {
 			fail(fmt.Errorf("provider %q returned message role %q, want %q", runtime.provider.Name(), message.Role, RoleAssistant))
 			return
@@ -766,8 +975,32 @@ func (runtime *Runtime) execute(
 		}
 
 		if len(message.ToolCalls) == 0 {
-			finish(RunStatusCompleted, EventRunCompleted, nil)
-			return
+			if err := ctx.Err(); err != nil {
+				fail(err)
+				return
+			}
+			pendingSteering, boundary := handle.resolveEndTurn()
+			switch boundary {
+			case steeringBoundaryCanceled:
+				fail(context.Canceled)
+				return
+			case steeringBoundaryComplete:
+				finish(RunStatusCompleted, EventRunCompleted, nil)
+				return
+			case steeringBoundaryContinue:
+				if err := ctx.Err(); err != nil {
+					fail(err)
+					return
+				}
+				if err := applySteering(pendingSteering); err != nil {
+					fail(fmt.Errorf("apply steering input: %w", err))
+					return
+				}
+				continue
+			default:
+				fail(errors.New("invalid steering boundary"))
+				return
+			}
 		}
 		if toolCalls+len(message.ToolCalls) > runtime.maxToolCalls {
 			fail(ErrToolCallLimit)
@@ -1125,8 +1358,8 @@ func (runtime *Runtime) executeTool(ctx context.Context, toolSet runtimeToolSet,
 	if len(arguments) == 0 {
 		arguments = json.RawMessage(`{}`)
 	}
-	if !json.Valid(arguments) {
-		result.Output = "tool arguments are not valid JSON"
+	if err := ValidateToolInput(toolSet.validators[call.Name], arguments); err != nil {
+		result.Output = fmt.Sprintf("tool %q input validation: %v", call.Name, err)
 		result.IsError = true
 		return result
 	}
@@ -1169,16 +1402,20 @@ func (runtime *Runtime) executeToolWithDebug(ctx context.Context, runID string, 
 	return result
 }
 
-// RunHandle provides events, cancellation, and the terminal result of a Run
+// RunHandle provides Events, steering, wait resumption, cancellation, and the
+// terminal result of a Run
 type RunHandle struct {
 	events chan Event
 	done   chan struct{}
 	cancel context.CancelFunc
 
-	mu     sync.Mutex
-	result RunResult
-	err    error
-	waiter *waitBroker
+	mu              sync.Mutex
+	result          RunResult
+	err             error
+	waiter          *waitBroker
+	steering        []Message
+	steeringOpen    bool
+	cancelRequested bool
 }
 
 // Events returns the ordered event stream for the Run
@@ -1200,9 +1437,13 @@ func (handle *RunHandle) Wait() (RunResult, error) {
 	return cloneRunResult(handle.result), handle.err
 }
 
-// Cancel requests cancellation of the Run
+// Cancel requests cancellation while the Run is active
+//
+// It has no effect after the terminal transition has begun
 func (handle *RunHandle) Cancel() {
-	handle.cancel()
+	if handle != nil && handle.requestCancel() {
+		handle.cancel()
+	}
 }
 
 // Resume supplies external input to the Run's current waiting request
@@ -1235,6 +1476,8 @@ func (handle *RunHandle) setWaiter(waiter *waitBroker) {
 
 func (handle *RunHandle) complete(result RunResult, err error) {
 	handle.mu.Lock()
+	handle.steeringOpen = false
+	handle.steering = nil
 	handle.result = cloneRunResult(result)
 	handle.err = err
 	handle.mu.Unlock()
@@ -1344,6 +1587,18 @@ func cloneEvent(event Event) Event {
 		event.PrefixManifest = &manifest
 	}
 	event.CachePlan = cloneCachePlanPointer(event.CachePlan)
+	if event.ProviderError != nil {
+		providerError := *event.ProviderError
+		event.ProviderError = &providerError
+	}
+	if event.ProviderRetry != nil {
+		providerRetry := *event.ProviderRetry
+		event.ProviderRetry = &providerRetry
+	}
+	if event.ProviderRateLimitWait != nil {
+		providerWait := *event.ProviderRateLimitWait
+		event.ProviderRateLimitWait = &providerWait
+	}
 	event.ContextCheckpoint = cloneContextCheckpointPointer(event.ContextCheckpoint)
 	event.ContextCompaction = cloneContextCompactionReport(event.ContextCompaction)
 	if event.Message != nil {

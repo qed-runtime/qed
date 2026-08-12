@@ -39,6 +39,15 @@ Unicode、改行、末尾空白はuserまたはTool contentを変える可能性
 既定compilerは`instructions`、`tool-abi`、messageごとのappend-only Segment、任意のvolatileな`request-metadata`を生成します
 各Segmentにはprompt本文ではなくdomain-separated SHA-256 digestとcanonical byte countが入ります
 
+steeringはin-flight Provider requestやretryを変更せず、再compileもしません
+Runtimeはassistant responseとそのTool batch全体を完了し、次のcompileより前にqueue済みsteering Messageを`user.message.added`として発行します
+steeringがすでにqueueされている場合、end-turn responseもRunを完了せず同じ境界へ進みます
+このEventを伴わないqueue受理はSession、Checkpoint、Prefix Manifest、Cache Planを変更しません
+
+terminal後のfollow-upは設定済みSession Storeから同じSessionをreplayする新しいRunです
+新しいinputはraw tail Segmentとして追加され、以前のSegmentを書き換えません
+Session Storeがない場合はcallerが過去contextを明示的に渡す必要があります
+
 ## Evidence-preserving compression
 
 `agent.CompactingContextCompiler`はimmutableなraw messageの上にboundedなmodel viewを作ります

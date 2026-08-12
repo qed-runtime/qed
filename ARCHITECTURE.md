@@ -33,10 +33,12 @@ CLI / TUI / embedded host
 
 ## Package boundaries
 
-`agent` owns provider-neutral Messages, model streams, Runs, budgets, ordered
-Events, Tool calls, waits, Hooks, Session contracts, cancellation, and local
-execution limits. It has no filesystem, Git, CLI, TUI, or Provider wire-format
-behavior
+`agent` owns provider-neutral Messages, model streams, Runs, active-Run
+steering, budgets, ordered Events, Tool calls, waits, Hooks, Session contracts,
+cancellation, and local execution limits. A `ProviderRateLimitController`
+bounds active model streams and shares observed cooldowns without moving HTTP
+error parsing into Runtime. It has no filesystem, Git, CLI, TUI, or Provider
+wire-format behavior
 
 Before every Provider call, `agent.ContextCompiler` produces a canonical
 `ModelRequest` and logical Context Segments. Runtime persists a content-free
@@ -66,7 +68,9 @@ tokens and retries only once after an authorization rejection
 
 `orchestration` composes named Runtimes above `agent`. Each Runtime remains
 bound to one Provider, so a parent and its subagents may use different endpoint,
-credential, model, and protocol combinations without converting private state
+credential, model, and protocol combinations without converting private state.
+Declarative configuration shares one outbound rate controller between every
+Runtime that references the same Provider profile
 
 `session` implements the `agent.SessionStore` contract in memory and as an
 append-only JSONL Event Log. Runtime serializes concurrent Runs for one Session
@@ -80,13 +84,15 @@ Evidence recorder, and one or more process-isolated Extensions. The reusable
 standard Tools while keeping them outside Runtime Core
 
 `extension.ToolProxy` and `extension.CommandProxy` are host enforcement points.
-They combine static and invocation-specific capabilities, evaluate Policy,
+Tool input is schema-validated before invocation-specific capability discovery,
+Policy, or approval. The proxies then combine capabilities, evaluate Policy,
 request approval when required, and invoke the remote component only after
 authorization. Tool Evidence is recorded in the Host
 
 `extension/protocol` defines Protocol v1 as 4-byte big-endian length-prefixed
 strict JSON over stdio. `extension/server` adapts Go Tools, Hooks, Commands, and
-lifecycle callbacks to that contract. `extension/host` supervises processes and
+lifecycle callbacks to that contract and revalidates Tool input before direct
+RPC calls reach component code. `extension/host` supervises processes and
 generation leases
 
 `extension/manifest` validates the transport-independent declaration shared by
@@ -113,13 +119,18 @@ child processes into an operating-system sandbox
 The root `qed.Host` API is the transport-neutral embedding facade. It loads a
 declarative Agent graph, owns configured Extension lifecycles, starts concurrent
 Runs, drains Events, and persists Evidence when configured. HTTP, gRPC, queue,
-authentication, and rate limiting remain responsibilities of the embedding
-application
+authentication, and inbound client or tenant rate limiting remain
+responsibilities of the embedding application. Outbound Provider concurrency
+and observed cooldowns remain Runtime controls
 
-`cmd/qed` and `internal/tuiapp` are adapters. `cmd/qed-extension-gen` is the
-dependency-light downstream catalog generator. Nagi remains inside the QED CLI
+`cmd/qed` and `internal/tuiapp` are adapters. `internal/extensionscaffold`
+creates non-overwriting Go reference layouts without changing module or lock
+files. `cmd/qed-extension-gen` is the dependency-light downstream catalog
+generator. Nagi remains inside the QED CLI
 frontend packages and no Nagi type crosses into Runtime, Provider, Extension,
-or Host APIs
+or Host APIs. The TUI chat controller maps composer submissions to active-Run
+steering or terminal follow-up Runs, keeps approval resume and Run cancellation
+separate, and stores Evidence per Run rather than merging Run Event sequences
 
 ## Run and Event ordering
 
@@ -147,10 +158,44 @@ succeed
 persisted pending wait and resume its associated Tool call without repeating
 the completed Provider request
 
+`RunHandle.Steer` non-blockingly queues one plain, non-empty user Message in a
+bounded FIFO. Steering never changes an in-flight Provider request or retry and
+never interrupts a Tool batch. After the current assistant Message and all of
+its Tool results are complete, or after an end-turn response, Runtime appends
+queued steering as `user.message.added` Events before compiling the next
+Provider request. These Events set `UserMessageOrigin` to `steering`; Event
+publication is the observable point at which steering has entered Session
+state. A queue acceptance alone is not a persistence acknowledgement
+
+An observed `run.waiting` rejects new steering with `ErrRunWaiting`. Steering
+queued before the wait remains pending until the matching resume and Tool
+completion. Cancellation, deadline expiry, or a terminal Run failure
+stops further application and may discard queued steering without an Event.
+The Event stream is the authoritative applied-input record. Steering itself
+does not consume Budget, while its next Provider or Tool work continues to use
+the same Run Budget
+
+A follow-up is a new Run started only after the previous handle reaches a
+terminal result, using the same Session ID and configured Session Store. It
+receives a new Run ID and local Run limits while replaying the Session's
+messages. Without a Store, Session ID is identity only and the caller must
+supply any prior context. A Budget spans both Runs only when the caller
+explicitly reuses the same `*agent.Budget`. Resume, steering, and follow-up are
+therefore separate operations
+
+Before an outbound attempt, Runtime acquires Provider capacity, then charges
+the Runtime-local and shared Provider call budgets, and only then emits
+`model.request.started`. A queued attempt emits
+`provider.rate_limit.waiting` without consuming call budget. A rate-limit
+failure updates the shared cooldown before its active-stream permit is
+released, preventing another waiting Run from racing through the observed
+limit
+
 ## Configuration ownership
 
 A Provider profile owns protocol, endpoint, model, output limit, credential
-source, optional cache capability overrides, and optional host-supplied pricing
+source, optional cache capability overrides, optional host-supplied pricing,
+and an outbound rate-limit policy
 An Extension definition owns its process startup. An execution Profile
 references one or more Extensions and owns capability rules plus the selected
 Tool-process environment. An Agent independently references a Provider, an
@@ -187,6 +232,24 @@ Restores the candidate, and performs another HealthCheck. Only then does the
 Host atomically publish the candidate for new Runs. Existing leases retain the
 old process until it can Drain and Shutdown. Any pre-swap failure leaves the
 old generation active
+
+An enabled `RestartPolicy` makes Manager watch the published child process. An
+unexpected exit fails requests already pinned to that generation without
+replaying Tool calls, withdraws it from new leases, and starts replacement
+candidates with bounded exponential backoff. Each candidate reuses the exact
+validated `ProcessOptions`, including a locked manifest when configured,
+restores the latest host-owned Snapshot, passes HealthCheck, and persists a new
+Snapshot before publication when a State Store is configured. Only successful
+publication advances the generation number
+
+Candidates that fail startup and published generations that exit before the
+stability window share one attempt count. Exhaustion opens the circuit until a
+successful explicit Reload. New acquisition returns
+`ErrExtensionRestarting` while recovery is active and
+`ErrExtensionCircuitOpen` after exhaustion. Coding Profiles and the development
+host use the bounded default of three attempts, 100 millisecond initial and 2
+second maximum backoff, and a 30 second stability window. A direct Manager uses
+the zero-value policy to disable restart
 
 `GenerationSet` takes a read lock while acquiring one generation from every
 configured Extension. Reload takes the corresponding write lock, so a Run sees
@@ -230,8 +293,13 @@ stderr is never copied into verbose output
 - Old and new Extension processes may overlap during retirement and do not
   share process-local Workspace locks, so edit digests remain the cross-process
   stale-write defense
+- Automatic Extension restart never replays an interrupted Tool call and can
+  restore only the latest Host-owned Snapshot, so state newer than that
+  Snapshot may be lost after a crash
 - `run_command` is deliberately broad and must be governed as a host permission
   or wrapped in an external sandbox
+- Permission decisions belong to Host Policy and the optional Approver rather
+  than an Extension, so a component cannot authorize its own invocation
 - Tool Trace records hash raw payloads, but Bundle Events preserve public Run
   content for audit; an Evidence Store is not a secret-free telemetry sink or a
   complete workspace archive

@@ -19,10 +19,12 @@ const defaultRetireTimeout = 10 * time.Second
 
 // ManagerOptions configures one reloadable Extension component source
 type ManagerOptions struct {
-	Process  ProcessOptions
-	Policy   capability.Policy
-	Approver capability.Approver
-	Recorder evidence.Recorder
+	Process ProcessOptions
+	// ToolInputValidator compiles Tool schemas for every Extension generation
+	ToolInputValidator agent.ToolInputValidator
+	Policy             capability.Policy
+	Approver           capability.Approver
+	Recorder           evidence.Recorder
 	// StateStore persists opaque process state under the Extension namespace
 	StateStore extension.StateStore
 	// StateScope selects the host-owned state namespace and defaults to "process"
@@ -31,6 +33,8 @@ type ManagerOptions struct {
 	Logger *slog.Logger
 	// RetireTimeout bounds Drain for a generation after its last Run releases it
 	RetireTimeout time.Duration
+	// RestartPolicy controls recovery after an unexpected process exit
+	RestartPolicy RestartPolicy
 }
 
 // Manager owns Extension generations and pins exactly one generation to each Run
@@ -38,14 +42,23 @@ type ManagerOptions struct {
 // Manager is safe for concurrent use. A failed Reload leaves the current
 // generation unchanged
 type Manager struct {
-	policy        capability.Policy
-	approver      capability.Approver
-	recorder      evidence.Recorder
-	stateStore    extension.StateStore
-	stateScope    string
-	logger        *slog.Logger
-	retireTimeout time.Duration
-	extensionID   string
+	policy           capability.Policy
+	toolValidator    agent.ToolInputValidator
+	approver         capability.Approver
+	recorder         evidence.Recorder
+	stateStore       extension.StateStore
+	stateScope       string
+	logger           *slog.Logger
+	retireTimeout    time.Duration
+	extensionID      string
+	processOptions   ProcessOptions
+	restartPolicy    RestartPolicy
+	restartState     RestartState
+	restartAttempts  int
+	restartErrorType string
+	restartContext   context.Context
+	restartCancel    context.CancelFunc
+	restartWait      sync.WaitGroup
 
 	reloadMu sync.Mutex
 	mu       sync.Mutex
@@ -87,49 +100,57 @@ func NewManager(ctx context.Context, options ManagerOptions) (*Manager, error) {
 	if strings.TrimSpace(options.StateScope) != options.StateScope {
 		return nil, errors.New("Extension State scope must not have surrounding whitespace")
 	}
+	restartPolicy, err := normalizeRestartPolicy(options.RestartPolicy)
+	if err != nil {
+		return nil, err
+	}
 	process, err := Start(ctx, options.Process)
 	if err != nil {
 		return nil, err
 	}
-	if options.StateStore != nil {
-		persisted, loadErr := options.StateStore.Get(ctx, process.Manifest().ID, options.StateScope, "snapshot")
-		if loadErr == nil {
-			if err := process.Restore(ctx, persisted); err != nil {
-				_ = process.Close()
-				return nil, fmt.Errorf("restore persisted Extension state: %w", err)
-			}
-			if _, err := process.HealthCheck(ctx); err != nil {
-				_ = process.Close()
-				return nil, fmt.Errorf("health check persisted Extension state: %w", err)
-			}
-		} else if !errors.Is(loadErr, extension.ErrStateNotFound) {
-			_ = process.Close()
-			return nil, fmt.Errorf("load persisted Extension state: %w", loadErr)
-		}
+	if err := restoreProcessState(
+		ctx,
+		options.StateStore,
+		process.Manifest().ID,
+		options.StateScope,
+		process,
+		restartPolicy.MaxAttempts > 0,
+	); err != nil {
+		_ = process.Close()
+		return nil, err
 	}
+	restartContext, restartCancel := context.WithCancel(context.Background())
 	idle := make(chan struct{})
 	close(idle)
 	manager := &Manager{
-		policy:        options.Policy,
-		approver:      options.Approver,
-		recorder:      options.Recorder,
-		stateStore:    options.StateStore,
-		stateScope:    options.StateScope,
-		logger:        options.Logger,
-		retireTimeout: options.RetireTimeout,
-		extensionID:   process.Manifest().ID,
-		next:          2,
-		all:           make(map[uint64]*generation),
-		idle:          idle,
+		policy:         options.Policy,
+		toolValidator:  options.ToolInputValidator,
+		approver:       options.Approver,
+		recorder:       options.Recorder,
+		stateStore:     options.StateStore,
+		stateScope:     options.StateScope,
+		logger:         options.Logger,
+		retireTimeout:  options.RetireTimeout,
+		extensionID:    process.Manifest().ID,
+		processOptions: process.options,
+		restartPolicy:  restartPolicy,
+		restartState:   initialRestartState(restartPolicy),
+		restartContext: restartContext,
+		restartCancel:  restartCancel,
+		next:           2,
+		all:            make(map[uint64]*generation),
+		idle:           idle,
 	}
 	initial, err := manager.configureGeneration(process, 1)
 	if err != nil {
+		restartCancel()
 		_ = process.Close()
 		return nil, err
 	}
 	manager.current = initial
 	manager.all[initial.number] = initial
 	manager.debug("extension.generation.started", "generation", initial.number)
+	manager.watchGeneration(initial, false)
 	return manager, nil
 }
 
@@ -151,9 +172,9 @@ func (manager *Manager) AcquireComponents(ctx context.Context) (agent.RunCompone
 		return agent.RunComponents{}, nil, err
 	}
 	manager.mu.Lock()
-	if manager.closed || manager.current == nil {
+	if err := manager.acquireErrorLocked(); err != nil {
 		manager.mu.Unlock()
-		return agent.RunComponents{}, nil, ErrHostClosed
+		return agent.RunComponents{}, nil, err
 	}
 	generation := manager.current
 	if manager.active == 0 {
@@ -181,9 +202,9 @@ func (manager *Manager) AcquireCommands(ctx context.Context) ([]extension.Comman
 		return nil, nil, err
 	}
 	manager.mu.Lock()
-	if manager.closed || manager.current == nil {
+	if err := manager.acquireErrorLocked(); err != nil {
 		manager.mu.Unlock()
-		return nil, nil, ErrHostClosed
+		return nil, nil, err
 	}
 	generation := manager.current
 	if manager.active == 0 {
@@ -217,7 +238,8 @@ func (manager *Manager) ExtensionID() string {
 // Reload validates and restores a new process before atomically routing new Runs to it
 //
 // Existing Runs retain their old generation. Startup, Snapshot, Restore, or
-// validation failure closes the candidate and leaves the old generation current
+// validation failure closes the candidate and leaves a live old generation
+// current. Reload can recover a Manager whose restart circuit is open
 func (manager *Manager) Reload(ctx context.Context, options ProcessOptions) (uint64, error) {
 	if ctx == nil {
 		return 0, errors.New("Extension reload context must not be nil")
@@ -226,14 +248,18 @@ func (manager *Manager) Reload(ctx context.Context, options ProcessOptions) (uin
 	defer manager.reloadMu.Unlock()
 
 	manager.mu.Lock()
-	if manager.closed || manager.current == nil {
+	if manager.closed {
 		manager.mu.Unlock()
 		return 0, ErrHostClosed
 	}
 	old := manager.current
 	number := manager.next
 	manager.mu.Unlock()
-	manager.debug("extension.reload.started", "current_generation", old.number, "candidate_generation", number)
+	oldNumber := uint64(0)
+	if old != nil {
+		oldNumber = old.number
+	}
+	manager.debug("extension.reload.started", "current_generation", oldNumber, "candidate_generation", number)
 	if options.ExpectedID != manager.extensionID {
 		return 0, fmt.Errorf("reload Extension ID %q does not match current %q", options.ExpectedID, manager.extensionID)
 	}
@@ -247,24 +273,27 @@ func (manager *Manager) Reload(ctx context.Context, options ProcessOptions) (uin
 		_ = candidateProcess.Close()
 		return 0, fmt.Errorf("configure reload candidate: %w", err)
 	}
-	state, err := old.process.Snapshot(ctx)
+	state, hasState, err := manager.reloadState(ctx, old)
 	if err != nil {
 		_ = candidateProcess.Close()
-		return 0, fmt.Errorf("snapshot generation %d: %w", old.number, err)
+		return 0, err
 	}
-	if manager.stateStore != nil {
-		if err := manager.stateStore.Set(ctx, manager.extensionID, manager.stateScope, "snapshot", state); err != nil {
+	if hasState {
+		if err := candidateProcess.Restore(ctx, state); err != nil {
 			_ = candidateProcess.Close()
-			return 0, fmt.Errorf("persist generation %d state: %w", old.number, err)
+			return 0, fmt.Errorf("restore generation %d: %w", number, err)
+		}
+		if _, err := candidateProcess.HealthCheck(ctx); err != nil {
+			_ = candidateProcess.Close()
+			return 0, fmt.Errorf("health check generation %d after Restore: %w", number, err)
 		}
 	}
-	if err := candidateProcess.Restore(ctx, state); err != nil {
-		_ = candidateProcess.Close()
-		return 0, fmt.Errorf("restore generation %d: %w", number, err)
+	if old == nil {
+		err = manager.persistProcessState(ctx, candidateProcess)
 	}
-	if _, err := candidateProcess.HealthCheck(ctx); err != nil {
+	if err != nil {
 		_ = candidateProcess.Close()
-		return 0, fmt.Errorf("health check generation %d after Restore: %w", number, err)
+		return 0, fmt.Errorf("persist reload candidate generation %d state: %w", number, err)
 	}
 
 	manager.mu.Lock()
@@ -276,13 +305,21 @@ func (manager *Manager) Reload(ctx context.Context, options ProcessOptions) (uin
 	manager.current = candidate
 	manager.next++
 	manager.all[number] = candidate
-	old.retiring = true
-	retireNow := old.refs == 0
+	manager.processOptions = candidateProcess.options
+	manager.restartAttempts = 0
+	manager.restartErrorType = ""
+	manager.restartState = initialRestartState(manager.restartPolicy)
+	retireNow := false
+	if old != nil {
+		old.retiring = true
+		retireNow = old.refs == 0
+	}
 	manager.mu.Unlock()
-	if retireNow {
+	if old != nil && retireNow {
 		manager.retire(old)
 	}
-	manager.debug("extension.reload.completed", "previous_generation", old.number, "generation", number)
+	manager.watchGeneration(candidate, false)
+	manager.debug("extension.reload.completed", "previous_generation", oldNumber, "generation", number)
 	return number, nil
 }
 
@@ -298,9 +335,11 @@ func (manager *Manager) CloseContext(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("Extension Host close context must not be nil")
 	}
+	manager.restartCancel()
 	manager.reloadMu.Lock()
 	manager.mu.Lock()
 	manager.closed = true
+	manager.restartState = RestartStateClosed
 	current := manager.current
 	manager.current = nil
 	idle := manager.idle
@@ -311,6 +350,7 @@ func (manager *Manager) CloseContext(ctx context.Context) error {
 	}
 	manager.mu.Unlock()
 	manager.reloadMu.Unlock()
+	manager.restartWait.Wait()
 
 	var closeErr error
 	select {
@@ -352,10 +392,11 @@ func (manager *Manager) configureGeneration(process *Process, number uint64) (*g
 	tools := make([]agent.Tool, len(rawTools))
 	for index, raw := range rawTools {
 		configured, err := extension.NewTool(extension.ToolOptions{
-			Tool:     raw,
-			Policy:   manager.policy,
-			Approver: manager.approver,
-			Recorder: manager.recorder,
+			Tool:               raw,
+			ToolInputValidator: manager.toolValidator,
+			Policy:             manager.policy,
+			Approver:           manager.approver,
+			Recorder:           manager.recorder,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("configure Extension Tool %q: %w", raw.Definition().Name, err)

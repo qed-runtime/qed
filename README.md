@@ -12,15 +12,18 @@ executable today
   ChatGPT-authenticated Codex Responses Providers
 - multiple Provider profiles in one Agent graph
 - concurrent subagents with collect, select, and consensus strategies
-- persistent Sessions, durable approval waits, and resume
+- profile-shared Provider concurrency limits, cooldowns, and bounded retries
+- active-Run steering, persistent Sessions, terminal follow-ups, and durable
+  approval resume
 - capability-controlled Coding Tools behind process-isolated Extensions
 - multiple Run-pinned Extension generations, Hooks, Commands, and host-owned state
-- manifest discovery and atomic development reload
+- manifest discovery, atomic development reload, and bounded crash restart
+- non-overwriting Go Extension scaffolds with lifecycle contract tests
 - fork-free, application-owned `extensions.lock` catalogs with live manifest validation
 - host-owned Evidence Bundles
 - Evidence-preserving Context compression, Prefix Manifests, prompt-cache Plans,
   and normalized cache Usage
-- Nagi-based CLI and single-turn TUI
+- Nagi-based CLI and multi-turn TUI
 - safe structured diagnostics propagated to the final Extension process
 
 ## Requirements
@@ -195,7 +198,10 @@ go run ./cmd/qed run --config ./qed.json --prompt "Review this plan"
 
 Use `--agent <id>` to override `default_agent`. Configuration contains
 credential environment or auth profile names, never token values. See
-[Agent configuration](docs/configuration.md) for the complete schema
+[Agent configuration](docs/configuration.md) for the complete schema. Agents
+that reference one Provider profile share its default four-stream outbound
+limit and observed rate-limit cooldown; configure
+`rate_limit.max_concurrency` on that profile when needed
 
 ## Run the Coding Profile
 
@@ -207,6 +213,10 @@ The standard Coding Profile exposes six model-facing Tools
 - `run_command`
 - `git_status`
 - `git_diff`
+
+For `worktree` and `base`, `git_diff` appends untracked regular files that are
+not excluded by standard Git ignore rules within the same bounded patch.
+`staged` remains index-only
 
 The checked-in `extensions.lock` selects the reusable `qed.workspace`,
 `qed.process`, and `qed.git` Extensions for this binary. Each runs across
@@ -270,7 +280,28 @@ is not an operating-system sandbox
 See [Coding Profile](docs/coding-profile.md) and
 [Extension processes](docs/extensions.md) for the detailed boundaries
 
-## Approval, Session resume, and Evidence
+## Steering, follow-up, approval resume, and Evidence
+
+The Runtime and Host APIs distinguish three forms of later input
+
+- `RunHandle.Steer` queues one user Message for the next safe Provider boundary
+  of the active Run
+- a follow-up starts a new Run with the same Session ID and configured Session
+  Store after the previous handle reaches a terminal result
+- `RunHandle.Resume` answers an explicit `run.waiting` request such as approval
+
+Steering is a bounded, non-blocking queue operation. It does not interrupt an
+in-flight Provider request, retry, or Tool batch. A `user.message.added` Event
+whose `UserMessageOrigin` is `steering` confirms that the Message entered
+Session state. Cancellation, deadline expiry, or terminal Run failure may
+discard steering that has not reached that Event. Follow-ups get a new Run ID
+and local limits; without a Session Store the caller must provide prior context
+itself. Reuse the same `*agent.Budget` explicitly when limits must span Runs
+
+The experimental TUI maps Enter to active-Run steering and, after the current
+Run reaches its terminal result, to a follow-up Run. A configured `--session-id`
+replays the persisted Session. Without one, the TUI carries the preceding Run
+messages forward for the lifetime of that chat
 
 Put capabilities in a Profile's `ask` list and use interactive approval
 
@@ -290,8 +321,8 @@ repeating the preceding Provider request
 go run ./cmd/qed session resume work-1 --config ./qed.json
 ```
 
-Configured Runs, configured TUI Runs, and resumed Runs save an Evidence Bundle
-when an Evidence Store is configured
+Configured Runs, every completed Run in a configured TUI chat, and resumed Runs
+save a separate Evidence Bundle when an Evidence Store is configured
 
 ```sh
 go run ./cmd/qed run inspect <run-id> --store .qed/evidence
@@ -308,11 +339,32 @@ go run ./cmd/qed tui --prompt "hello"
 ```
 
 The TUI also accepts `--config`, `--agent`, `--workspace`, and `--session-id`
-and uses the same configured Agent graph. When a Run waits for approval, press
-`Y` to approve or `N` to deny. Press `Q` or Escape to exit, or Ctrl-C to report
-cancellation with status 130
+and uses the same configured Agent graph. Type a message and press Enter to
+steer an active Run or start a follow-up after it finishes. When a Run waits
+for approval, press `Y` to approve or `N` to deny. Ctrl-C cancels only the
+current Run and keeps the chat open; Escape exits and cancels an active Run
+
+The view keeps recent user and assistant messages, streams assistant text, and
+shows content-free Run activity with Agent, Session, Run, Tool, and approval
+capability metadata. Tool arguments, Tool output, raw wait payloads, and raw
+Run errors are not copied into the rendered view state
 
 ## Develop an external Extension
+
+Create a Go reference scaffold inside an existing Go module. The parent
+directory must already exist and the destination must be new
+
+```sh
+mkdir -p ./extensions
+go run ./cmd/qed extension scaffold \
+  ./extensions/my-extension \
+  --id example.my-extension
+```
+
+The command generates an external manifest and executable, an importable
+`ServerOptions` implementation for self-exec, and a process-level lifecycle
+contract test. It never modifies `go.mod`, `go.sum`, or `extensions.lock`, and
+it refuses to overwrite even an empty destination directory
 
 An external Extension directory contains `qed-extension.json`. Start a
 development host directly from source
@@ -393,7 +445,7 @@ outcome, err := host.Run(ctx, agent.RunRequest{
 
 `Host` is transport-neutral and safe for concurrent Runs. The embedding
 application continues to own HTTP or gRPC schemas, authentication,
-authorization, rate limiting, and shutdown ordering. See
+authorization, inbound client or tenant rate limiting, and shutdown ordering. See
 [Embedding QED](docs/embedding.md) and the
 [standard-library server example](examples/embedded-server/README.md)
 
@@ -488,7 +540,8 @@ if err := registry.Register(orchestration.AgentDefinition{
 `select` asks a judge to select a candidate, and `consensus` asks a judge to
 synthesize a result. Candidates run concurrently and may use different
 Provider protocols. Shared default limits are 16 Agent Runs, depth 4, and 64
-Provider calls
+Provider calls. Each configured Provider profile also shares a default limit
+of four active Provider streams and any observed rate-limit cooldown
 
 ## Main import paths
 
@@ -522,14 +575,14 @@ go build ./...
 
 ## Current limitations
 
-- Extension processes are crash-isolated but are not automatically restarted
+- Automatic Extension restart does not replay an interrupted Tool call and can
+  restore only the latest host-owned Snapshot
 - `run_command` and Extension child processes use host-account authority and are not OS sandboxes
 - Tool Trace records use hashes, but the Bundle's public Events may contain prompts, messages, Tool arguments, Tool output, and errors; protect the Evidence Store as sensitive data
 - Evidence is not a complete workspace archive
-- Official Tools enforce strict concrete argument decoders; QED has no general-purpose JSON Schema validation engine
-- `git_diff` does not include untracked file content
+- Tool input uses a bounded JSON Schema subset plus strict concrete decoders; embedders can inject another validator, but QED does not implement the complete JSON Schema vocabulary
 - Shared token and cost limits depend on Provider-reported usage, which may be late or absent
-- The TUI is a single-turn interface, not a persistent chat client
+- The TUI composer is currently one line and the rendered transcript and activity history are each bounded to the most recent 256 entries
 - A built-in HTTP service, GitHub Actions adapter, SQLite Session Store, and WebAssembly backend are not implemented; existing servers can embed `qed.Host`
 - Compatibility with every third-party OpenAI-compatible API is not guaranteed
 - `openai-codex` follows an experimental ChatGPT backend contract and currently uses full Responses over SSE without model discovery, Responses Lite, or WebSocket transport

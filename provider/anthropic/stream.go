@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/qed-runtime/qed/agent"
+	providerbase "github.com/qed-runtime/qed/provider"
 	"github.com/qed-runtime/qed/provider/internal/httpjson"
 )
 
@@ -218,7 +219,10 @@ func (accumulator *messagesStreamAccumulator) next() (agent.ModelStreamEvent, er
 			if envelope.Error == nil {
 				return agent.ModelStreamEvent{}, errors.New("Anthropic Messages stream failed")
 			}
-			return agent.ModelStreamEvent{}, fmt.Errorf("Anthropic Messages stream failed %s: %s", envelope.Error.Type, envelope.Error.Message)
+			return agent.ModelStreamEvent{}, fmt.Errorf("Anthropic Messages stream failed: %w", &providerbase.APIError{
+				Type:    envelope.Error.Type,
+				Message: envelope.Error.Message,
+			})
 		case "ping":
 			continue
 		default:

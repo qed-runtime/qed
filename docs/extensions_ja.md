@@ -23,6 +23,49 @@ Host Policy + approval + Evidence
 process分離はlifecycleとcrashを隔離しますがsecurity sandboxではありません
 Extensionと起動したprogramはchild process accountの権限を保持します
 
+## Go Extension scaffold
+
+既存Go module内へ最初のGo layoutを作成します
+
+```sh
+mkdir -p ./extensions
+qed extension scaffold \
+  ./extensions/example-extension \
+  --id example.extension
+```
+
+destinationより上にある最も近い`go.mod`から生成import pathを決定します
+parent directoryは既に存在し、destination自体は存在しない必要があります
+IDはASCII letterまたはdigitで始まり、以降はletter、digit、dot、underscore、hyphenを利用でき、上限は256 byteです
+implementation versionもASCII letterまたはdigitで始まり、同じ文字に加えて先頭以外で`+`を利用でき、上限は128 byteです
+既定値は`0.1.0`で、`--extension-version`から指定できます
+生成import path要素は[Go Modules Reference](https://go.dev/ref/mod)に従います
+通常のbuild可能package layoutにならないhidden、underscore prefix、`testdata`のdestination要素は拒否します
+module discoveryはregularかつnon-symlinkの`go.mod`から最大1 MiBを読みます
+
+commandは次のlayoutを作成します
+
+```text
+example-extension/
+  .gitignore
+  README.md
+  extension/
+    extension.go
+  main.go
+  main_test.go
+  qed-extension.json
+```
+
+`main.go`はexternal process entrypointです
+nested `extension` packageは`Declaration`と`ServerOptions`をexportするため、同じimplementationをapplication所有`extensions.lock`からself-exec向けに選択できます
+生成testはactual test processに対して`contracttest.RunLifecycle`を実行します
+Tool、Hook、Commandを追加する場合はcomponent behavior testも追加します
+
+scaffoldは新規directoryだけを作成します
+空directoryを含む既存destinationを拒否し、生成失敗時は自身が作成したfileをrollbackします
+Go dependency commandを実行せず、`go.mod`、`go.sum`、`extensions.lock`を変更しません
+所有moduleは通常のdependency workflowでQED dependencyを追加する必要があります
+
 ## Protocol v1
 
 各messageは4-byte unsigned big-endian payload lengthを前置したUTF-8 JSON objectです
@@ -59,6 +102,24 @@ Hookはpublic Agent Event JSONとRun identityだけを受け取ります
 各Toolはname、description、input schema、static capability、invocation固有capabilityの有無を宣言します
 Hostはdynamic capabilityを問い合わせ、結合したsetを`capability.Policy`で評価し、必要なapprovalを取得した後だけ`invoke_tool`を送ります
 
+RuntimeはProviderが返したargumentをdynamic capability解決、Policy、approval、Tool実行より前に検証します
+Extension serverはdirect protocol callを含むRPC境界でも同じargumentを再検証します
+validation failureは通常の失敗Tool resultとなり、modelは次の通常turnで修正できます
+Provider failureではないためProvider retryは起動しません
+
+全validator経路でschemaを1 MiB、argumentを8 MiB、nestingを64に制限し、重複JSON key、trailing value、不正JSONを拒否します
+依存追加のない既定実装はJSON Schema subsetです
+`integer`を含む全JSON `type`に加えて`properties`、`required`、booleanの`additionalProperties`、単一schemaの`items`、`minItems`、`minimum`、`maximum`、`enum`をサポートします
+`description`と`title`はannotationとして受理します
+既定実装ではcompile済みschema nodeと`required` nameは4096、`enum` entryは256が上限です
+不正schemaと未対応keywordは無視せず拒否します
+schema省略時はobject schemaを使用します
+
+別dialectが必要なapplicationは`agent.ToolInputValidator`と`agent.CompiledToolInputValidator`を実装できます
+`agent.Options`、`qed.HostLoadOptions`、`extension.ToolOptions`、`host.ManagerOptions`、`coding.Options`、`server.Options`から注入できます
+custom host validatorはprocess-localであり、process分離Extensionは自身の`server.Options.ToolInputValidator`にも設定する必要があります
+具象Tool decoderはdefense in depthとして引き続き必要です
+
 Tool definitionはRuntimeへ入る前にExtension IDとgeneration metadataを受け取ります
 Evidenceはそのoriginとargumentおよびoutputのhashを記録します
 
@@ -71,6 +132,9 @@ ToolとHookは完全なRunに対して同じgeneration setからatomicに取得�
 
 Hook handlerはcontext cancellationに従い、長時間または不可逆なside effectを避ける必要があります
 Extension RPCとStore appendは単一transactionではないため、Hook成功後にSession Storeが失敗する可能性があります
+
+active Runのsteeringは`user.message.added` Event typeを維持し、任意fieldの`user_message_origin`を`steering`に設定します
+このtypeを購読するHookはRun inputとsteering Messageの両方を受け取るため、strict protocol decoderは任意fieldを含める必要があります
 
 ### Command
 
@@ -299,6 +363,10 @@ QED repositoryは現在次の3つの再利用可能なExtensionを選択して�
 Coding Profileは3つを合成し、別Host repositoryは自身のlockで必要なpackageだけを選択できます
 self-execでも各Extensionは独立したprocess、identity、generation、reload、state namespaceを持ちます
 
+test実行は専用Test Extensionではなく汎用`qed.process` command Toolの用途として扱います
+permission判断はPermission ExtensionではなくHost Policyとoptional Approverに維持します
+このownershipはfirst-partyとthird-partyのExtensionへ同じように適用します
+
 ## Host enforcementとlifecycle
 
 initial startup
@@ -332,7 +400,46 @@ start and validate candidate
 
 publication前のfailureはcandidateを閉じてactive generationを維持します
 process crashはHostを終了させずpending RPC requestをfailさせます
-automatic restartは未実装です
+
+直接構築するManagerではautomatic restartはopt-inです
+
+```go
+manager, err := host.NewManager(ctx, host.ManagerOptions{
+    Process:       processOptions,
+    Policy:        policy,
+    StateStore:    stateStore,
+    RestartPolicy: host.DefaultRestartPolicy(),
+})
+```
+
+Coding Profileとdevelopment hostはpolicy pointerがnilの場合に`DefaultRestartPolicy`を使います
+既定値はreplacement candidate 3回、initial backoff 100ms、exponential backoff上限2秒、generationが30秒生存した後の連続count resetです
+直接構築するManagerではzero-value policyがautomatic restartを無効にします
+Coding Profileまたはdevelopment hostで無効にする場合はzero-value `host.RestartPolicy`へのpointerを設定します
+
+unexpected exitは次の順序で処理します
+
+```text
+fail RPC requests pinned to the crashed generation
+  -> remove that generation from new lease selection
+  -> return ErrExtensionRestarting to new acquisition
+  -> wait for bounded backoff
+  -> start with the last successfully published ProcessOptions
+  -> revalidate identity and the locked manifest when configured
+  -> load and Restore the latest host-owned Snapshot when configured
+  -> HealthCheck and, when a State Store is configured, Snapshot and persist
+  -> publish the next generation for new Runs
+```
+
+既存Run leaseは別generationへ移動せず、QEDは中断したTool callを再実行しません
+Toolの副作用がcrash前に発生している可能性があるためです
+失敗candidateはgeneration番号を消費しません
+candidate startup failureとstability window前に終了したreplacement generationは同じattempt上限を消費します
+上限到達後の新規acquisitionは`ErrExtensionCircuitOpen`を返します
+明示的な`Manager.Reload`がcandidate検証に成功するとcircuitを閉じます
+
+`Manager.RestartStatus`は`disabled`、`ready`、`restarting`、`circuit_open`、`closed`、連続attempt数、current generation、payloadを含まないlast error typeを返します
+verbose lifecycle logもRPC payloadを含めず同じ安全なIDとcounterを記録します
 
 ## Host所有Extension state
 
@@ -340,6 +447,8 @@ automatic restartは未実装です
 QEDはconcurrent memory storeと、1 MiB value上限を持つprivateかつatomicなJSON storeを提供します
 
 Managerはinitial startupで`snapshot` keyをrestoreし、reload時に更新し、orderly closeでcurrent processをpersistします
+automatic restart有効時はinitial startupと各replacementもpublication前にbaseline Snapshotをpersistします
+crash後にrestoreできるのは最新のhost所有Snapshotであり、それより新しいprocess stateは失われる場合があります
 declarative Coding ProfileはworkspaceとProfile IDのdigestでscopeを分け、無関係なProfile間の意図しないstate共有を防ぎます
 
 SnapshotとRestoreは必要なprocess-local stateに利用します

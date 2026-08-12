@@ -10,14 +10,16 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - OpenAI Responses、OpenAI Chat Completions、Anthropic Messages、ChatGPT認証のCodex Responses Provider
 - 1つのAgent graphで利用できる複数Provider profile
 - collect、select、consensusに対応する並行サブエージェント
-- 永続Session、永続的な承認待ち、resume
+- profile共有のProvider concurrency上限、cooldown、bounded retry
+- active Runへのsteering、永続Session、terminal後のfollow-up、永続的な承認resume
 - process分離Extension内のcapability制御されたCoding Tool
 - 複数のRun固定Extension generation、Hook、Command、host所有state
-- manifest discoveryと開発時のatomic reload
+- manifest discovery、開発時のatomic reload、bounded crash restart
+- lifecycle contract test付きで既存fileを上書きしないGo Extension scaffold
 - fork不要でapplicationが所有する`extensions.lock` catalogとlive manifest validation
 - host所有Evidence Bundle
 - Evidence preservingなContext圧縮、Prefix Manifest、prompt cache Plan、正規化cache Usage
-- NagiベースのCLIと単一turn TUI
+- NagiベースのCLIとmulti-turn TUI
 - 末端のExtension processまで伝搬する安全な構造化diagnostics
 
 ## 要件
@@ -184,6 +186,8 @@ go run ./cmd/qed run --config ./qed.json --prompt "Review this plan"
 `--agent <id>`で`default_agent`を1回の実行だけ上書きできます
 設定にはtoken valueではなくcredential environment名またはauth profile名を記載します
 完全なschemaは[Agent設定](docs/configuration_ja.md)を参照してください
+同じProvider profileを参照するAgentは既定のoutbound 4 stream上限と観測したrate limit cooldownを共有します
+必要な場合はそのprofileの`rate_limit.max_concurrency`を設定します
 
 ## Coding Profileの実行
 
@@ -195,6 +199,9 @@ go run ./cmd/qed run --config ./qed.json --prompt "Review this plan"
 - `run_command`
 - `git_status`
 - `git_diff`
+
+`git_diff`の`worktree`と`base`はstandard Git ignore ruleで除外されないuntracked regular fileを同じbounded patchへ追加します
+`staged`はindexだけを対象にします
 
 checked-in `extensions.lock`はこのbinary向けに再利用可能な`qed.workspace`、`qed.process`、`qed.git` Extensionを選択します
 各Extensionはsingle binaryのself-exec modeを含め、常にExtension Protocol v1境界で実行されます
@@ -254,7 +261,23 @@ Profileはworkspace相対pathを受け取り、編集時にdigestまたはabsenc
 
 詳細な境界は[Coding Profile](docs/coding-profile_ja.md)と[Extension process](docs/extensions_ja.md)を参照してください
 
-## 承認、Session resume、Evidence
+## steering、follow-up、承認resume、Evidence
+
+RuntimeとHost APIは後から与える入力を3種類に分けます
+
+- `RunHandle.Steer`はactive Runの次の安全なProvider境界へ1つのuser Messageをqueueする
+- follow-upは前のhandleがterminal resultへ達した後、設定済みSession Storeと同じSession IDで新しいRunを開始する
+- `RunHandle.Resume`はapprovalなど明示的な`run.waiting` requestへ応答する
+
+steeringは上限付きのnon-blocking queue操作です
+in-flight Provider request、retry、Tool batchは中断しません
+`UserMessageOrigin`が`steering`の`user.message.added` Eventが、MessageをSession stateへ反映した確定点です
+cancel、Deadline切れ、terminal Run failureでは、このEventへ到達していないsteeringを破棄する場合があります
+follow-upは新しいRun IDとRun local上限を持ち、Session Storeがない場合はcallerが過去contextを渡す必要があります
+複数Runで上限を共有する場合だけ同じ`*agent.Budget`を明示的に再利用します
+
+実験的TUIではEnterをactive Runへのsteeringへ割り当て、現在のRunがterminal resultへ達した後はfollow-up Runを開始します
+設定済み`--session-id`がある場合は永続Sessionをreplayし、ない場合はそのchatが続く間だけ前Runのmessageを引き継ぎます
 
 Profileの`ask` listへcapabilityを置き、対話承認を有効にできます
 
@@ -273,7 +296,7 @@ JSONL Sessionの待機中にprocessが終了した場合、直前のProvider req
 go run ./cmd/qed session resume work-1 --config ./qed.json
 ```
 
-Evidence Storeが設定されている場合、設定Run、設定TUI Run、resume RunはEvidence Bundleを保存します
+Evidence Storeが設定されている場合、設定Run、設定TUI chat内で完了した各Run、resume Runは個別のEvidence Bundleを保存します
 
 ```sh
 go run ./cmd/qed run inspect <run-id> --store .qed/evidence
@@ -289,10 +312,27 @@ go run ./cmd/qed tui --prompt "hello"
 ```
 
 TUIは`--config`、`--agent`、`--workspace`、`--session-id`にも対応し、同じ設定Agent graphを利用します
+messageを入力してEnterを押すとactive Runへsteeringし、完了後はfollow-upを開始します
 Runが承認待ちになった場合は`Y`で許可、`N`で拒否します
-`Q`またはEscapeで終了し、Ctrl-Cはstatus 130のcancelとして扱います
+Ctrl-Cは現在のRunだけをcancelしてchatを維持し、Escapeはactive RunをcancelしてTUIを終了します
+
+TUIは最近のuserとassistant messageを保持し、assistant textをstream表示し、Agent、Session、Run、Tool、approval Capabilityの本文なしactivityを表示します
+Tool引数、Tool出力、raw wait payload、raw Run errorはrendering用の表示状態へ保持しません
 
 ## 外部Extensionの開発
+
+既存Go module内へGo reference scaffoldを作成できます
+parent directoryは既に存在し、destinationは新規である必要があります
+
+```sh
+mkdir -p ./extensions
+go run ./cmd/qed extension scaffold \
+  ./extensions/my-extension \
+  --id example.my-extension
+```
+
+commandはexternal manifestとexecutable、self-exec向けにimport可能な`ServerOptions` implementation、process-level lifecycle contract testを生成します
+`go.mod`、`go.sum`、`extensions.lock`は変更せず、空directoryを含む既存destinationへの上書きを拒否します
 
 外部Extension directoryには`qed-extension.json`を配置します
 sourceから直接development hostを開始できます
@@ -365,7 +405,7 @@ outcome, err := host.Run(ctx, agent.RunRequest{
 ```
 
 `Host`はtransport-neutralで、複数Runから並行利用できます
-HTTPまたはgRPC schema、authentication、authorization、rate limit、shutdown順序は組み込み先applicationが引き続き所有します
+HTTPまたはgRPC schema、authentication、authorization、inbound clientまたはtenant rate limit、shutdown順序は組み込み先applicationが引き続き所有します
 [QEDの組み込み](docs/embedding_ja.md)と[標準library server example](examples/embedded-server/README.md)を参照してください
 
 より小さいprogrammatic integrationでは`agent.Runtime`を直接利用します
@@ -457,6 +497,7 @@ if err := registry.Register(orchestration.AgentDefinition{
 `delegate`は1つのcandidateを実行し、`collect`は全outcomeを返し、`select`はjudgeにcandidateを選択させ、`consensus`はjudgeに結果を統合させます
 candidateは並行実行され、異なるProvider protocolを利用できます
 共有既定上限はAgent Run 16、depth 4、Provider call 64です
+設定済みProvider profileごとにactive Provider stream 4つの既定上限と、観測したrate limit cooldownも共有します
 
 ## 主なimport path
 
@@ -490,14 +531,14 @@ go build ./...
 
 ## 現在の制限
 
-- Extension processはcrash隔離されますが自動restartされません
+- Extension automatic restartは中断したTool callを再実行せず、最新のhost所有Snapshotだけを
+  restoreします
 - `run_command`とExtension child processはhost account権限で動作し、OS sandboxではありません
 - Tool Trace recordはhashを使いますが、Bundleのpublic Eventはprompt、message、Tool引数、Tool output、errorを含む場合があるためEvidence Storeを機密データとして保護する必要があります
 - Evidenceは完全なworkspace archiveではありません
-- 公式Toolはstrictな具象argument decoderで検証し、汎用JSON Schema validation engineはありません
-- `git_diff`はuntracked fileの内容を含みません
+- Tool inputは上限付きJSON Schema subsetとstrictな具象argument decoderで検証しますが、完全なJSON Schema vocabularyは実装せず、別validatorは組み込み側から注入します
 - 共有tokenとcost上限はProviderがusageを遅れて返す場合や返さない場合に完全には強制できません
-- TUIは単一turn interfaceであり、永続chat clientではありません
+- TUI composerは現在1行で、表示するtranscriptとactivity historyはそれぞれ直近256件に制限します
 - built-in HTTP service、GitHub Actions Adapter、SQLite Session Store、WebAssembly backendは未実装ですが、既存serverは`qed.Host`を組み込めます
 - すべてのthird-party OpenAI互換APIとの互換性は保証しません
 - `openai-codex`はexperimentalなChatGPT backend contractに追従し、現在はmodel discovery、Responses Lite、WebSocket transportを持たないfull ResponsesのSSE経路だけを利用します

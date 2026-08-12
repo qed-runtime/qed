@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/qed-runtime/qed/agent"
+	providerbase "github.com/qed-runtime/qed/provider"
 	"github.com/qed-runtime/qed/provider/internal/httpjson"
 )
 
@@ -77,7 +78,10 @@ func (provider *Provider) completeResponses(ctx context.Context, request agent.M
 
 func (provider *Provider) messageFromResponsesResponse(response responsesResponse) (agent.Message, error) {
 	if response.Error != nil {
-		return agent.Message{}, fmt.Errorf("OpenAI response failed %s: %s", response.Error.Code, response.Error.Message)
+		return agent.Message{}, fmt.Errorf("OpenAI response failed: %w", &providerbase.APIError{
+			Code:    response.Error.Code,
+			Message: response.Error.Message,
+		})
 	}
 	if response.Status == "failed" || response.Status == "cancelled" {
 		return agent.Message{}, fmt.Errorf("OpenAI response ended with status %q", response.Status)

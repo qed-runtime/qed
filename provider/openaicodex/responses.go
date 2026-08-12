@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/qed-runtime/qed/agent"
+	providerbase "github.com/qed-runtime/qed/provider"
 )
 
 var emptyObjectSchema = json.RawMessage(`{"type":"object","properties":{}}`)
@@ -182,7 +183,10 @@ func messageInput(role, contentType, text string) (json.RawMessage, error) {
 
 func (provider *Provider) messageFromResponsesResponse(response responsesResponse) (agent.Message, error) {
 	if response.Error != nil {
-		return agent.Message{}, fmt.Errorf("OpenAI Codex response failed %s: %s", response.Error.Code, response.Error.Message)
+		return agent.Message{}, fmt.Errorf("OpenAI Codex response failed: %w", &providerbase.APIError{
+			Code:    response.Error.Code,
+			Message: response.Error.Message,
+		})
 	}
 	if response.Status == "failed" || response.Status == "cancelled" {
 		return agent.Message{}, fmt.Errorf("OpenAI Codex response ended with status %q", response.Status)
@@ -236,9 +240,6 @@ func (provider *Provider) messageFromResponsesResponse(response responsesRespons
 			arguments := json.RawMessage(call.Arguments)
 			if len(arguments) == 0 {
 				arguments = json.RawMessage(`{}`)
-			}
-			if !json.Valid(arguments) {
-				return agent.Message{}, fmt.Errorf("OpenAI Codex function %q returned invalid JSON arguments", call.Name)
 			}
 			toolCalls = append(toolCalls, agent.ToolCall{ID: call.CallID, Name: call.Name, Arguments: arguments})
 		}

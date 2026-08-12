@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"time"
+
+	providerbase "github.com/qed-runtime/qed/provider"
 )
 
 // Role identifies the author or purpose of a message
@@ -100,7 +102,7 @@ type ToolCall struct {
 	ID string `json:"id"`
 	// Name must exactly match a registered Tool name
 	Name string `json:"name"`
-	// Arguments must contain one valid JSON value when present
+	// Arguments contains Provider-supplied JSON validated before Tool execution
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
@@ -110,7 +112,7 @@ type ToolDefinition struct {
 	Name string `json:"name"`
 	// Description explains when the Provider should use the Tool
 	Description string `json:"description,omitempty"`
-	// InputSchema describes Arguments but is not enforced by the minimal Runtime
+	// InputSchema describes Arguments and is enforced before Tool execution
 	InputSchema json.RawMessage `json:"input_schema,omitempty"`
 	// Capabilities identifies host permissions required to execute this Tool
 	//
@@ -284,23 +286,80 @@ const (
 // EventType identifies a state change emitted by a Run
 type EventType string
 
+// UserMessageOrigin identifies how a user.message.added Event entered a Run
+type UserMessageOrigin string
+
+// User message origins
+const (
+	// UserMessageOriginRunInput identifies RunRequest input, including follow-up input
+	//
+	// It is the zero value so Events written before steering support remain compatible
+	UserMessageOriginRunInput UserMessageOrigin = ""
+	// UserMessageOriginSteering identifies input queued through RunHandle.Steer
+	UserMessageOriginSteering UserMessageOrigin = "steering"
+)
+
 // Event types emitted by the minimal runtime
 const (
 	EventRunStarted       EventType = "run.started"
 	EventUserMessageAdded EventType = "user.message.added"
 	EventContextCompacted EventType = "context.compacted"
-	EventModelRequest     EventType = "model.request.started"
-	EventMessageStarted   EventType = "message.started"
-	EventMessageDelta     EventType = "message.delta"
-	EventMessageCompleted EventType = "message.completed"
-	EventToolStarted      EventType = "tool.started"
-	EventToolCompleted    EventType = "tool.completed"
-	EventRunWaiting       EventType = "run.waiting"
-	EventRunResumed       EventType = "run.resumed"
-	EventRunCompleted     EventType = "run.completed"
-	EventRunFailed        EventType = "run.failed"
-	EventRunCanceled      EventType = "run.canceled"
+	// EventProviderRateLimitWait reports a queued outbound Provider attempt
+	EventProviderRateLimitWait EventType = "provider.rate_limit.waiting"
+	EventModelRequest          EventType = "model.request.started"
+	EventProviderRetry         EventType = "provider.retry.scheduled"
+	EventMessageStarted        EventType = "message.started"
+	EventMessageDelta          EventType = "message.delta"
+	EventMessageCompleted      EventType = "message.completed"
+	EventToolStarted           EventType = "tool.started"
+	EventToolCompleted         EventType = "tool.completed"
+	EventRunWaiting            EventType = "run.waiting"
+	EventRunResumed            EventType = "run.resumed"
+	EventRunCompleted          EventType = "run.completed"
+	EventRunFailed             EventType = "run.failed"
+	EventRunCanceled           EventType = "run.canceled"
 )
+
+// ProviderErrorInfo describes a Provider failure without response content
+type ProviderErrorInfo struct {
+	// Code is the provider-neutral error classification
+	Code providerbase.ErrorCode `json:"code"`
+	// Attempt is the one-based attempt that failed within one logical model request
+	Attempt int `json:"attempt"`
+	// RetryAfterMilliseconds is the server-requested minimum delay when available
+	RetryAfterMilliseconds int64 `json:"retry_after_ms,omitempty"`
+}
+
+// ProviderRetryInfo describes one scheduled retry of a logical model request
+type ProviderRetryInfo struct {
+	// Error describes the transient failure that triggered this retry
+	Error ProviderErrorInfo `json:"error"`
+	// NextAttempt is the one-based attempt that follows the delay
+	NextAttempt int `json:"next_attempt"`
+	// DelayMilliseconds is the effective delay before NextAttempt
+	DelayMilliseconds int64 `json:"delay_ms"`
+}
+
+// ProviderRateLimitWaitReason identifies why a Provider attempt is waiting
+type ProviderRateLimitWaitReason string
+
+// Provider rate-limit wait reasons
+const (
+	// ProviderRateLimitWaitConcurrency means every active-stream permit is occupied
+	ProviderRateLimitWaitConcurrency ProviderRateLimitWaitReason = "concurrency"
+	// ProviderRateLimitWaitCooldown means an observed rate-limit delay is active
+	ProviderRateLimitWaitCooldown ProviderRateLimitWaitReason = "cooldown"
+)
+
+// ProviderRateLimitWaitInfo describes a wait before an outbound Provider attempt
+type ProviderRateLimitWaitInfo struct {
+	// Reason identifies the active concurrency or shared cooldown constraint
+	Reason ProviderRateLimitWaitReason `json:"reason"`
+	// MaxConcurrency is the active stream limit shared by the Provider pool
+	MaxConcurrency int `json:"max_concurrency"`
+	// RetryAfterMilliseconds is the remaining shared cooldown when known
+	RetryAfterMilliseconds int64 `json:"retry_after_ms,omitempty"`
+}
 
 // Event is one ordered state change emitted by a Run
 type Event struct {
@@ -325,12 +384,27 @@ type Event struct {
 	PrefixManifest *PrefixManifest `json:"prefix_manifest,omitempty"`
 	// CachePlan describes the effective Provider cache decision for a model request
 	CachePlan *CachePlan `json:"cache_plan,omitempty"`
+	// ProviderCall is the one-based Run-wide Provider attempt for model request and retry Events
+	ProviderCall int `json:"provider_call,omitempty"`
+	// ProviderAttempt is the one-based attempt within one logical model request
+	ProviderAttempt int `json:"provider_attempt,omitempty"`
+	// ProviderError describes a terminal Provider failure
+	ProviderError *ProviderErrorInfo `json:"provider_error,omitempty"`
+	// ProviderRetry describes the transient failure and scheduled retry delay
+	ProviderRetry *ProviderRetryInfo `json:"provider_retry,omitempty"`
+	// ProviderRateLimitWait describes why an outbound Provider attempt is queued
+	ProviderRateLimitWait *ProviderRateLimitWaitInfo `json:"provider_rate_limit_wait,omitempty"`
 	// ContextCheckpoint is the newly published Checkpoint for context.compacted
 	ContextCheckpoint *ContextCheckpoint `json:"context_checkpoint,omitempty"`
 	// ContextCompaction describes the provider-neutral reduction for context.compacted
 	ContextCompaction *ContextCompactionReport `json:"context_compaction,omitempty"`
 	// Message is present for message events
 	Message *Message `json:"message,omitempty"`
+	// UserMessageOrigin distinguishes active-Run steering from RunRequest input
+	//
+	// It is only meaningful for user.message.added Events. An empty value means
+	// the Message came from RunRequest.Input, including a follow-up Run.
+	UserMessageOrigin UserMessageOrigin `json:"user_message_origin,omitempty"`
 	// Delta contains incremental assistant text for message.delta
 	Delta string `json:"delta,omitempty"`
 	// ToolCall is present for Tool events

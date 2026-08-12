@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -70,6 +71,8 @@ type LoadOptions struct {
 	Context  context.Context
 	Approver capability.Approver
 	Recorder evidence.Recorder
+	// ToolInputValidator compiles Tool schemas for Runtime and Extension boundaries
+	ToolInputValidator agent.ToolInputValidator
 	// Verbose enables safe structured Runtime and Extension diagnostics
 	Verbose bool
 	// DebugWriter receives JSON diagnostics when Logger is nil
@@ -245,26 +248,38 @@ type registryLimits struct {
 }
 
 type providerProfile struct {
-	Protocol          string                   `json:"protocol"`
-	BaseURL           string                   `json:"base_url,omitempty"`
-	Model             string                   `json:"model,omitempty"`
-	TokenEnv          string                   `json:"token_env,omitempty"`
-	AuthProfile       string                   `json:"auth_profile,omitempty"`
-	MaxOutputTokens   int                      `json:"max_output_tokens,omitempty"`
-	APIVersion        string                   `json:"api_version,omitempty"`
-	Pricing           *cachePricingProfile     `json:"pricing,omitempty"`
-	CacheCapabilities *agent.CacheCapabilities `json:"cache_capabilities,omitempty"`
+	Protocol          string                    `json:"protocol"`
+	BaseURL           string                    `json:"base_url,omitempty"`
+	Model             string                    `json:"model,omitempty"`
+	TokenEnv          string                    `json:"token_env,omitempty"`
+	AuthProfile       string                    `json:"auth_profile,omitempty"`
+	MaxOutputTokens   int                       `json:"max_output_tokens,omitempty"`
+	APIVersion        string                    `json:"api_version,omitempty"`
+	Pricing           *cachePricingProfile      `json:"pricing,omitempty"`
+	CacheCapabilities *agent.CacheCapabilities  `json:"cache_capabilities,omitempty"`
+	RateLimit         *providerRateLimitProfile `json:"rate_limit,omitempty"`
+}
+
+type providerRateLimitProfile struct {
+	MaxConcurrency int `json:"max_concurrency,omitempty"`
 }
 
 type agentProfile struct {
-	Provider         string              `json:"provider"`
-	Profile          string              `json:"profile,omitempty"`
-	Instructions     string              `json:"instructions,omitempty"`
-	MaxProviderCalls int                 `json:"max_provider_calls,omitempty"`
-	MaxToolCalls     int                 `json:"max_tool_calls,omitempty"`
-	Delegations      []delegationProfile `json:"delegations,omitempty"`
-	Context          *contextProfile     `json:"context,omitempty"`
-	Cache            *cacheProfile       `json:"cache,omitempty"`
+	Provider         string                `json:"provider"`
+	Profile          string                `json:"profile,omitempty"`
+	Instructions     string                `json:"instructions,omitempty"`
+	MaxProviderCalls int                   `json:"max_provider_calls,omitempty"`
+	MaxToolCalls     int                   `json:"max_tool_calls,omitempty"`
+	ProviderRetry    *providerRetryProfile `json:"provider_retry,omitempty"`
+	Delegations      []delegationProfile   `json:"delegations,omitempty"`
+	Context          *contextProfile       `json:"context,omitempty"`
+	Cache            *cacheProfile         `json:"cache,omitempty"`
+}
+
+type providerRetryProfile struct {
+	MaxAttempts    int    `json:"max_attempts,omitempty"`
+	InitialBackoff string `json:"initial_backoff,omitempty"`
+	MaxBackoff     string `json:"max_backoff,omitempty"`
 }
 
 type contextProfile struct {
@@ -348,7 +363,7 @@ func build(document fileConfig, options LoadOptions, configurationDirectory stri
 		return nil, errors.New("at least one agent is required")
 	}
 
-	providers, err := buildProviders(document.Providers, options)
+	providers, providerLimiters, err := buildProviders(document.Providers, options)
 	if err != nil {
 		return nil, err
 	}
@@ -405,15 +420,17 @@ func build(document fileConfig, options LoadOptions, configurationDirectory stri
 	}
 
 	builder := graphBuilder{
-		agents:    document.Agents,
-		providers: providers,
-		profiles:  profiles,
-		registry:  registry,
-		sessions:  sessions,
-		objects:   objectStore,
-		pricing:   pricing,
-		states:    make(map[string]buildState, len(document.Agents)),
-		logger:    options.Logger,
+		agents:        document.Agents,
+		providers:     providers,
+		limiters:      providerLimiters,
+		profiles:      profiles,
+		registry:      registry,
+		sessions:      sessions,
+		objects:       objectStore,
+		pricing:       pricing,
+		states:        make(map[string]buildState, len(document.Agents)),
+		logger:        options.Logger,
+		toolValidator: options.ToolInputValidator,
 	}
 	for _, agentID := range sortedKeys(document.Agents) {
 		if err := validateID("agent ID", agentID); err != nil {
@@ -639,6 +656,7 @@ func buildExecutionProfiles(
 			Root:               options.WorkspaceRoot,
 			Extensions:         profileExtensions,
 			Policy:             policy,
+			ToolInputValidator: options.ToolInputValidator,
 			Approver:           options.Approver,
 			Recorder:           recorder,
 			StateStore:         stateStore,
@@ -835,19 +853,36 @@ func selectedEnvironment(names []string, lookupEnv LookupEnv) (map[string]string
 	return result, nil
 }
 
-func buildProviders(profiles map[string]providerProfile, options LoadOptions) (map[string]agent.Provider, error) {
+func buildProviders(
+	profiles map[string]providerProfile,
+	options LoadOptions,
+) (map[string]agent.Provider, map[string]*agent.ProviderRateLimiter, error) {
 	providers := make(map[string]agent.Provider, len(profiles))
+	limiters := make(map[string]*agent.ProviderRateLimiter, len(profiles))
 	for _, profileID := range sortedKeys(profiles) {
 		if err := validateID("provider profile ID", profileID); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		configured, err := buildProvider(profileID, profiles[profileID], options)
 		if err != nil {
-			return nil, fmt.Errorf("provider profile %q: %w", profileID, err)
+			return nil, nil, fmt.Errorf("provider profile %q: %w", profileID, err)
+		}
+		limiter, err := buildProviderRateLimiter(profiles[profileID].RateLimit)
+		if err != nil {
+			return nil, nil, fmt.Errorf("provider profile %q rate limit: %w", profileID, err)
 		}
 		providers[profileID] = configured
+		limiters[profileID] = limiter
 	}
-	return providers, nil
+	return providers, limiters, nil
+}
+
+func buildProviderRateLimiter(specification *providerRateLimitProfile) (*agent.ProviderRateLimiter, error) {
+	policy := agent.ProviderRateLimitPolicy{}
+	if specification != nil {
+		policy.MaxConcurrency = specification.MaxConcurrency
+	}
+	return agent.NewProviderRateLimiter(policy)
 }
 
 func buildProvider(profileID string, profile providerProfile, options LoadOptions) (agent.Provider, error) {
@@ -916,7 +951,7 @@ func buildProvider(profileID string, profile providerProfile, options LoadOption
 		}
 		if profile.BaseURL != "" || profile.TokenEnv != "" || profile.MaxOutputTokens != 0 || profile.APIVersion != "" ||
 			profile.CacheCapabilities != nil {
-			return nil, errors.New("openai-codex profile accepts only protocol, model, auth_profile, and pricing")
+			return nil, errors.New("openai-codex profile accepts only protocol, model, auth_profile, pricing, and rate_limit")
 		}
 		var authService *chatauth.Service
 		var err error
@@ -1022,16 +1057,18 @@ const (
 )
 
 type graphBuilder struct {
-	agents    map[string]agentProfile
-	providers map[string]agent.Provider
-	profiles  map[string]*coding.Profile
-	registry  *orchestration.AgentRegistry
-	sessions  agent.SessionStore
-	objects   agent.EvidenceObjectStore
-	pricing   map[string]*agent.CachePricing
-	states    map[string]buildState
-	stack     []string
-	logger    *slog.Logger
+	agents        map[string]agentProfile
+	providers     map[string]agent.Provider
+	limiters      map[string]*agent.ProviderRateLimiter
+	profiles      map[string]*coding.Profile
+	registry      *orchestration.AgentRegistry
+	sessions      agent.SessionStore
+	objects       agent.EvidenceObjectStore
+	pricing       map[string]*agent.CachePricing
+	states        map[string]buildState
+	stack         []string
+	logger        *slog.Logger
+	toolValidator agent.ToolInputValidator
 }
 
 func (builder *graphBuilder) buildAgent(agentID string) error {
@@ -1102,6 +1139,10 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 		cachePolicy.IsolationKey = specification.Cache.IsolationKey
 		cachePolicy.Family = specification.Cache.Family
 	}
+	providerRetry, err := buildProviderRetryPolicy(specification.ProviderRetry)
+	if err != nil {
+		return fmt.Errorf("agent %q Provider retry: %w", agentID, err)
+	}
 
 	for index, delegation := range specification.Delegations {
 		if delegation.Name == "" || strings.TrimSpace(delegation.Name) != delegation.Name {
@@ -1143,15 +1184,18 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 	}
 
 	runtime, err := agent.NewRuntime(agent.Options{
-		Provider:         modelProvider,
-		Tools:            tools,
-		ComponentSource:  componentSource,
-		MaxProviderCalls: specification.MaxProviderCalls,
-		MaxToolCalls:     specification.MaxToolCalls,
-		SessionStore:     builder.sessions,
-		ContextCompiler:  contextCompiler,
-		CachePolicy:      cachePolicy,
-		Logger:           builder.logger,
+		Provider:            modelProvider,
+		ProviderRateLimiter: builder.limiters[specification.Provider],
+		ToolInputValidator:  builder.toolValidator,
+		Tools:               tools,
+		ComponentSource:     componentSource,
+		MaxProviderCalls:    specification.MaxProviderCalls,
+		MaxToolCalls:        specification.MaxToolCalls,
+		SessionStore:        builder.sessions,
+		ContextCompiler:     contextCompiler,
+		CachePolicy:         cachePolicy,
+		ProviderRetry:       providerRetry,
+		Logger:              builder.logger,
 	})
 	if err != nil {
 		return fmt.Errorf("agent %q runtime: %w", agentID, err)
@@ -1165,6 +1209,27 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 	}
 	builder.states[agentID] = buildComplete
 	return nil
+}
+
+func buildProviderRetryPolicy(specification *providerRetryProfile) (agent.ProviderRetryPolicy, error) {
+	if specification == nil {
+		return agent.ProviderRetryPolicy{}, nil
+	}
+	policy := agent.ProviderRetryPolicy{MaxAttempts: specification.MaxAttempts}
+	var err error
+	if specification.InitialBackoff != "" {
+		policy.InitialBackoff, err = time.ParseDuration(specification.InitialBackoff)
+		if err != nil || policy.InitialBackoff <= 0 {
+			return agent.ProviderRetryPolicy{}, fmt.Errorf("initial_backoff %q must be a positive Go duration", specification.InitialBackoff)
+		}
+	}
+	if specification.MaxBackoff != "" {
+		policy.MaxBackoff, err = time.ParseDuration(specification.MaxBackoff)
+		if err != nil || policy.MaxBackoff <= 0 {
+			return agent.ProviderRetryPolicy{}, fmt.Errorf("max_backoff %q must be a positive Go duration", specification.MaxBackoff)
+		}
+	}
+	return policy, nil
 }
 
 func combineInstructions(first, second string) string {

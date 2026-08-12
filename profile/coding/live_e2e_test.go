@@ -21,6 +21,7 @@ import (
 	processextension "github.com/qed-runtime/qed/extensions/process"
 	"github.com/qed-runtime/qed/internal/chatauth"
 	"github.com/qed-runtime/qed/internal/jsonstrict"
+	providerbase "github.com/qed-runtime/qed/provider"
 	"github.com/qed-runtime/qed/provider/openaicodex"
 )
 
@@ -368,8 +369,23 @@ func TestLiveCodingEventTraceOmitsContent(t *testing.T) {
 			ToolResult: &agent.ToolResult{Name: filesystemextension.ReadFileToolName, Output: secret, IsError: true},
 		},
 		{Sequence: 9, Type: agent.EventModelRequest, Time: startedAt.Add(80 * time.Millisecond)},
-		{Sequence: 10, Type: agent.EventMessageStarted, Time: startedAt.Add(90 * time.Millisecond)},
-		{Sequence: 11, Type: agent.EventRunFailed, Time: startedAt.Add(180 * time.Millisecond), Error: secret},
+		{
+			Sequence: 10,
+			Type:     agent.EventProviderRetry,
+			Time:     startedAt.Add(90 * time.Millisecond),
+			ProviderRetry: &agent.ProviderRetryInfo{
+				Error: agent.ProviderErrorInfo{
+					Code:                   providerbase.ErrorCodeRateLimited,
+					Attempt:                1,
+					RetryAfterMilliseconds: 20,
+				},
+				NextAttempt:       2,
+				DelayMilliseconds: 20,
+			},
+		},
+		{Sequence: 11, Type: agent.EventModelRequest, Time: startedAt.Add(110 * time.Millisecond)},
+		{Sequence: 12, Type: agent.EventMessageStarted, Time: startedAt.Add(120 * time.Millisecond)},
+		{Sequence: 13, Type: agent.EventRunFailed, Time: startedAt.Add(210 * time.Millisecond), Error: secret},
 	}
 
 	trace := &liveCodingEventTrace{}
@@ -385,17 +401,37 @@ func TestLiveCodingEventTraceOmitsContent(t *testing.T) {
 	}
 	for _, expected := range []string{
 		"event=model.request.started provider_call=1",
+		"event=provider.retry.scheduled provider_call=2 attempt=1 next_attempt=2 delay_ms=20 retry_after_ms=20 error_code=rate_limited",
 		"stop_reason=unknown tools=read_file,unregistered input_tokens=11 output_tokens=7",
 		"event=tool.completed tool=read_file duration_ms=10 is_error=true error_class=execution_error",
-		"event=run.failed provider_calls=2 active_provider_call=2 active_duration_ms=100",
+		"event=run.failed provider_calls=3 active_provider_call=3 active_duration_ms=100",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Errorf("live trace %q does not contain %q", output, expected)
 		}
 	}
 	lastSequence, lastType := liveCodingLastEvent(events)
-	if lastSequence != 11 || lastType != agent.EventRunFailed {
+	if lastSequence != 13 || lastType != agent.EventRunFailed {
 		t.Fatalf("last live Event = %d %q", lastSequence, lastType)
+	}
+}
+
+func TestLiveCodingEventTraceReportsProviderRateLimitWait(t *testing.T) {
+	trace := &liveCodingEventTrace{}
+	summary := trace.observe(agent.Event{
+		Sequence:        1,
+		Type:            agent.EventProviderRateLimitWait,
+		Time:            time.Unix(1_800_000_000, 0).UTC(),
+		ProviderAttempt: 2,
+		ProviderRateLimitWait: &agent.ProviderRateLimitWaitInfo{
+			Reason:                 agent.ProviderRateLimitWaitCooldown,
+			MaxConcurrency:         4,
+			RetryAfterMilliseconds: 750,
+		},
+	})
+	want := "live trace elapsed_ms=0 sequence=1 event=provider.rate_limit.waiting attempt=2 reason=cooldown max_concurrency=4 retry_after_ms=750"
+	if summary != want {
+		t.Fatalf("live trace = %q, want %q", summary, want)
 	}
 }
 
@@ -1130,10 +1166,40 @@ func (trace *liveCodingEventTrace) observe(event agent.Event) string {
 	switch event.Type {
 	case agent.EventRunStarted, agent.EventContextCompacted:
 		return prefix
+	case agent.EventProviderRateLimitWait:
+		if event.ProviderRateLimitWait == nil {
+			return prefix
+		}
+		return fmt.Sprintf(
+			"%s attempt=%d reason=%s max_concurrency=%d retry_after_ms=%d",
+			prefix,
+			event.ProviderAttempt,
+			event.ProviderRateLimitWait.Reason,
+			event.ProviderRateLimitWait.MaxConcurrency,
+			event.ProviderRateLimitWait.RetryAfterMilliseconds,
+		)
 	case agent.EventModelRequest:
-		trace.providerCall++
+		if event.ProviderCall > 0 {
+			trace.providerCall = event.ProviderCall
+		} else {
+			trace.providerCall++
+		}
 		trace.providerStartedAt = event.Time
 		return fmt.Sprintf("%s provider_call=%d", prefix, trace.providerCall)
+	case agent.EventProviderRetry:
+		if event.ProviderRetry == nil {
+			return fmt.Sprintf("%s provider_call=%d", prefix, trace.providerCall)
+		}
+		return fmt.Sprintf(
+			"%s provider_call=%d attempt=%d next_attempt=%d delay_ms=%d retry_after_ms=%d error_code=%s",
+			prefix,
+			trace.providerCall,
+			event.ProviderRetry.Error.Attempt,
+			event.ProviderRetry.NextAttempt,
+			event.ProviderRetry.DelayMilliseconds,
+			event.ProviderRetry.Error.RetryAfterMilliseconds,
+			event.ProviderRetry.Error.Code,
+		)
 	case agent.EventMessageStarted:
 		return fmt.Sprintf(
 			"%s provider_call=%d response_started_ms=%d",
