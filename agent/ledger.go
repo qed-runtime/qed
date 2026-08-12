@@ -351,6 +351,7 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 	seenEvents := make(map[string]struct{}, len(events))
 	persisted := false
 	sourceMessageCount := 0
+	var activeCheckpoint *ContextCheckpoint
 
 	for index := range events {
 		if err := ctx.Err(); err != nil {
@@ -375,6 +376,14 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 		}
 		if event.Type != EventCurrentWorldStateCaptured && event.CurrentWorldState != nil {
 			return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: Event %q must not contain Current World State", index, event.Type)
+		}
+		if event.Type == EventContextCompacted {
+			if err := validateContextValidationTransition(event, activeCheckpoint); err != nil {
+				return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: %w", index, err)
+			}
+			if event.ContextCheckpoint != nil {
+				activeCheckpoint = cloneContextCheckpointPointer(event.ContextCheckpoint)
+			}
 		}
 		ledger.Sources = append(ledger.Sources, source)
 		ref := source.ContextLedgerEventRef
@@ -888,6 +897,9 @@ func validateContextRebaseEvent(event Event) error {
 	report := event.ContextCompaction
 	if report == nil {
 		return nil
+	}
+	if err := validateContextValidationEvent(event); err != nil {
+		return err
 	}
 	if report.Rebased != (report.RebaseReason != "") {
 		return errors.New("context.compacted Rebase flag and reason are inconsistent")

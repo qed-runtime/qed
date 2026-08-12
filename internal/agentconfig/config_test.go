@@ -576,9 +576,9 @@ func TestLoadBuildsContextAndCacheConfiguration(t *testing.T) {
 			"main": {
 				"provider": "local",
 				"context": {
-					"max_input_bytes": 2200,
+					"max_input_bytes": 4700,
 					"recent_messages": 2,
-					"checkpoint_max_bytes": 1000
+					"checkpoint_max_bytes": 3200
 				},
 				"cache": {
 					"mode": "adaptive",

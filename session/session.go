@@ -512,6 +512,14 @@ func cloneEvent(event agent.Event) agent.Event {
 	if event.ContextCompaction != nil {
 		report := *event.ContextCompaction
 		report.Externalized = append([]agent.EvidenceObjectRef(nil), event.ContextCompaction.Externalized...)
+		if event.ContextCompaction.Validation != nil {
+			validation := *event.ContextCompaction.Validation
+			validation.Failures = append(
+				[]agent.ContextValidationFailure(nil),
+				event.ContextCompaction.Validation.Failures...,
+			)
+			report.Validation = &validation
+		}
 		event.ContextCompaction = &report
 	}
 	event.FactDirective = cloneFactLifecycleDirective(event.FactDirective)

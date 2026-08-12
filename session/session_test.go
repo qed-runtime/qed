@@ -536,13 +536,22 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 				}},
 			}
 			report := agent.ContextCompactionReport{
-				Applied:       true,
-				Reason:        "input_limit",
-				OriginalBytes: 100,
-				CompiledBytes: 40,
-				Rebased:       true,
-				RebaseReason:  agent.ContextRebaseGenerationInterval,
-				Externalized:  append([]agent.EvidenceObjectRef(nil), checkpoint.Evidence...),
+				Applied:            true,
+				Reason:             "input_limit",
+				OriginalBytes:      100,
+				CompiledBytes:      40,
+				SourceMessageCount: 3,
+				Rebased:            true,
+				RebaseReason:       agent.ContextRebaseGenerationInterval,
+				Externalized:       append([]agent.EvidenceObjectRef(nil), checkpoint.Evidence...),
+				Validation: &agent.ContextValidationReport{
+					Version: agent.ContextValidationVersion, CandidateGeneration: 2,
+					CandidateSourceMessageCount: 3, Passed: true,
+					ActiveConstraints: agent.ContextPreservationCount{Required: 1, Preserved: 1},
+					Evidence: agent.ContextPreservationCount{
+						Required: 1, Preserved: 1, RequiredBytes: 10, PreservedBytes: 10,
+					},
+				},
 			}
 			store := construct(t)
 			if _, err := store.Append(context.Background(), "checkpoint", 0, []agent.Event{{
@@ -555,6 +564,7 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 			checkpoint.Narrative = "mutated"
 			checkpoint.Ledger.Digest = "mutated"
 			report.Externalized[0].Digest = "mutated"
+			report.Validation.ActiveConstraints.Required = 99
 			snapshot, err := store.Load(context.Background(), "checkpoint")
 			if err != nil {
 				t.Fatal(err)
@@ -567,7 +577,9 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 			}
 			if len(snapshot.Events) != 1 || snapshot.Events[0].ContextCompaction == nil ||
 				!snapshot.Events[0].ContextCompaction.Rebased ||
-				snapshot.Events[0].ContextCompaction.RebaseReason != agent.ContextRebaseGenerationInterval {
+				snapshot.Events[0].ContextCompaction.RebaseReason != agent.ContextRebaseGenerationInterval ||
+				snapshot.Events[0].ContextCompaction.Validation == nil ||
+				snapshot.Events[0].ContextCompaction.Validation.ActiveConstraints.Required != 1 {
 				t.Fatalf("Checkpoint Rebase Event = %#v", snapshot.Events)
 			}
 		})

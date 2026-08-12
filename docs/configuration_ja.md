@@ -411,6 +411,10 @@ QEDはraw Session messageを書き換えません
 明示的なFact lifecycle変更とcurrent Ledgerで失効したCheckpoint FactもRebase triggerになります
 `context.compacted` Eventは`rebased`と`rebase_reason`を公開します
 
+新しいCheckpoint candidateごとに`context_compaction.validation`へ決定的なpreservation countを記録します
+QEDは`checkpoint_max_bytes`を満たす目的でactive Constraint Factやrequired Evidenceを削除しません
+上限が小さすぎる場合は記録付きrollbackにより前回の検証済みCheckpointとraw tailを維持するか、検証済みviewが存在しなければProvider I/O前に停止します
+
 `cache`を省略した場合、または`mode`が空か`disabled`の場合、QED側のprompt cache制御は無効です
 Provider側のimplicit behaviorは独立して発生する場合があります
 

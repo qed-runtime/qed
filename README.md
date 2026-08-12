@@ -26,7 +26,8 @@ executable today
 - canonical Current World State snapshots for relevant file hashes, Git state,
   and observed check freshness
 - Evidence-preserving Context compression with approval, subagent,
-  edit-verification, commit, and Tool-transaction safe cuts
+  edit-verification, commit, and Tool-transaction safe cuts, deterministic
+  preservation reports, and pre-Provider rollback
 - Prefix Manifests, prompt-cache Plans, and normalized cache Usage
 - Nagi-based CLI and multi-turn TUI
 - safe structured diagnostics propagated to the final Extension process

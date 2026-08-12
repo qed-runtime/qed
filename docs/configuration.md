@@ -438,6 +438,12 @@ the previous semantic Checkpoint. Explicit Fact lifecycle changes and a
 Checkpoint Fact retired by the current Ledger also trigger a Rebase. The
 `context.compacted` Event reports `rebased` and `rebase_reason`
 
+Each new Checkpoint candidate reports deterministic preservation counts in
+`context_compaction.validation`. QED does not shrink away active Constraint
+Facts or required Evidence to satisfy `checkpoint_max_bytes`. An undersized
+limit can therefore retain the prior validated Checkpoint and raw tail with a
+recorded rollback, or stop before Provider I/O when no validated view fits
+
 Prompt-cache control is disabled when `cache` is omitted or `mode` is empty or
 `disabled`. Provider-side implicit behavior may still occur independently
 

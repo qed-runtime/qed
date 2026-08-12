@@ -976,6 +976,131 @@ func TestRuntimeRejectsInvalidContextRebaseBeforePublication(t *testing.T) {
 	}
 }
 
+func TestRuntimeRejectsInvalidContextValidationBeforePublication(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{{message: agent.Message{Role: agent.RoleAssistant, Text: "unused"}}}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		ContextCompiler: contextCompilerFunc(func(ctx context.Context, request agent.ContextCompileRequest) (agent.CompiledContext, error) {
+			compiled, err := (agent.DefaultContextCompiler{}).Compile(ctx, request)
+			if err != nil {
+				return agent.CompiledContext{}, err
+			}
+			compiled.Compaction = &agent.ContextCompactionReport{
+				Applied: true,
+				Validation: &agent.ContextValidationReport{
+					Version: agent.ContextValidationVersion, CandidateGeneration: 1,
+					CandidateSourceMessageCount: 1, Passed: true,
+				},
+			}
+			return compiled, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, runErr := collectRun(handle)
+	if runErr == nil || !strings.Contains(runErr.Error(), "requires an applied Checkpoint") {
+		t.Fatalf("Run error = %v", runErr)
+	}
+	if result.ProviderCalls != 0 || len(provider.Requests()) != 0 {
+		t.Fatalf("Provider calls = %d/%d", result.ProviderCalls, len(provider.Requests()))
+	}
+	for _, event := range events {
+		if event.Type == agent.EventContextCompacted {
+			t.Fatalf("invalid context.compacted Event was published: %#v", events)
+		}
+	}
+}
+
+func TestRuntimePublishesContextValidationRollbackBeforeProviderCall(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewMemoryStore()
+	compiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
+		MaxInputBytes:            7500,
+		RecentMessages:           1,
+		EvidenceThresholdBytes:   4096,
+		EvidenceExcerptBytes:     256,
+		CheckpointMaxBytes:       5200,
+		RebaseGenerationInterval: 1,
+	}, evidence.NewMemoryObjectStore(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{responses: []providerResponse{
+		{message: agent.Message{Role: agent.RoleAssistant, Text: "first done"}},
+		{message: agent.Message{Role: agent.RoleAssistant, Text: "second done"}},
+	}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider, SessionStore: store, ContextCompiler: compiler,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		SessionID: "validation-rollback", Input: validationConstraintMessages(18),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, first, err := collectRun(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ContextCheckpoint == nil || first.ContextCheckpoint.Generation != 1 {
+		t.Fatalf("first Context Checkpoint = %#v", first.ContextCheckpoint)
+	}
+	handle, err = runtime.Run(context.Background(), agent.RunRequest{
+		SessionID: "validation-rollback",
+		Input:     []agent.Message{{Role: agent.RoleUser, Text: "next constraint"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, second, err := collectRun(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactionIndex := -1
+	modelIndex := -1
+	for index, event := range events {
+		switch event.Type {
+		case agent.EventContextCompacted:
+			compactionIndex = index
+			if event.ContextCheckpoint != nil || event.ContextCompaction == nil ||
+				event.ContextCompaction.Validation == nil || event.ContextCompaction.Validation.Passed ||
+				event.ContextCompaction.Validation.Rollback != agent.ContextValidationRollbackPrevious {
+				t.Fatalf("validation rollback Event = %#v", event)
+			}
+		case agent.EventModelRequest:
+			if modelIndex == -1 {
+				modelIndex = index
+			}
+		}
+	}
+	if compactionIndex < 0 || modelIndex < 0 || compactionIndex >= modelIndex ||
+		second.ContextCheckpoint == nil || second.ContextCheckpoint.Generation != 1 ||
+		second.ContextCompaction == nil || second.ContextCompaction.Validation == nil ||
+		second.ContextCompaction.Validation.Rollback != agent.ContextValidationRollbackPrevious {
+		t.Fatalf("rollback/model/result = %d/%d/%#v", compactionIndex, modelIndex, second)
+	}
+	snapshot, err := store.Load(context.Background(), "validation-rollback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Checkpoint == nil || snapshot.Checkpoint.Generation != 1 {
+		t.Fatalf("Session retained Checkpoint = %#v", snapshot.Checkpoint)
+	}
+}
+
 func TestRuntimeSuppliesIsolatedContextLedgerToCompiler(t *testing.T) {
 	t.Parallel()
 
@@ -1317,11 +1442,11 @@ func TestRuntimePublishesAndReusesContextCheckpoint(t *testing.T) {
 	store := session.NewMemoryStore()
 	objects := evidence.NewMemoryObjectStore()
 	compiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
-		MaxInputBytes:          2200,
+		MaxInputBytes:          4700,
 		RecentMessages:         1,
 		EvidenceThresholdBytes: 4096,
 		EvidenceExcerptBytes:   256,
-		CheckpointMaxBytes:     1000,
+		CheckpointMaxBytes:     3200,
 	}, objects, nil)
 	if err != nil {
 		t.Fatal(err)

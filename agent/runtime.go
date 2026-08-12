@@ -857,10 +857,20 @@ func (runtime *Runtime) execute(
 		compactionReason := ""
 		rebased := false
 		rebaseReason := ContextRebaseReason("")
+		validationReported := false
+		validationPassed := false
+		validationRollback := ContextValidationRollback("")
+		validationFailureCount := 0
 		if compiled.Compaction != nil {
 			compactionReason = compiled.Compaction.Reason
 			rebased = compiled.Compaction.Rebased
 			rebaseReason = compiled.Compaction.RebaseReason
+			if compiled.Compaction.Validation != nil {
+				validationReported = true
+				validationPassed = compiled.Compaction.Validation.Passed
+				validationRollback = compiled.Compaction.Validation.Rollback
+				validationFailureCount = len(compiled.Compaction.Validation.Failures)
+			}
 		}
 		runtime.debug("context.compile.completed",
 			"run_id", runID,
@@ -871,6 +881,10 @@ func (runtime *Runtime) execute(
 			"compaction_reason", compactionReason,
 			"rebased", rebased,
 			"rebase_reason", rebaseReason,
+			"validation_reported", validationReported,
+			"validation_passed", validationPassed,
+			"validation_rollback", validationRollback,
+			"validation_failure_count", validationFailureCount,
 		)
 		checkpointChanged := compiled.Checkpoint != nil && !contextCheckpointsEqual(activeCheckpoint, compiled.Checkpoint)
 		var newEvidence []EvidenceObjectRef
@@ -882,7 +896,7 @@ func (runtime *Runtime) execute(
 				newEvidence = append(newEvidence, reference)
 			}
 		}
-		if checkpointChanged || len(newEvidence) > 0 {
+		if checkpointChanged || len(newEvidence) > 0 || validationRollback != "" {
 			report := cloneContextCompactionReport(compiled.Compaction)
 			if report == nil {
 				report = &ContextCompactionReport{Applied: true, Reason: "checkpoint"}
@@ -1240,6 +1254,9 @@ func (runtime *Runtime) compileContext(
 	compiled.Segments = cloneContextSegments(compiled.Segments)
 	compiled.Checkpoint = cloneContextCheckpointPointer(compiled.Checkpoint)
 	compiled.Compaction = cloneContextCompactionReport(compiled.Compaction)
+	if err := validateCompiledContextValidation(compiled.Compaction, compiled.Checkpoint, checkpoint); err != nil {
+		return CompiledContext{}, PrefixManifest{}, fmt.Errorf("validate Context preservation report: %w", err)
+	}
 	if compiled.ModelRequest.AgentID != request.AgentID {
 		return CompiledContext{}, PrefixManifest{}, errors.New("Context Compiler changed Agent ID")
 	}

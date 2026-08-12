@@ -215,11 +215,11 @@ func TestCompactingContextCompilerRebasesInconsistentCheckpointFact(t *testing.T
 
 	objects := evidence.NewMemoryObjectStore()
 	initialCompiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
-		MaxInputBytes:          1800,
+		MaxInputBytes:          3600,
 		RecentMessages:         2,
 		EvidenceThresholdBytes: 4096,
 		EvidenceExcerptBytes:   256,
-		CheckpointMaxBytes:     900,
+		CheckpointMaxBytes:     2600,
 	}, objects, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -321,11 +321,11 @@ func TestCompactingContextCompilerRebasesAfterFactLifecycleChange(t *testing.T) 
 
 	objects := evidence.NewMemoryObjectStore()
 	initialCompiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
-		MaxInputBytes:          1800,
+		MaxInputBytes:          3600,
 		RecentMessages:         1,
 		EvidenceThresholdBytes: 4096,
 		EvidenceExcerptBytes:   256,
-		CheckpointMaxBytes:     900,
+		CheckpointMaxBytes:     2600,
 	}, objects, nil)
 	if err != nil {
 		t.Fatal(err)

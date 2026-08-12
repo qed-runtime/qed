@@ -59,6 +59,16 @@ receives the exact raw Messages, validated Events, and derived Ledger. Runtime
 publishes the Rebase reason with `context.compacted` and persists the latest
 Rebase generation in the Checkpoint
 
+Every new candidate also produces a deterministic, content-free preservation
+report. Core compares active Constraint identities across the Checkpoint and
+raw tail, keeps Current World State changes and failures, protects pending Tool
+transactions, and resolves each required Evidence object by digest and size. A
+custom candidate that fails these checks falls back to the deterministic
+strategy. A failed deterministic candidate is never published: Runtime keeps a
+validated previous Checkpoint plus raw tail when it fits, records the rollback
+before the next model request, or stops before Provider I/O. Event replay checks
+the report counts, candidate generation, and rollback transition
+
 `agent.ToolResult.ContextOperation` carries a validated, content-free
 classification for mutation, verification, commit, or subagent work. It never
 enters the model-facing Tool Message and does not grant authority or prove a

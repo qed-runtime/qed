@@ -193,6 +193,8 @@ raw messages
 - it creates a typed, size-bounded `ContextCheckpoint`
 - it validates source hashes, message references, Tool outcomes, generation,
   Session revision, encoded size, and exact Evidence availability
+- it publishes content-free preservation counts for active Constraints, current
+  Git changes, retained failed checks, pending Tools, and required Evidence
 - it injects the validated Checkpoint followed by the recent raw message tail
 
 The Compiler never deletes or rewrites Session messages. A successfully
@@ -203,6 +205,38 @@ A custom `CheckpointStrategy` may create the semantic view. QED validates its
 result and falls back to the deterministic strategy without exposing the
 strategy error or message content in the fallback label. If no valid candidate
 fits the configured hard limit, the Run stops before calling the Provider
+
+`ContextCompactionReport.Validation` identifies the candidate generation and
+raw source boundary, then records required and preserved item counts. Evidence
+also records exact byte totals. An active Constraint is preserved only when its
+source identity remains in the Checkpoint Goal or Facts, or its exact Message
+remains in the raw tail. Current Git changes and every retained failed check
+remain in the required Current World State segment. A pending Tool Call must
+remain in the raw tail. Every required Evidence reference must remain in the
+candidate Context Program and resolve to bytes matching its digest and size
+
+The report contains stable failure codes and counts, never message text, paths,
+commands, or object content. Runtime validates that the codes match the counts
+and that a passed report identifies the exact published Checkpoint. Memory and
+JSONL Session replay also verify the candidate generation and rollback
+transition. Events written before this report existed remain valid without a
+`validation` field
+
+If a custom candidate loses required state, QED first retries the same safe cut
+with the deterministic strategy. The deterministic strategy does not discard
+active Constraint Facts or required Evidence merely to meet
+`checkpoint_max_bytes`. If the deterministic candidate still fails, the
+Compiler tries other safe cuts. It then retains the previous validated
+Checkpoint plus raw tail when that view fits, publishes a failed report with
+rollback `previous_checkpoint`, and continues without publishing the failed
+candidate. An uncheckpointed raw view uses rollback `raw_context` when
+available. If no validated effective view fits, the Run stops before its next
+Provider call
+
+Runtime always supplies a Ledger, so its reports cover active Constraints. A
+direct Compiler caller that omits `ContextCompileRequest.Ledger` gets zero
+required active Constraints because QED does not infer lifecycle state from
+message text
 
 Checkpoint construction has two explicit modes. An incremental build receives
 the latest validated `Previous` Checkpoint together with exact raw source. A

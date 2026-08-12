@@ -144,6 +144,7 @@ Constraint entryはuser本文を保持するためLedgerはprivateなcontent-bea
 - compact対象の正確なraw prefixをEvidence Objectへ保存
 - 型付きでsize上限のある`ContextCheckpoint`を生成
 - source hash、message参照、Tool outcome、generation、Session revision、encoded size、Evidence実在性を検証
+- active Constraint、現在のGit change、保持済みfailed check、pending Tool、required Evidenceの本文なし保存件数を公開
 - 検証済みCheckpointの後ろへrecent raw message tailを配置
 
 CompilerはSession messageを削除も書き換えもしません
@@ -153,6 +154,28 @@ raw Event Logは引き続きreplay可能です
 custom `CheckpointStrategy`も利用できます
 QEDが結果を検証し、失敗時はstrategy errorやmessage本文をfallback labelへ含めずdeterministic strategyへ戻します
 有効なcandidateがhard limit内に収まらない場合はProviderを呼ぶ前にRunを停止します
+
+`ContextCompactionReport.Validation`はcandidate generationとraw source境界を識別し、required item数とpreserved item数を記録します
+Evidenceは正確なbyte総数も記録します
+active Constraintはsource identityがCheckpoint GoalまたはFactsに残るか、正確なMessageがraw tailに残る場合だけpreservedになります
+現在のGit changeと保持済みfailed checkは必須Current World State segmentに残ります
+pending Tool Callはraw tailに残る必要があります
+required Evidence参照はcandidate Context Programに残り、digestとsizeが一致するbyteへ解決できる必要があります
+
+reportはstable failure codeと件数だけを持ち、message本文、path、command、object contentを含みません
+Runtimeはcodeとcountの一致およびpassed reportがpublish対象の正確なCheckpointを識別することを検証します
+MemoryとJSONL Session replayもcandidate generationとrollback transitionを検証します
+このreportより前に保存されたEventは`validation` fieldなしで引き続き有効です
+
+custom candidateがrequired stateを失った場合、QEDは最初に同じsafe cutをdeterministic strategyで再試行します
+deterministic strategyは`checkpoint_max_bytes`へ収める目的でactive Constraint Factやrequired Evidenceを破棄しません
+deterministic candidateも失敗した場合は別のsafe cutを試します
+その後も失敗し、前回の検証済みCheckpointとraw tailが上限内なら、そのviewを維持してrollback `previous_checkpoint`付きのfailed reportをpublishし、失敗candidate自体はpublishせず継続します
+Checkpointがないraw viewを利用できる場合はrollback `raw_context`を使います
+検証済みeffective viewが上限内に存在しなければ次のProvider call前にRunを停止します
+
+Runtimeは常にLedgerを渡すためreportがactive Constraintを対象にします
+`ContextCompileRequest.Ledger`を省略するdirect Compiler callerではQEDがmessage本文からlifecycle stateを推測しないためrequired active Constraintは0件になります
 
 Checkpoint生成には2つの明示的なmodeがあります
 incremental buildは正確なraw sourceと最新の検証済み`Previous` Checkpointを受け取ります

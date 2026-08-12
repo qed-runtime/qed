@@ -133,6 +133,8 @@ type ContextCompactionReport struct {
 	Rebased bool `json:"rebased,omitempty"`
 	// RebaseReason identifies the deterministic Raw Event Rebase trigger
 	RebaseReason ContextRebaseReason `json:"rebase_reason,omitempty"`
+	// Validation contains deterministic preservation counts for the candidate
+	Validation *ContextValidationReport `json:"validation,omitempty"`
 }
 
 // ContextCompressionPolicy configures deterministic context reduction
@@ -290,7 +292,7 @@ func (DeterministicCheckpointStrategy) BuildCheckpoint(
 		checkpoint.Facts = checkpoint.Facts[:len(checkpoint.Facts)-1]
 	}
 	checkpoint.Narrative = deterministicCheckpointNarrative(checkpoint)
-	if err := fitCheckpoint(&checkpoint, request.MaxBytes); err != nil {
+	if err := fitCheckpoint(&checkpoint, request.MaxBytes, request.Ledger); err != nil {
 		return ContextCheckpoint{}, err
 	}
 	return checkpoint, nil
@@ -377,6 +379,9 @@ func (compiler *CompactingContextCompiler) Compile(
 	}
 	baselineBytes := contextSegmentBytes(baselineSegments) + worldStateBytes
 	requiredBytes := baselineBytes
+	attemptedCuts := make(map[int]struct{})
+	var failedValidation *ContextValidationReport
+	validationFallback := ""
 	var cutPlan contextSafeCutPlan
 	if request.Checkpoint != nil || baselineBytes > compiler.policy.MaxInputBytes {
 		cutPlan, err = buildContextSafeCutPlan(ctx, request.ModelRequest.Messages, request.Events, request.Ledger)
@@ -393,7 +398,8 @@ func (compiler *CompactingContextCompiler) Compile(
 			checkpointSourceCount(request.Checkpoint),
 			len(canonical.Messages)-compiler.policy.RecentMessages,
 		)
-		checkpoint, sourceRef, fallback, buildErr := compiler.buildCheckpoint(
+		attemptedCuts[cut] = struct{}{}
+		checkpoint, sourceRef, fallback, validation, buildErr := compiler.buildCheckpoint(
 			ctx,
 			request,
 			canonical.Messages,
@@ -404,37 +410,46 @@ func (compiler *CompactingContextCompiler) Compile(
 		if buildErr != nil {
 			return CompiledContext{}, buildErr
 		}
-		candidate, refs, viewErr := compiler.compiledView(ctx, canonical, &checkpoint, request.Ledger)
-		if viewErr != nil {
-			return CompiledContext{}, viewErr
+		if validation == nil {
+			return CompiledContext{}, errors.New("Context Checkpoint validation report is missing")
 		}
-		refs = uniqueEvidenceRefs(append(append(refs, baselineRefs...), sourceRef))
-		segments, segmentErr := checkpointSegments(candidate, true)
-		if segmentErr != nil {
-			return CompiledContext{}, segmentErr
-		}
-		compiledBytes := contextSegmentBytes(segments) + worldStateBytes
-		if compiledBytes > requiredBytes {
-			requiredBytes = compiledBytes
-		}
-		if compiledBytes <= compiler.policy.MaxInputBytes {
-			return CompiledContext{
-				ModelRequest: candidate,
-				Segments:     segments,
-				Checkpoint:   &checkpoint,
-				Compaction: &ContextCompactionReport{
-					Applied:            true,
-					Reason:             "raw_event_rebase",
-					OriginalBytes:      originalBytes,
-					CompiledBytes:      compiledBytes,
-					SourceMessageCount: cut,
-					RecentMessageCount: len(canonical.Messages) - cut,
-					Externalized:       refs,
-					Fallback:           fallback,
-					Rebased:            true,
-					RebaseReason:       rebaseReason,
-				},
-			}, nil
+		if !validation.Passed {
+			failedValidation = cloneContextValidationReport(validation)
+			validationFallback = fallback
+		} else {
+			candidate, refs, viewErr := compiler.compiledView(ctx, canonical, &checkpoint, request.Ledger)
+			if viewErr != nil {
+				return CompiledContext{}, viewErr
+			}
+			refs = uniqueEvidenceRefs(append(append(refs, baselineRefs...), sourceRef))
+			segments, segmentErr := checkpointSegments(candidate, true)
+			if segmentErr != nil {
+				return CompiledContext{}, segmentErr
+			}
+			compiledBytes := contextSegmentBytes(segments) + worldStateBytes
+			if compiledBytes > requiredBytes {
+				requiredBytes = compiledBytes
+			}
+			if compiledBytes <= compiler.policy.MaxInputBytes {
+				return CompiledContext{
+					ModelRequest: candidate,
+					Segments:     segments,
+					Checkpoint:   &checkpoint,
+					Compaction: &ContextCompactionReport{
+						Applied:            true,
+						Reason:             "raw_event_rebase",
+						OriginalBytes:      originalBytes,
+						CompiledBytes:      compiledBytes,
+						SourceMessageCount: cut,
+						RecentMessageCount: len(canonical.Messages) - cut,
+						Externalized:       refs,
+						Fallback:           fallback,
+						Rebased:            true,
+						RebaseReason:       rebaseReason,
+						Validation:         cloneContextValidationReport(validation),
+					},
+				}, nil
+			}
 		}
 	}
 	if baselineBytes <= compiler.policy.MaxInputBytes && rebaseReason == "" {
@@ -468,6 +483,20 @@ func (compiler *CompactingContextCompiler) Compile(
 		return CompiledContext{}, err
 	}
 	if len(cuts) == 0 {
+		if failedValidation != nil {
+			return compiler.rollbackContextValidation(
+				ctx,
+				request,
+				canonical,
+				baseline,
+				baselineSegments,
+				baselineRefs,
+				originalBytes,
+				baselineBytes,
+				failedValidation,
+				validationFallback,
+			)
+		}
 		return CompiledContext{}, fmt.Errorf(
 			"context requires %d bytes, limit is %d, and no safe Checkpoint boundary exists",
 			requiredBytes,
@@ -481,8 +510,16 @@ func (compiler *CompactingContextCompiler) Compile(
 			start = index
 		}
 	}
-	for _, cut := range cuts[start:] {
-		checkpoint, sourceRef, fallback, buildErr := compiler.buildCheckpoint(
+	orderedCuts := append([]int(nil), cuts[start:]...)
+	for index := start - 1; index >= 0; index-- {
+		orderedCuts = append(orderedCuts, cuts[index])
+	}
+	for _, cut := range orderedCuts {
+		if _, attempted := attemptedCuts[cut]; attempted {
+			continue
+		}
+		attemptedCuts[cut] = struct{}{}
+		checkpoint, sourceRef, fallback, validation, buildErr := compiler.buildCheckpoint(
 			ctx,
 			request,
 			canonical.Messages,
@@ -492,6 +529,14 @@ func (compiler *CompactingContextCompiler) Compile(
 		)
 		if buildErr != nil {
 			return CompiledContext{}, buildErr
+		}
+		if validation == nil {
+			return CompiledContext{}, errors.New("Context Checkpoint validation report is missing")
+		}
+		if !validation.Passed {
+			failedValidation = cloneContextValidationReport(validation)
+			validationFallback = fallback
+			continue
 		}
 		candidate, refs, viewErr := compiler.compiledView(ctx, canonical, &checkpoint, request.Ledger)
 		if viewErr != nil {
@@ -519,6 +564,7 @@ func (compiler *CompactingContextCompiler) Compile(
 			Fallback:           fallback,
 			Rebased:            checkpoint.LastRebaseGeneration == checkpoint.Generation,
 			RebaseReason:       checkpointRebaseReason(request.Checkpoint, rebaseReason),
+			Validation:         cloneContextValidationReport(validation),
 		}
 		return CompiledContext{
 			ModelRequest: candidate,
@@ -526,6 +572,20 @@ func (compiler *CompactingContextCompiler) Compile(
 			Checkpoint:   &checkpoint,
 			Compaction:   report,
 		}, nil
+	}
+	if failedValidation != nil {
+		return compiler.rollbackContextValidation(
+			ctx,
+			request,
+			canonical,
+			baseline,
+			baselineSegments,
+			baselineRefs,
+			originalBytes,
+			baselineBytes,
+			failedValidation,
+			validationFallback,
+		)
 	}
 	return CompiledContext{}, fmt.Errorf(
 		"context cannot be reduced below %d bytes without splitting protected context transactions",
@@ -540,21 +600,21 @@ func (compiler *CompactingContextCompiler) buildCheckpoint(
 	cut int,
 	additional []EvidenceObjectRef,
 	rebaseReason ContextRebaseReason,
-) (ContextCheckpoint, EvidenceObjectRef, string, error) {
+) (ContextCheckpoint, EvidenceObjectRef, string, *ContextValidationReport, error) {
 	source := cloneMessages(messages[:cut])
 	encoded, err := json.Marshal(source)
 	if err != nil {
-		return ContextCheckpoint{}, EvidenceObjectRef{}, "", fmt.Errorf("encode Checkpoint source: %w", err)
+		return ContextCheckpoint{}, EvidenceObjectRef{}, "", nil, fmt.Errorf("encode Checkpoint source: %w", err)
 	}
 	sourceRef, err := compiler.objects.PutObject(ctx, checkpointMediaType, encoded)
 	if err != nil {
-		return ContextCheckpoint{}, EvidenceObjectRef{}, "", fmt.Errorf("store Checkpoint source Evidence: %w", err)
+		return ContextCheckpoint{}, EvidenceObjectRef{}, "", nil, fmt.Errorf("store Checkpoint source Evidence: %w", err)
 	}
 	evidence := append([]EvidenceObjectRef{sourceRef}, additional...)
 	expectedGeneration := uint64(1)
 	if request.Checkpoint != nil {
 		if request.Checkpoint.Generation == ^uint64(0) {
-			return ContextCheckpoint{}, EvidenceObjectRef{}, "", errors.New("Context Checkpoint generation is exhausted")
+			return ContextCheckpoint{}, EvidenceObjectRef{}, "", nil, errors.New("Context Checkpoint generation is exhausted")
 		}
 		expectedGeneration = request.Checkpoint.Generation + 1
 	}
@@ -585,28 +645,43 @@ func (compiler *CompactingContextCompiler) buildCheckpoint(
 	if mode == CheckpointBuildIncremental {
 		expectedLastRebaseGeneration = checkpointLastRebaseGeneration(request.Checkpoint)
 	}
-	validateCandidate := func(checkpoint ContextCheckpoint) error {
+	validateCandidate := func(checkpoint ContextCheckpoint) (ContextValidationReport, error) {
 		if err := validateCheckpoint(checkpoint, messages, request.Ledger, compiler.policy.CheckpointMaxBytes); err != nil {
-			return err
+			return ContextValidationReport{}, err
 		}
 		if checkpoint.Generation != expectedGeneration {
-			return fmt.Errorf("Context Checkpoint generation = %d, want %d", checkpoint.Generation, expectedGeneration)
+			return ContextValidationReport{}, fmt.Errorf(
+				"Context Checkpoint generation = %d, want %d",
+				checkpoint.Generation,
+				expectedGeneration,
+			)
 		}
 		if checkpoint.LastRebaseGeneration != expectedLastRebaseGeneration {
-			return fmt.Errorf(
+			return ContextValidationReport{}, fmt.Errorf(
 				"Context Checkpoint last Rebase generation = %d, want %d",
 				checkpoint.LastRebaseGeneration,
 				expectedLastRebaseGeneration,
 			)
 		}
 		if checkpoint.SessionRevision != request.SessionRevision {
-			return fmt.Errorf(
+			return ContextValidationReport{}, fmt.Errorf(
 				"Context Checkpoint Session revision = %d, want %d",
 				checkpoint.SessionRevision,
 				request.SessionRevision,
 			)
 		}
-		return compiler.validateCheckpointEvidence(ctx, checkpoint, messages)
+		if err := compiler.validateCheckpointEvidence(ctx, checkpoint, messages); err != nil {
+			return ContextValidationReport{}, err
+		}
+		return compiler.validateContextCandidate(
+			ctx,
+			&checkpoint,
+			messages,
+			request.Ledger,
+			request.CurrentWorldState,
+			checkpointRequest.Evidence,
+			checkpoint.Evidence,
+		)
 	}
 	checkpoint, err := compiler.strategy.BuildCheckpoint(ctx, checkpointRequest)
 	checkpoint.LastRebaseGeneration = expectedLastRebaseGeneration
@@ -615,10 +690,17 @@ func (compiler *CompactingContextCompiler) buildCheckpoint(
 		checkpoint.Ledger = &reference
 	}
 	fallback := ""
+	var validation ContextValidationReport
 	if err != nil {
 		fallback = "checkpoint_strategy_build_failed"
-	} else if err = validateCandidate(checkpoint); err != nil {
-		fallback = "checkpoint_strategy_validation_failed"
+	} else {
+		validation, err = validateCandidate(checkpoint)
+		if err == nil && !validation.Passed {
+			err = contextValidationFailureError(validation)
+		}
+		if err != nil {
+			fallback = "checkpoint_strategy_validation_failed"
+		}
 	}
 	if err != nil {
 		checkpoint, err = compiler.fallback.BuildCheckpoint(ctx, checkpointRequest)
@@ -628,13 +710,75 @@ func (compiler *CompactingContextCompiler) buildCheckpoint(
 			checkpoint.Ledger = &reference
 		}
 		if err == nil {
-			err = validateCandidate(checkpoint)
+			validation, err = validateCandidate(checkpoint)
+			if err == nil && !validation.Passed {
+				return checkpoint, sourceRef, fallback, cloneContextValidationReport(&validation), nil
+			}
 		}
 	}
 	if err != nil {
-		return ContextCheckpoint{}, EvidenceObjectRef{}, fallback, fmt.Errorf("build and validate Context Checkpoint: %w", err)
+		return ContextCheckpoint{}, EvidenceObjectRef{}, fallback, nil, fmt.Errorf("build and validate Context Checkpoint: %w", err)
 	}
-	return checkpoint, sourceRef, fallback, nil
+	return checkpoint, sourceRef, fallback, cloneContextValidationReport(&validation), nil
+}
+
+func (compiler *CompactingContextCompiler) rollbackContextValidation(
+	ctx context.Context,
+	request ContextCompileRequest,
+	canonical ModelRequest,
+	baseline ModelRequest,
+	baselineSegments []ContextSegment,
+	baselineRefs []EvidenceObjectRef,
+	originalBytes int64,
+	baselineBytes int64,
+	failed *ContextValidationReport,
+	fallback string,
+) (CompiledContext, error) {
+	if failed == nil || failed.Passed {
+		return CompiledContext{}, errors.New("Context validation rollback requires a failed candidate")
+	}
+	if baselineBytes > compiler.policy.MaxInputBytes {
+		return CompiledContext{}, contextValidationFailureError(*failed)
+	}
+	evidence := append([]EvidenceObjectRef(nil), baselineRefs...)
+	rollback := ContextValidationRollbackRaw
+	if request.Checkpoint != nil {
+		rollback = ContextValidationRollbackPrevious
+		evidence = append(evidence, request.Checkpoint.Evidence...)
+	}
+	effective, err := compiler.validateContextCandidate(
+		ctx,
+		request.Checkpoint,
+		canonical.Messages,
+		request.Ledger,
+		request.CurrentWorldState,
+		uniqueEvidenceRefs(evidence),
+		uniqueEvidenceRefs(evidence),
+	)
+	if err != nil {
+		return CompiledContext{}, err
+	}
+	if !effective.Passed {
+		return CompiledContext{}, contextValidationFailureError(*failed)
+	}
+	report := cloneContextValidationReport(failed)
+	report.Rollback = rollback
+	return CompiledContext{
+		ModelRequest: baseline,
+		Segments:     baselineSegments,
+		Checkpoint:   cloneContextCheckpointPointer(request.Checkpoint),
+		Compaction: &ContextCompactionReport{
+			Applied:            len(baselineRefs) > 0,
+			Reason:             "validation_rollback",
+			OriginalBytes:      originalBytes,
+			CompiledBytes:      baselineBytes,
+			SourceMessageCount: checkpointSourceCount(request.Checkpoint),
+			RecentMessageCount: len(canonical.Messages) - checkpointSourceCount(request.Checkpoint),
+			Externalized:       append([]EvidenceObjectRef(nil), baselineRefs...),
+			Fallback:           fallback,
+			Validation:         report,
+		},
+	}, nil
 }
 
 func (compiler *CompactingContextCompiler) validateCheckpointEvidence(
@@ -1134,7 +1278,7 @@ func appendBoundedExecution(
 	return executions
 }
 
-func fitCheckpoint(checkpoint *ContextCheckpoint, maximum int) error {
+func fitCheckpoint(checkpoint *ContextCheckpoint, maximum int, ledger *ContextLedger) error {
 	for {
 		encoded, err := json.Marshal(checkpoint)
 		if err != nil {
@@ -1150,11 +1294,11 @@ func fitCheckpoint(checkpoint *ContextCheckpoint, maximum int) error {
 		case len(checkpoint.Executions) > 0:
 			checkpoint.Executions = checkpoint.Executions[1:]
 			checkpoint.Narrative = deterministicCheckpointNarrative(*checkpoint)
-		case len(checkpoint.Facts) > 0:
-			checkpoint.Facts = checkpoint.Facts[1:]
+		case removableCheckpointFact(checkpoint.Facts, ledger) >= 0:
+			index := removableCheckpointFact(checkpoint.Facts, ledger)
+			checkpoint.Facts = append(checkpoint.Facts[:index], checkpoint.Facts[index+1:]...)
 			checkpoint.Narrative = deterministicCheckpointNarrative(*checkpoint)
-		case len(checkpoint.Evidence) > 1:
-			checkpoint.Evidence = checkpoint.Evidence[:1]
+		case shrinkCheckpointFactSummaries(checkpoint.Facts):
 		case checkpoint.Goal != nil && len(checkpoint.Goal.Summary) > 96:
 			checkpoint.Goal.Summary = boundedCheckpointText(checkpoint.Goal.Summary, len(checkpoint.Goal.Summary)/2)
 		case len(checkpoint.Narrative) > 64:
@@ -1163,6 +1307,44 @@ func fitCheckpoint(checkpoint *ContextCheckpoint, maximum int) error {
 			return fmt.Errorf("minimum Context Checkpoint requires %d bytes, limit is %d", len(encoded), maximum)
 		}
 	}
+}
+
+func removableCheckpointFact(facts []CheckpointFact, ledger *ContextLedger) int {
+	if ledger == nil {
+		if len(facts) == 0 {
+			return -1
+		}
+		return 0
+	}
+	active := make(map[int]struct{})
+	for _, constraint := range ledger.Constraints {
+		if constraint.State == FactActive {
+			active[constraint.SourceMessage] = struct{}{}
+		}
+	}
+	for index, fact := range facts {
+		if _, required := active[fact.SourceMessage]; !required {
+			return index
+		}
+	}
+	return -1
+}
+
+func shrinkCheckpointFactSummaries(facts []CheckpointFact) bool {
+	selected := -1
+	for index := range facts {
+		if len(facts[index].Summary) <= 96 {
+			continue
+		}
+		if selected == -1 || len(facts[index].Summary) > len(facts[selected].Summary) {
+			selected = index
+		}
+	}
+	if selected == -1 {
+		return false
+	}
+	facts[selected].Summary = boundedCheckpointText(facts[selected].Summary, len(facts[selected].Summary)/2)
+	return true
 }
 
 func deterministicCheckpointNarrative(checkpoint ContextCheckpoint) string {
@@ -1214,5 +1396,6 @@ func cloneContextCompactionReport(report *ContextCompactionReport) *ContextCompa
 	}
 	cloned := *report
 	cloned.Externalized = append([]EvidenceObjectRef(nil), report.Externalized...)
+	cloned.Validation = cloneContextValidationReport(report.Validation)
 	return &cloned
 }
