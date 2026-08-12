@@ -72,7 +72,8 @@ malformedなTool JSONも実行や修復を行わず正確なbyte identityを保�
 
 Ledgerはderived stateであり2つ目の正本として保存しません
 MemoryとJSONL Session Storeは同じEventを同じdigestへreplayします
-新しいCheckpointは本文を含まない`ContextLedgerReference`を持ち、後続`context.compacted` Eventのreplay時に直前の正確なEvent prefixと照合します
+新しいCheckpointは本文を含まない`ContextLedgerReference`を持ち、準備またはcompaction Eventのreplay時に正確なEvent prefixと照合します
+採用時は`context.compaction.prepared`で検証済みのprefix参照を再利用できます
 
 Fact lifecycle宣言がないuser MessageはactiveなConstraint Factを作ります
 hostは`Message.FactDirective`へ`supersede`または`resolve` actionと1つ以上の過去のactive Fact IDを明示できます
@@ -207,8 +208,8 @@ authorizationやoperation成功の証明ではなくcut分類であり、未知�
 
 ## 本文を含まないContext report
 
-設定済みRunはpublic `context.compacted` EventをEvidence Bundleへ保存します
-QEDはembedding hostと同じexported read modelでEventをprojectします
+設定済みRunはpublic `context.compaction.prepared`と`context.compacted` EventをEvidence Bundleへ保存します
+Context reportはactive compactionだけをembedding hostと同じexported read modelでprojectします
 
 ```sh
 qed context inspect <run-id> --store .qed/evidence
@@ -246,7 +247,7 @@ embedding hostは`agent.BuildContextReport`で同じJSON互換構造を構築し
 
 `max_input_bytes`はProvider-neutralなcanonical byte上限であり、tokenizerやmodelの公開context windowではありません
 選択modelに対して安全側に調整してください
-Token Estimationは現在observationalであり、このhard byte境界を置き換えません
+Predictive Budgetは任意であり、この独立したhard byte境界を置き換えません
 
 RuntimeはContext Segmentとrelevance snippetに1つの`TokenEstimator`を解決します
 `agent.Options.TokenEstimator`は同じinterfaceを実装するProviderより優先され、どちらもない場合はbyte数を4で割って切り上げる`CanonicalByteTokenEstimator`を使います
@@ -258,6 +259,35 @@ call完了後はProvider Usageを正とします
 publicな`agent.BuildTokenUsageReport`はestimate付き`model.request.started` Eventをcompletion、retry、failure、cancelと対応付け、Provider inputからestimateを引いた差を返します
 Usage欠落時はestimateで置換せず欠落として明示します
 完全なRun Event streamがあれば`qed cache status`は最新比較を表示します
+
+## Predictive Budget
+
+`agent.PredictiveBudgetPolicy`は解決済みSegment estimateを使うmodel固有のrequest preflightを追加します
+
+```text
+required reserve = max(output reserve, safety margin)
+predicted total  = input estimate + predicted Tool output + required reserve
+hard input limit = context window - predicted Tool output - required reserve
+```
+
+必要なheadroomはmodelとworkloadで異なるためsoft thresholdは絶対値で設定します
+soft thresholdへ到達するとRuntimeは`PredictiveContextCompiler`へsoft threshold未満に戻る検証済みcandidateを要求します
+built-in compacting compilerはcandidate Segmentをestimateし、canonical byte上限も維持しながらtransaction safeなCheckpoint cutだけを試します
+Runtimeは最終的な元viewとcandidate viewを解決済みestimatorで独立して再estimateします
+成功したcandidateは`context.compaction.prepared`と`SessionSnapshot.PreparedContext`へ永続化しますが、Providerには変更前のrequestを送ります
+後続follow-upまたはactive Run requestは準備済みgenerationを再利用でき、Runをまたぐ利用にはSession Storeが必要です
+
+元のpredicted totalが設定済みcontext windowを超える場合、Runtimeは収まる準備済みcandidateまたは新規candidateを`context.compacted`で採用します
+収まるcandidateがなければProvider I/Oを拒否します
+元の予測がhard limit未満ならsoft準備failureはterminalになりません
+別の通常compactionをpublishした場合は古いprepared candidateを消去します
+
+`PredictiveBudgetPlan`は本文を含まず、準備、採用、`model.request.started` Eventとterminal Run resultに現れます
+元、candidate、Providerのestimate、estimator kind、reserve、softとhard limit、level、action、candidate generationを記録します
+Event replayは算術、Checkpoint transition、正確なLedger prefix、Evidence参照を検証します
+prediction errorの解析ではProvider Usageを正とします
+actionが`none`の場合はcandidate fieldが元の値と一致しgenerationはありません
+hardかつ未採用のplanは失敗したRun resultだけに現れProviderへ到達しません
 
 Evidence Objectはprivate contentです
 設定済みContext Compilerは新規参照をtenant、Sessionまたはephemeral Run、execution Profileのopaque digest、required retrieval Capability、sensitivityへbindingします
@@ -316,7 +346,7 @@ embeddingは必須ではなく、宣言設定では選択せず、既定exact se
 call単位のitemと出力byte上限もRun全体の上限内で適用され、Runtimeの通常Tool call上限も適用されます
 limit、malformed cursor、Store未設定、未対応media type、access拒否はboundedな通常error Tool resultとなり、Runを失敗させずmodelが回復できます
 
-`context_fetch`は要求digestをaccepted `context.compacted` Event内の完全なscope参照に対して最初に解決します
+`context_fetch`は要求digestをaccepted `context.compaction.prepared`または`context.compacted` Event内の完全なscope参照に対して最初に解決します
 履歴にないdigestはObject Storeへ到達しません
 Storeはtenant、Sessionまたはephemeral Run、Profile、required Capabilityを認可してaccess attemptを記録します
 valid UTF-8のtext media typeだけを返します
@@ -419,7 +449,8 @@ messageごとのUsageは個別resultを保持します
 
 - deterministic Ledgerは明示的なFact lifecycleとRuntimeから観測できるstateを扱うが、canonical workspace再構築とmodel-based semantic verificationは未実装
 - RuntimeはCompiler call前に完全なEvent prefixからLedgerを再構築し、incremental reducer indexは未実装
-- Token Estimationはobservationalであり`max_input_bytes`はcanonical byteのhard上限のままでpredictive output reserveは未実装
+- Predictive model limitとreserveはoperator supplied factであり、QEDはProvider catalogからmodel context windowを発見または自動更新しない
+- soft candidate準備はbackground workerではなくrequest boundaryで同期実行する
 - `context_search`のexact modeはaccepted Event prefixをscanし、relevance modeは固定された完全なprefixからLedgerを再構築して新しいcandidateとsignal解析poolだけを制限し、retrieval indexと自動retrieval policyは未実装
 - built-inのtokenizer-backed estimatorとembedding実装は存在せず、canonical byteを4で割った値を依存なしのtoken fallbackとして使う
 - `context_fetch`はbounded chunkを返す前にscope付きObject全体を検証し、現在のStore contractはrange readを持たない

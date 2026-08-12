@@ -84,9 +84,9 @@ state
 
 The Ledger is derived state and is not stored as a second source of truth
 Memory and JSONL Session Stores replay the same Events into the same digest
-New Checkpoints contain a content-free `ContextLedgerReference`; replay of the
-subsequent `context.compacted` Event verifies that reference against the exact
-preceding Event prefix
+New Checkpoints contain a content-free `ContextLedgerReference`; replay verifies
+it against the exact preparation or compaction Event prefix. Adoption may reuse
+the already validated prefix reference from `context.compaction.prepared`
 
 Every user Message without a lifecycle directive creates an active Constraint
 Fact. The host can explicitly attach `Message.FactDirective` with action
@@ -279,9 +279,10 @@ Unknown kinds are rejected at the Tool boundary
 
 ## Content-free Context reports
 
-Configured Runs store public `context.compacted` Events in their Evidence
-Bundles. QED projects those Events through the same exported read model used by
-embedding hosts
+Configured Runs store public `context.compaction.prepared` and
+`context.compacted` Events in their Evidence Bundles. Context reports project
+only active compactions through the same exported read model used by embedding
+hosts
 
 ```sh
 qed context inspect <run-id> --store .qed/evidence
@@ -328,8 +329,8 @@ with `agent.DiffContextSnapshots`
 
 `max_input_bytes` is a provider-neutral canonical byte limit, not a tokenizer or
 the model's advertised context window. It is deliberately deterministic but
-must be calibrated conservatively for the selected model. Token estimation is
-currently observational and does not replace that hard byte boundary
+must be calibrated conservatively for the selected model. Predictive Budgeting
+is optional and does not replace that independent hard byte boundary
 
 Runtime resolves one `TokenEstimator` for Context Segments and relevance
 snippets. `agent.Options.TokenEstimator` wins over a Provider that implements
@@ -346,6 +347,46 @@ Event with completion, retry, failure, or cancellation and reports the signed
 Provider-input-minus-estimate difference. Missing Usage remains explicit rather
 than being replaced by an estimate. `qed cache status` displays the latest
 comparison when a complete Run Event stream is available
+
+## Predictive Budgeting
+
+`agent.PredictiveBudgetPolicy` adds a model-specific request preflight using the
+resolved Segment estimate
+
+```text
+required reserve = max(output reserve, safety margin)
+predicted total  = input estimate + predicted Tool output + required reserve
+hard input limit = context window - predicted Tool output - required reserve
+```
+
+The absolute soft threshold is configurable because useful headroom differs by
+model and workload. On reaching it, Runtime asks a
+`PredictiveContextCompiler` for a validated candidate that returns below the
+soft threshold. The built-in compacting compiler estimates candidate Segments,
+retains its canonical-byte limit, and tries only transaction-safe Checkpoint
+cuts. Runtime independently re-estimates the final original and candidate
+views with the resolved estimator. A successful candidate is persisted as
+`context.compaction.prepared` and `SessionSnapshot.PreparedContext`, but the
+unchanged original request still reaches the Provider. A later follow-up or
+active Run request can reuse the prepared generation; cross-Run reuse requires
+a configured Session Store
+
+When the original predicted total exceeds the configured context window,
+Runtime adopts a fitting prepared or newly compiled candidate through
+`context.compacted`. It refuses Provider I/O if no candidate fits. Soft
+preparation failure remains non-terminal while the original prediction is
+below the hard limit. Any separately published ordinary compaction clears an
+older prepared candidate
+
+`PredictiveBudgetPlan` is content-free and appears on preparation, adoption,
+and `model.request.started` Events, plus the terminal Run result. It records the
+original, candidate, and Provider estimates, estimator kind, reserves, soft and
+hard limits, level, action, and candidate generation. Event replay validates
+its arithmetic, Checkpoint transition, exact Ledger prefix, and Evidence
+references. Provider Usage remains authoritative for prediction-error
+analysis. With action `none`, the candidate fields mirror the original and no
+generation exists. A hard unadopted plan appears only on the failed Run result
+and never reaches a Provider
 
 Evidence Objects are private content. Configured Context compilers bind each
 new reference to an opaque digest of tenant, Session or ephemeral Run, and
@@ -425,8 +466,9 @@ or access denial is a normal bounded error Tool result so the model may recover
 without failing the Run
 
 `context_fetch` first resolves the requested digest against complete scoped
-references in accepted `context.compacted` Events. A digest absent from that
-history never reaches the Object Store. The Store then authorizes tenant,
+references in accepted `context.compaction.prepared` or `context.compacted`
+Events. A digest absent from that history never reaches the Object Store. The
+Store then authorizes tenant,
 Session or ephemeral Run, Profile, and required capabilities and records the
 access attempt. Only valid UTF-8 text media types are returned
 Runtime also verifies the returned byte length and SHA-256 digest against the
@@ -551,8 +593,10 @@ reported a complete breakdown. Per-message Usage keeps each individual result
   model-based semantic verification do not exist yet
 - Runtime currently rebuilds a Ledger from the complete Event prefix before
   every Compiler call; no incremental reducer index exists yet
-- Token Estimation is observational; `max_input_bytes` remains the hard
-  canonical byte limit and predictive output reserve does not exist yet
+- Predictive model limits and reserves are operator-supplied facts; QED does not
+  discover or refresh a model context window from a Provider catalog
+- soft candidate preparation currently runs synchronously at the request
+  boundary rather than on a background worker
 - `context_search` exact mode scans the accepted Event prefix; relevance mode
   rebuilds its Ledger from the fixed complete prefix and bounds only the newest
   candidate and signal-analysis pools; no retrieval index or automatic

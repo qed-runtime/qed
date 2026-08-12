@@ -247,8 +247,16 @@ scorer callはTool context内で実行されますがProvider attemptではな�
 
 ```go
 runtime, err := agent.NewRuntime(agent.Options{
-    Provider:       provider,
-    TokenEstimator: estimator,
+    Provider:        provider,
+    ContextCompiler: compactingCompiler,
+    TokenEstimator:  estimator,
+    PredictiveBudget: &agent.PredictiveBudgetPolicy{
+        ContextWindowTokens:       128000,
+        OutputReserveTokens:       8192,
+        SafetyMarginTokens:        4096,
+        PredictedToolOutputTokens: 4096,
+        SoftThresholdTokens:       102400,
+    },
 })
 ```
 
@@ -266,7 +274,13 @@ estimator failureはretryや暗黙fallbackを行わず、compileではProvider c
 
 `agent.BuildTokenUsageReport`はpublic Run EventからProvider attemptごとの本文なしreportを再構築します
 Cache Plan estimateをProvider Usageと対応付けて`actual - estimate`を返し、Usage欠落はunreportedとして維持します
-Token Estimateはobservationalであり、predictive budget policyが設定されるまでは`max_input_bytes`が決定的なcanonical byte hard境界です
+
+`agent.Options.PredictiveBudget`を設定するとRuntimeは次のinput、predicted Tool output、output reserveとsafety marginの大きい方を評価します
+設定するcompilerは`agent.PredictiveContextCompiler`を実装する必要があり、built-in compacting compilerは対応済みです
+soft thresholdではrequestを変更せず、検証済みinactive `SessionSnapshot.PreparedContext`を`context.compaction.prepared`で永続化します
+context windowを超える場合は収まるcandidateを`context.compacted`で採用し、作成できなければProvider I/O前に停止します
+`max_input_bytes`は独立した決定的hard境界として維持されます
+各limitはmodel固有のoperator factであり、output reserveには実効Provider output上限以上を指定します
 
 Runtimeは本文を含まない`ToolResult.ContextRetrieval` metadataを`tool.completed` EventとSession replayへ保持します
 metadataはoperation、outcome、item数、出力byte数、truncation、任意のobject digest、call以前にcompactionがあったかを含みます

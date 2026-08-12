@@ -507,6 +507,21 @@ func validateContextValidationTransition(event Event, active *ContextCheckpoint)
 	return nil
 }
 
+func validateContextPreparationTransition(event Event, active *ContextCheckpoint) error {
+	if event.Type != EventContextCompactionPrepared || event.ContextCheckpoint == nil ||
+		event.ContextCompaction == nil || event.ContextCompaction.Validation == nil {
+		return errors.New("context.compaction.prepared requires a validated Checkpoint candidate")
+	}
+	if !event.ContextCompaction.Validation.Passed || event.ContextCompaction.Validation.Rollback != "" {
+		return errors.New("context.compaction.prepared requires passed validation without rollback")
+	}
+	return validateCompiledContextValidation(
+		event.ContextCompaction,
+		event.ContextCheckpoint,
+		active,
+	)
+}
+
 func cloneContextValidationReport(report *ContextValidationReport) *ContextValidationReport {
 	if report == nil {
 		return nil

@@ -428,7 +428,20 @@ func applyEvent(snapshot *agent.SessionSnapshot, event agent.Event) {
 		if event.ContextCheckpoint != nil {
 			snapshot.Checkpoint = cloneContextCheckpoint(event.ContextCheckpoint)
 		}
+		snapshot.PreparedContext = nil
 		if event.ContextCompaction != nil {
+			snapshot.EvidenceObjects = appendUniqueEvidenceObjects(
+				snapshot.EvidenceObjects,
+				event.ContextCompaction.Externalized,
+			)
+		}
+	case agent.EventContextCompactionPrepared:
+		if event.ContextCheckpoint != nil && event.ContextCompaction != nil && event.PredictiveBudget != nil {
+			snapshot.PreparedContext = &agent.PreparedContextCandidate{
+				Checkpoint: *cloneContextCheckpoint(event.ContextCheckpoint),
+				Compaction: *cloneContextCompaction(event.ContextCompaction),
+				Budget:     *clonePredictiveBudget(event.PredictiveBudget),
+			}
 			snapshot.EvidenceObjects = appendUniqueEvidenceObjects(
 				snapshot.EvidenceObjects,
 				event.ContextCompaction.Externalized,
@@ -465,6 +478,7 @@ func cloneSnapshot(snapshot agent.SessionSnapshot) agent.SessionSnapshot {
 	snapshot.Messages = cloneMessages(snapshot.Messages)
 	snapshot.Events = cloneEvents(snapshot.Events)
 	snapshot.Checkpoint = cloneContextCheckpoint(snapshot.Checkpoint)
+	snapshot.PreparedContext = clonePreparedContext(snapshot.PreparedContext)
 	snapshot.CurrentWorldState = cloneCurrentWorldState(snapshot.CurrentWorldState)
 	snapshot.EvidenceObjects = cloneEvidenceObjectRefs(snapshot.EvidenceObjects)
 	if snapshot.PendingWait != nil {
@@ -496,6 +510,7 @@ func cloneEvent(event agent.Event) agent.Event {
 		event.PrefixManifest = &manifest
 	}
 	event.CachePlan = cloneCachePlan(event.CachePlan)
+	event.PredictiveBudget = clonePredictiveBudget(event.PredictiveBudget)
 	if event.ProviderError != nil {
 		providerError := *event.ProviderError
 		event.ProviderError = &providerError
@@ -663,6 +678,39 @@ func cloneContextCheckpoint(checkpoint *agent.ContextCheckpoint) *agent.ContextC
 	cloned.Executions = append([]agent.CheckpointExecution(nil), checkpoint.Executions...)
 	cloned.Evidence = cloneEvidenceObjectRefs(checkpoint.Evidence)
 	return &cloned
+}
+
+func cloneContextCompaction(report *agent.ContextCompactionReport) *agent.ContextCompactionReport {
+	if report == nil {
+		return nil
+	}
+	cloned := *report
+	cloned.Externalized = cloneEvidenceObjectRefs(report.Externalized)
+	if report.Validation != nil {
+		validation := *report.Validation
+		validation.Failures = append([]agent.ContextValidationFailure(nil), report.Validation.Failures...)
+		cloned.Validation = &validation
+	}
+	return &cloned
+}
+
+func clonePredictiveBudget(plan *agent.PredictiveBudgetPlan) *agent.PredictiveBudgetPlan {
+	if plan == nil {
+		return nil
+	}
+	cloned := *plan
+	return &cloned
+}
+
+func clonePreparedContext(candidate *agent.PreparedContextCandidate) *agent.PreparedContextCandidate {
+	if candidate == nil {
+		return nil
+	}
+	return &agent.PreparedContextCandidate{
+		Checkpoint: *cloneContextCheckpoint(&candidate.Checkpoint),
+		Compaction: *cloneContextCompaction(&candidate.Compaction),
+		Budget:     candidate.Budget,
+	}
 }
 
 func cloneCachePlan(plan *agent.CachePlan) *agent.CachePlan {

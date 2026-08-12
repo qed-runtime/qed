@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -239,6 +240,73 @@ func estimateContextSegments(
 		estimated[index].TokenEstimateKind = result.Kind
 	}
 	return estimated, nil
+}
+
+func estimateContextInput(
+	ctx context.Context,
+	estimator TokenEstimator,
+	provider string,
+	model string,
+	request ModelRequest,
+	segments []ContextSegment,
+	worldState *CurrentWorldState,
+) ([]ContextSegment, int64, string, error) {
+	items, err := contextSegmentEstimateItems(request, segments)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	if worldState != nil {
+		message, _, err := currentWorldStateContextMessage(worldState)
+		if err != nil {
+			return nil, 0, "", err
+		}
+		content, err := contextMessageContent(message)
+		if err != nil {
+			return nil, 0, "", err
+		}
+		items = append(items, TokenEstimateItem{
+			ID:      "segment/current-world-state",
+			Content: content,
+		})
+	}
+	result, err := EstimateTokenItems(ctx, estimator, TokenEstimateRequest{
+		Provider: provider,
+		Model:    model,
+		Purpose:  TokenEstimateContextSegments,
+		Items:    items,
+	})
+	if err != nil {
+		return nil, 0, "", err
+	}
+	estimated := cloneContextSegments(segments)
+	var total int64
+	for index, tokens := range result.Tokens {
+		if tokens > math.MaxInt64-total {
+			return nil, 0, "", errors.New("Context Token Estimate total overflow")
+		}
+		total += tokens
+		if index < len(estimated) {
+			estimated[index].TokenEstimate = tokens
+			estimated[index].TokenEstimateKind = result.Kind
+		}
+	}
+	return estimated, total, result.Kind, nil
+}
+
+func contextSegmentsEstimated(segments []ContextSegment) bool {
+	if len(segments) == 0 || !validTokenEstimateKind(segments[0].TokenEstimateKind) {
+		return false
+	}
+	kind := segments[0].TokenEstimateKind
+	for _, segment := range segments {
+		if segment.TokenEstimateKind != kind || segment.TokenEstimate < 0 {
+			return false
+		}
+		if kind == CanonicalByteTokenEstimateKind && segment.TokenEstimate != estimateBytes(segment.Bytes) {
+			return false
+		}
+	}
+	return true
 }
 
 func contextSegmentEstimateItems(

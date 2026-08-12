@@ -352,6 +352,7 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 	persisted := false
 	sourceMessageCount := 0
 	var activeCheckpoint *ContextCheckpoint
+	var preparedCheckpoint *ContextCheckpoint
 	seenContextCompaction := false
 
 	for index := range events {
@@ -359,8 +360,14 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 			return ContextLedger{}, err
 		}
 		event := cloneEvent(events[index])
+		if err := validatePredictiveBudgetEvent(event); err != nil {
+			return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: %w", index, err)
+		}
 		if err := validateLedgerEventIdentity(event, index, &ledger, &persisted, perRunSequence, seenEvents); err != nil {
 			return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: %w", index, err)
+		}
+		if event.Type == EventContextCompactionPrepared && event.RunID == "" {
+			return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: legacy context.compaction.prepared is unsupported", index)
 		}
 		source, err := contextLedgerSource(event)
 		if err != nil {
@@ -394,6 +401,12 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 				return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: Context retrieval post-compaction status does not match its Event prefix", index)
 			}
 		}
+		if event.Type == EventContextCompactionPrepared {
+			if err := validateContextPreparationTransition(event, activeCheckpoint); err != nil {
+				return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: %w", index, err)
+			}
+			preparedCheckpoint = cloneContextCheckpointPointer(event.ContextCheckpoint)
+		}
 		if event.Type == EventContextCompacted {
 			if err := validateContextValidationTransition(event, activeCheckpoint); err != nil {
 				return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: %w", index, err)
@@ -401,7 +414,22 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 			if event.ContextCheckpoint != nil {
 				activeCheckpoint = cloneContextCheckpointPointer(event.ContextCheckpoint)
 			}
+			preparedCheckpoint = nil
 			seenContextCompaction = true
+		}
+		if event.Type == EventModelRequest && event.PredictiveBudget != nil {
+			switch event.PredictiveBudget.Action {
+			case PredictiveBudgetActionPrepare:
+				if preparedCheckpoint == nil ||
+					preparedCheckpoint.Generation != event.PredictiveBudget.CandidateGeneration {
+					return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: model request has no matching prepared candidate", index)
+				}
+			case PredictiveBudgetActionAdopt:
+				if activeCheckpoint == nil ||
+					activeCheckpoint.Generation != event.PredictiveBudget.CandidateGeneration {
+					return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: model request has no matching adopted candidate", index)
+				}
+			}
 		}
 		ledger.Sources = append(ledger.Sources, source)
 		ref := source.ContextLedgerEventRef
@@ -589,9 +617,9 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 				}
 			}
 
-		case EventContextCompacted:
+		case EventContextCompactionPrepared, EventContextCompacted:
 			if event.ContextCompaction == nil {
-				return ContextLedger{}, errors.New("context.compacted requires a compaction report")
+				return ContextLedger{}, fmt.Errorf("%s requires a compaction report", event.Type)
 			}
 			if err := validateContextRebaseEvent(event); err != nil {
 				return ContextLedger{}, err
@@ -613,14 +641,20 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 				if err != nil {
 					return ContextLedger{}, err
 				}
-				if *event.ContextCheckpoint.Ledger != wantReference {
-					return ContextLedger{}, errors.New("context.compacted Checkpoint Ledger reference does not match its Event prefix")
+				if *event.ContextCheckpoint.Ledger != wantReference &&
+					!containsContextLedgerReference(ledger.CheckpointReferences, *event.ContextCheckpoint.Ledger) {
+					if event.Type == EventContextCompacted {
+						return ContextLedger{}, errors.New("context.compacted Checkpoint Ledger reference does not match its Event prefix")
+					}
+					return ContextLedger{}, errors.New("context.compaction.prepared Checkpoint Ledger reference does not match its Event prefix")
 				}
-				ledger.CheckpointReferences = append(ledger.CheckpointReferences, *event.ContextCheckpoint.Ledger)
+				if !containsContextLedgerReference(ledger.CheckpointReferences, *event.ContextCheckpoint.Ledger) {
+					ledger.CheckpointReferences = append(ledger.CheckpointReferences, *event.ContextCheckpoint.Ledger)
+				}
 			}
 			for _, reference := range event.ContextCompaction.Externalized {
 				if err := ValidateEvidenceObjectRef(reference); err != nil || strings.TrimSpace(reference.MediaType) == "" {
-					return ContextLedger{}, errors.New("context.compacted contains an invalid Evidence Object reference")
+					return ContextLedger{}, fmt.Errorf("%s contains an invalid Evidence Object reference", event.Type)
 				}
 				if err := addEvidenceArtifact(artifacts, reference, ref, index); err != nil {
 					return ContextLedger{}, err
@@ -1469,6 +1503,18 @@ func appendUniqueLedgerSourceRef(current []ContextLedgerEventRef, value ContextL
 		}
 	}
 	return append(current, value)
+}
+
+func containsContextLedgerReference(
+	references []ContextLedgerReference,
+	want ContextLedgerReference,
+) bool {
+	for _, reference := range references {
+		if reference == want {
+			return true
+		}
+	}
+	return false
 }
 
 func contextLedgerSnapshotDigest(ledger ContextLedger) (string, error) {

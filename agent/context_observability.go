@@ -112,7 +112,7 @@ type ContextSnapshot struct {
 	Reason string `json:"reason"`
 	// OriginalBytes is the canonical logical size before reduction
 	OriginalBytes int64 `json:"original_bytes"`
-	// CompiledBytes is the canonical logical size sent to the Provider adapter
+	// CompiledBytes is the canonical logical size of the active compiled model view
 	CompiledBytes int64 `json:"compiled_bytes"`
 	// CompressionRatio is CompiledBytes divided by OriginalBytes, or nil when unavailable
 	CompressionRatio *float64 `json:"compression_ratio"`
@@ -466,7 +466,7 @@ func contextSnapshotFromEvent(event Event, active *ContextCheckpoint, activeKnow
 func contextReportReason(value string) string {
 	switch value {
 	case "checkpoint", "externalize_evidence", "input_limit", "raw_event_rebase",
-		"reuse_checkpoint", "validation_rollback":
+		"reuse_checkpoint", "validation_rollback", "predictive_budget_adopt":
 		return value
 	default:
 		return ContextReportUnrecognizedLabel

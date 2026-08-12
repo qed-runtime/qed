@@ -299,6 +299,9 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 	case agent.EventContextCompacted:
 		update.status = "preparing context"
 		activity("Context compacted", "")
+	case agent.EventContextCompactionPrepared:
+		update.status = "preparing context"
+		activity("Context candidate prepared", "")
 	case agent.EventCurrentWorldStateCaptured:
 		update.status = "preparing context"
 		activity("Current state captured", "")

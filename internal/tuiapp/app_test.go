@@ -222,29 +222,30 @@ func TestAdapterMapsContentAndContentFreeDiagnostics(t *testing.T) {
 			},
 		},
 		{Sequence: 4, Type: agent.EventCurrentWorldStateCaptured},
-		{Sequence: 5, Type: agent.EventModelRequest},
+		{Sequence: 5, Type: agent.EventContextCompactionPrepared},
+		{Sequence: 6, Type: agent.EventModelRequest},
 		{
-			Sequence: 6, Type: agent.EventProviderRetry,
+			Sequence: 7, Type: agent.EventProviderRetry,
 			ProviderRetry: &agent.ProviderRetryInfo{
 				Error:             agent.ProviderErrorInfo{Code: providerbase.ErrorCodeRateLimited, Attempt: 1},
 				NextAttempt:       2,
 				DelayMilliseconds: 1000,
 			},
 		},
-		{Sequence: 7, Type: agent.EventMessageStarted},
-		{Sequence: 8, Type: agent.EventMessageDelta, Delta: "assistant-visible-content"},
+		{Sequence: 8, Type: agent.EventMessageStarted},
+		{Sequence: 9, Type: agent.EventMessageDelta, Delta: "assistant-visible-content"},
 		{
-			Sequence: 9, Type: agent.EventToolStarted,
+			Sequence: 10, Type: agent.EventToolStarted,
 			ToolCall: &agent.ToolCall{
 				ID: "call-1", Name: "read_file", Arguments: json.RawMessage(`{"path":"secret-input"}`),
 			},
 		},
 		{
-			Sequence: 10, Type: agent.EventToolCompleted,
+			Sequence: 11, Type: agent.EventToolCompleted,
 			ToolCall:   &agent.ToolCall{ID: "call-1", Name: "read_file"},
 			ToolResult: &agent.ToolResult{CallID: "call-1", Name: "read_file", Output: "secret-output"},
 		},
-		{Sequence: 11, Type: agent.EventRunFailed, Error: "secret-error"},
+		{Sequence: 12, Type: agent.EventRunFailed, Error: "secret-error"},
 	}
 	for _, event := range events {
 		view.Update(message{kind: runEventMessage, update: adaptRunEvent(event)})
@@ -282,6 +283,7 @@ func TestAdapterMapsContentAndContentFreeDiagnostics(t *testing.T) {
 		"Model rate limit cooldown 750ms [waiting]",
 		"Model retry 2 in 1000ms (rate_limited) [waiting]",
 		"Current state captured",
+		"Context candidate prepared",
 		"Tool read_file [completed]",
 		"Run failed [failed]",
 	} {

@@ -288,14 +288,15 @@ type providerRetryProfile struct {
 }
 
 type contextProfile struct {
-	MaxInputBytes            int64                     `json:"max_input_bytes"`
-	RecentMessages           int                       `json:"recent_messages,omitempty"`
-	EvidenceThresholdBytes   int                       `json:"evidence_threshold_bytes,omitempty"`
-	EvidenceExcerptBytes     int                       `json:"evidence_excerpt_bytes,omitempty"`
-	CheckpointMaxBytes       int                       `json:"checkpoint_max_bytes,omitempty"`
-	RebaseGenerationInterval uint64                    `json:"rebase_generation_interval,omitempty"`
-	EvidenceSensitivity      agent.EvidenceSensitivity `json:"evidence_sensitivity,omitempty"`
-	Retrieval                *contextRetrievalProfile  `json:"retrieval,omitempty"`
+	MaxInputBytes            int64                         `json:"max_input_bytes"`
+	RecentMessages           int                           `json:"recent_messages,omitempty"`
+	EvidenceThresholdBytes   int                           `json:"evidence_threshold_bytes,omitempty"`
+	EvidenceExcerptBytes     int                           `json:"evidence_excerpt_bytes,omitempty"`
+	CheckpointMaxBytes       int                           `json:"checkpoint_max_bytes,omitempty"`
+	RebaseGenerationInterval uint64                        `json:"rebase_generation_interval,omitempty"`
+	EvidenceSensitivity      agent.EvidenceSensitivity     `json:"evidence_sensitivity,omitempty"`
+	PredictiveBudget         *agent.PredictiveBudgetPolicy `json:"predictive_budget,omitempty"`
+	Retrieval                *contextRetrievalProfile      `json:"retrieval,omitempty"`
 }
 
 type contextRetrievalProfile struct {
@@ -321,6 +322,14 @@ type cachePricingProfile struct {
 	CacheReadMicrosPerMillion     int64  `json:"cache_read_micros_per_million"`
 	CacheWriteMicrosPerMillion    int64  `json:"cache_write_micros_per_million"`
 	OutputMicrosPerMillion        int64  `json:"output_micros_per_million,omitempty"`
+}
+
+func clonePredictiveBudgetPolicy(context *contextProfile) *agent.PredictiveBudgetPolicy {
+	if context == nil || context.PredictiveBudget == nil {
+		return nil
+	}
+	cloned := *context.PredictiveBudget
+	return &cloned
 }
 
 type executionProfile struct {
@@ -1256,6 +1265,7 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 		SessionStore:            builder.sessions,
 		ContextCompiler:         contextCompiler,
 		TokenEstimator:          builder.tokenEstimator,
+		PredictiveBudget:        clonePredictiveBudgetPolicy(specification.Context),
 		EvidenceAccess:          runtimeEvidenceAccess,
 		ContextRetrieval:        contextRetrieval,
 		CurrentWorldStateSource: currentWorldStateSource,

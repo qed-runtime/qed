@@ -509,6 +509,28 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 			want: "Context retrieval max calls per Run",
 		},
 		{
+			name: "Predictive Budget reserves all input",
+			document: `{
+				"version": 1,
+				"providers": {"local": {"protocol": "echo"}},
+				"evidence": {"store": "json", "path": "evidence"},
+				"agents": {"main": {
+					"provider": "local",
+					"context": {
+						"max_input_bytes": 4096,
+						"checkpoint_max_bytes": 512,
+						"predictive_budget": {
+							"context_window_tokens": 100,
+							"output_reserve_tokens": 80,
+							"predicted_tool_output_tokens": 20,
+							"soft_threshold_tokens": 90
+						}
+					}
+				}}
+			}`,
+			want: "Predictive Budget reserves leave no model input capacity",
+		},
+		{
 			name: "Evidence isolation key with surrounding whitespace",
 			document: `{
 				"version": 1,
@@ -674,7 +696,14 @@ func TestLoadBuildsContextAndCacheConfiguration(t *testing.T) {
 				"context": {
 					"max_input_bytes": 4700,
 					"recent_messages": 2,
-					"checkpoint_max_bytes": 3200
+					"checkpoint_max_bytes": 3200,
+					"predictive_budget": {
+						"context_window_tokens": 100000,
+						"output_reserve_tokens": 1000,
+						"safety_margin_tokens": 500,
+						"predicted_tool_output_tokens": 1000,
+						"soft_threshold_tokens": 90000
+					}
 				},
 				"cache": {
 					"mode": "adaptive",
@@ -701,7 +730,8 @@ func TestLoadBuildsContextAndCacheConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ContextCheckpoint == nil || result.CachePlan == nil || result.CachePlan.Mode != agent.CacheModeDisabled {
+	if result.ContextCheckpoint == nil || result.CachePlan == nil || result.CachePlan.Mode != agent.CacheModeDisabled ||
+		result.PredictiveBudget == nil || result.PredictiveBudget.Level != agent.PredictiveBudgetWithin {
 		t.Fatalf("configured Run result = %#v", result)
 	}
 	objects, ok := configuration.EvidenceStore.(agent.EvidenceObjectAdminStore)

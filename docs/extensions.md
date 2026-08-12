@@ -185,6 +185,14 @@ A Hook may subscribe to `current_world_state.captured`. Its payload omits file,
 diff, stdout, and stderr content, but it contains workspace paths, command
 arguments, digests, and provenance. Treat it as sensitive Session metadata
 
+Configured Predictive Budgeting adds `context.compaction.prepared` and the
+optional `predictive_budget` field on preparation, adoption, and
+`model.request.started` payloads. The plan is content-free, but a prepared
+Event also carries a bounded Checkpoint and scoped Evidence references that may
+summarize sensitive Session content. Treat the complete payload as sensitive
+and do not consider the candidate active until `context.compacted`. Hook payload
+decoders for these Event types must accept the optional field
+
 ### Commands
 
 Commands declare a name, description, JSON input schema, and capabilities. They

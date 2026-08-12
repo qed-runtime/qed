@@ -33,6 +33,8 @@ executable today
   Evidence fetch, Session timeline, and Ledger history Tools
 - host- or Provider-supplied Token Estimation with a deterministic byte
   fallback and content-free Provider Usage comparison
+- predictive model-context budgeting with output, safety, and expected Tool
+  reserves, validated soft preparation, and hard-limit adoption
 - Prefix Manifests, prompt-cache Plans, and normalized cache Usage
 - Nagi-based CLI and multi-turn TUI
 - safe structured diagnostics propagated to the final Extension process
@@ -67,9 +69,10 @@ go run ./cmd/qed run --prompt "hello" --output jsonl
 The echo Provider emits the complete lifecycle, including `run.started`, user
 and model events, text deltas, and `run.completed`
 
-`model.request.started` includes a content-free Prefix Manifest and Cache Plan
-with the resolved Token Estimate kind and count. Provider Usage remains
-authoritative, and `qed cache status` compares it with the latest estimate
+`model.request.started` includes a content-free Prefix Manifest, Cache Plan,
+and configured Predictive Budget decision with the resolved Token Estimate
+kind and count. Provider Usage remains authoritative, and `qed cache status`
+compares it with the latest estimate
 
 QED cache controls are disabled until configured; Provider-side implicit
 behavior may still apply. Providers that report prompt-cache usage populate

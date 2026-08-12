@@ -108,6 +108,15 @@ kind enter Prefix Manifests and Cache Plans but not Prefix epochs or content
 hashes. Provider Usage remains authoritative, and `BuildTokenUsageReport`
 reconstructs per-attempt differences from public Events without prompt content
 
+An optional `PredictiveBudgetPolicy` evaluates the compiled input plus expected
+Tool output and the larger of output reserve or safety margin before each
+Provider request. Reaching the configurable soft threshold asks a
+`PredictiveContextCompiler` for a validated inactive Checkpoint and persists it
+as `context.compaction.prepared`. The original request remains cache-stable.
+Only a prediction beyond the context window adopts a fitting candidate through
+`context.compacted`; an unavailable hard-limit candidate stops before Provider
+I/O. Session replay retains prepared and active Checkpoints as separate state
+
 `agent.ToolResult.ContextOperation` carries a validated, content-free
 classification for mutation, verification, commit, or subagent work. It never
 enters the model-facing Tool Message and does not grant authority or prove a
@@ -395,9 +404,9 @@ stderr is never copied into verbose output
   limits depend on Provider-reported usage that may arrive only at response end
 - Prefix Manifests describe QED's provider-neutral logical request, not the
   exact Provider-rendered prefix or an authoritative cache hit
-- Context limits use canonical logical bytes and cache planning uses a
-  deterministic bytes-divided-by-four estimate; neither substitutes for a
-  model tokenizer or Provider-reported Usage
+- Canonical logical bytes remain an independent hard safety limit. Predictive
+  limits depend on an operator-supplied model context window and the resolved
+  estimator; neither estimated count substitutes for Provider-reported Usage
 - Old and new Extension processes may overlap during retirement and do not
   share process-local Workspace locks, so edit digests remain the cross-process
   stale-write defense

@@ -119,7 +119,7 @@ type ContextCompactionReport struct {
 	Reason string `json:"reason"`
 	// OriginalBytes is the canonical logical size before reduction
 	OriginalBytes int64 `json:"original_bytes"`
-	// CompiledBytes is the canonical logical size sent to the Provider adapter
+	// CompiledBytes is the canonical logical size of the compiled model view
 	CompiledBytes int64 `json:"compiled_bytes"`
 	// SourceMessageCount is the number of raw messages represented by the Checkpoint
 	SourceMessageCount int `json:"source_message_count,omitempty"`
@@ -333,9 +333,30 @@ func NewCompactingContextCompiler(
 func (compiler *CompactingContextCompiler) Compile(
 	ctx context.Context,
 	request ContextCompileRequest,
+) (CompiledContext, error) {
+	return compiler.compile(ctx, request, 0)
+}
+
+// CompileToTokenLimit produces a validated model view below maxInputTokens
+// while retaining the independent canonical-byte hard limit
+func (compiler *CompactingContextCompiler) CompileToTokenLimit(
+	ctx context.Context,
+	request ContextCompileRequest,
+	maxInputTokens int64,
+) (CompiledContext, error) {
+	if maxInputTokens <= 0 {
+		return CompiledContext{}, errors.New("Predictive Context input-token limit must be positive")
+	}
+	return compiler.compile(ctx, request, maxInputTokens)
+}
+
+func (compiler *CompactingContextCompiler) compile(
+	ctx context.Context,
+	request ContextCompileRequest,
+	maxInputTokens int64,
 ) (compiled CompiledContext, compileErr error) {
 	defer func() {
-		if compileErr != nil || len(compiled.Segments) == 0 {
+		if compileErr != nil || len(compiled.Segments) == 0 || contextSegmentsEstimated(compiled.Segments) {
 			return
 		}
 		compiled.Segments, compileErr = estimateContextSegments(
@@ -412,12 +433,28 @@ func (compiler *CompactingContextCompiler) Compile(
 		return CompiledContext{}, err
 	}
 	baselineBytes := contextSegmentBytes(baselineSegments) + worldStateBytes
+	baselineTokens := int64(0)
+	if maxInputTokens > 0 {
+		baselineSegments, baselineTokens, _, err = estimateContextInput(
+			ctx,
+			request.TokenEstimator,
+			request.Provider,
+			request.Model,
+			baseline,
+			baselineSegments,
+			request.CurrentWorldState,
+		)
+		if err != nil {
+			return CompiledContext{}, fmt.Errorf("estimate Predictive Context input: %w", err)
+		}
+	}
 	requiredBytes := baselineBytes
 	attemptedCuts := make(map[int]struct{})
 	var failedValidation *ContextValidationReport
 	validationFallback := ""
 	var cutPlan contextSafeCutPlan
-	if request.Checkpoint != nil || baselineBytes > compiler.policy.MaxInputBytes {
+	if request.Checkpoint != nil || baselineBytes > compiler.policy.MaxInputBytes ||
+		maxInputTokens > 0 && baselineTokens > maxInputTokens {
 		cutPlan, err = buildContextSafeCutPlan(ctx, request.ModelRequest.Messages, request.Events, request.Ledger)
 		if err != nil {
 			return CompiledContext{}, fmt.Errorf("build safe Checkpoint boundaries: %w", err)
@@ -463,10 +500,26 @@ func (compiler *CompactingContextCompiler) Compile(
 				return CompiledContext{}, segmentErr
 			}
 			compiledBytes := contextSegmentBytes(segments) + worldStateBytes
+			compiledTokens := int64(0)
+			if maxInputTokens > 0 {
+				segments, compiledTokens, _, segmentErr = estimateContextInput(
+					ctx,
+					request.TokenEstimator,
+					request.Provider,
+					request.Model,
+					candidate,
+					segments,
+					request.CurrentWorldState,
+				)
+				if segmentErr != nil {
+					return CompiledContext{}, fmt.Errorf("estimate Predictive Context candidate: %w", segmentErr)
+				}
+			}
 			if compiledBytes > requiredBytes {
 				requiredBytes = compiledBytes
 			}
-			if compiledBytes <= compiler.policy.MaxInputBytes {
+			if compiledBytes <= compiler.policy.MaxInputBytes &&
+				(maxInputTokens == 0 || compiledTokens <= maxInputTokens) {
 				return CompiledContext{
 					ModelRequest: candidate,
 					Segments:     segments,
@@ -488,21 +541,47 @@ func (compiler *CompactingContextCompiler) Compile(
 			}
 		}
 	}
-	if baselineBytes <= compiler.policy.MaxInputBytes && rebaseReason == "" {
+	if baselineBytes <= compiler.policy.MaxInputBytes &&
+		(maxInputTokens == 0 || baselineTokens <= maxInputTokens) && rebaseReason == "" {
 		var report *ContextCompactionReport
 		if request.Checkpoint != nil || len(baselineRefs) > 0 {
 			reason := "reuse_checkpoint"
+			var validation *ContextValidationReport
 			if request.Checkpoint == nil {
 				reason = "externalize_evidence"
+			} else if maxInputTokens > 0 {
+				reason = "predictive_budget_reuse"
+				evidence := uniqueEvidenceRefs(append(
+					cloneEvidenceObjectRefs(request.Checkpoint.Evidence),
+					baselineRefs...,
+				))
+				current, validationErr := compiler.validateContextCandidate(
+					ctx,
+					request.EvidenceAccess,
+					request.Checkpoint,
+					canonical.Messages,
+					request.Ledger,
+					request.CurrentWorldState,
+					evidence,
+					evidence,
+				)
+				if validationErr != nil {
+					return CompiledContext{}, validationErr
+				}
+				if !current.Passed {
+					return CompiledContext{}, contextValidationFailureError(current)
+				}
+				validation = &current
 			}
 			report = &ContextCompactionReport{
-				Applied:            len(baselineRefs) > 0,
+				Applied:            len(baselineRefs) > 0 || validation != nil,
 				Reason:             reason,
 				OriginalBytes:      originalBytes,
 				CompiledBytes:      baselineBytes,
 				SourceMessageCount: checkpointSourceCount(request.Checkpoint),
 				RecentMessageCount: len(canonical.Messages) - checkpointSourceCount(request.Checkpoint),
 				Externalized:       cloneEvidenceObjectRefs(baselineRefs),
+				Validation:         cloneContextValidationReport(validation),
 			}
 		}
 		return CompiledContext{
@@ -529,8 +608,17 @@ func (compiler *CompactingContextCompiler) Compile(
 				baselineRefs,
 				originalBytes,
 				baselineBytes,
+				maxInputTokens,
+				baselineTokens,
 				failedValidation,
 				validationFallback,
+			)
+		}
+		if maxInputTokens > 0 && baselineTokens > maxInputTokens {
+			return CompiledContext{}, fmt.Errorf(
+				"context requires %d estimated input tokens, limit is %d, and no safe Checkpoint boundary exists",
+				baselineTokens,
+				maxInputTokens,
 			)
 		}
 		return CompiledContext{}, fmt.Errorf(
@@ -588,12 +676,33 @@ func (compiler *CompactingContextCompiler) Compile(
 			return CompiledContext{}, segmentErr
 		}
 		compiledBytes := contextSegmentBytes(segments) + worldStateBytes
-		if compiledBytes > compiler.policy.MaxInputBytes || compiledBytes >= originalBytes {
+		compiledTokens := int64(0)
+		if maxInputTokens > 0 {
+			segments, compiledTokens, _, segmentErr = estimateContextInput(
+				ctx,
+				request.TokenEstimator,
+				request.Provider,
+				request.Model,
+				candidate,
+				segments,
+				request.CurrentWorldState,
+			)
+			if segmentErr != nil {
+				return CompiledContext{}, fmt.Errorf("estimate Predictive Context candidate: %w", segmentErr)
+			}
+		}
+		if compiledBytes > compiler.policy.MaxInputBytes ||
+			maxInputTokens > 0 && compiledTokens > maxInputTokens ||
+			maxInputTokens == 0 && compiledBytes >= originalBytes {
 			continue
+		}
+		reason := "input_limit"
+		if maxInputTokens > 0 {
+			reason = "predictive_budget"
 		}
 		report := &ContextCompactionReport{
 			Applied:            true,
-			Reason:             "input_limit",
+			Reason:             reason,
 			OriginalBytes:      originalBytes,
 			CompiledBytes:      compiledBytes,
 			SourceMessageCount: cut,
@@ -621,8 +730,16 @@ func (compiler *CompactingContextCompiler) Compile(
 			baselineRefs,
 			originalBytes,
 			baselineBytes,
+			maxInputTokens,
+			baselineTokens,
 			failedValidation,
 			validationFallback,
+		)
+	}
+	if maxInputTokens > 0 {
+		return CompiledContext{}, fmt.Errorf(
+			"context cannot be reduced below %d estimated input tokens without splitting protected context transactions",
+			maxInputTokens,
 		)
 	}
 	return CompiledContext{}, fmt.Errorf(
@@ -774,13 +891,15 @@ func (compiler *CompactingContextCompiler) rollbackContextValidation(
 	baselineRefs []EvidenceObjectRef,
 	originalBytes int64,
 	baselineBytes int64,
+	maxInputTokens int64,
+	baselineTokens int64,
 	failed *ContextValidationReport,
 	fallback string,
 ) (CompiledContext, error) {
 	if failed == nil || failed.Passed {
 		return CompiledContext{}, errors.New("Context validation rollback requires a failed candidate")
 	}
-	if baselineBytes > compiler.policy.MaxInputBytes {
+	if baselineBytes > compiler.policy.MaxInputBytes || maxInputTokens > 0 && baselineTokens > maxInputTokens {
 		return CompiledContext{}, contextValidationFailureError(*failed)
 	}
 	evidence := cloneEvidenceObjectRefs(baselineRefs)

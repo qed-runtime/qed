@@ -19,6 +19,8 @@ type SessionSnapshot struct {
 	Messages   []Message          `json:"messages,omitempty"`
 	Events     []Event            `json:"events,omitempty"`
 	Checkpoint *ContextCheckpoint `json:"checkpoint,omitempty"`
+	// PreparedContext is the latest validated inactive Predictive Budget candidate
+	PreparedContext *PreparedContextCandidate `json:"prepared_context,omitempty"`
 	// CurrentWorldState is the latest captured canonical state Event value
 	CurrentWorldState *CurrentWorldState  `json:"current_world_state,omitempty"`
 	EvidenceObjects   []EvidenceObjectRef `json:"evidence_objects,omitempty"`

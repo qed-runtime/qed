@@ -281,8 +281,16 @@ An embedding host may also replace QED's dependency-free token approximation
 
 ```go
 runtime, err := agent.NewRuntime(agent.Options{
-    Provider:       provider,
-    TokenEstimator: estimator,
+    Provider:        provider,
+    ContextCompiler: compactingCompiler,
+    TokenEstimator:  estimator,
+    PredictiveBudget: &agent.PredictiveBudgetPolicy{
+        ContextWindowTokens:       128000,
+        OutputReserveTokens:       8192,
+        SafetyMarginTokens:        4096,
+        PredictedToolOutputTokens: 4096,
+        SoftThresholdTokens:       102400,
+    },
 })
 ```
 
@@ -308,9 +316,18 @@ host value into every declaratively configured Agent
 
 `agent.BuildTokenUsageReport` reconstructs a content-free per-attempt report
 from public Run Events. It pairs the Cache Plan estimate with Provider Usage,
-reports `actual - estimate`, and preserves missing Usage as unreported. Token
-estimates remain observational: `max_input_bytes` is still the deterministic
-hard canonical-byte boundary until a predictive budget policy is configured
+reports `actual - estimate`, and preserves missing Usage as unreported
+
+With `agent.Options.PredictiveBudget`, Runtime evaluates the next input plus
+predicted Tool output and the larger of output reserve or safety margin. The
+configured compiler must implement `agent.PredictiveContextCompiler`; the
+built-in compacting compiler does. At the soft threshold Runtime persists a
+validated inactive `SessionSnapshot.PreparedContext` through
+`context.compaction.prepared` while sending the unchanged request. Beyond the
+context window it adopts a fitting candidate through `context.compacted`, or
+stops before Provider I/O. `max_input_bytes` remains an independent
+deterministic hard boundary. Limits are model-specific operator facts, and the
+output reserve should be at least the effective Provider output limit
 
 Runtime retains content-free `ToolResult.ContextRetrieval` metadata in
 `tool.completed` Events and Session replay. It contains operation, outcome,

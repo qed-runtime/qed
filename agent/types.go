@@ -367,6 +367,8 @@ const (
 	EventUserMessageAdded EventType = "user.message.added"
 	// EventCurrentWorldStateCaptured commits one canonical state snapshot
 	EventCurrentWorldStateCaptured EventType = "current_world_state.captured"
+	// EventContextCompactionPrepared persists one validated inactive Checkpoint candidate
+	EventContextCompactionPrepared EventType = "context.compaction.prepared"
 	EventContextCompacted          EventType = "context.compacted"
 	// EventProviderRateLimitWait reports a queued outbound Provider attempt
 	EventProviderRateLimitWait EventType = "provider.rate_limit.waiting"
@@ -448,6 +450,8 @@ type Event struct {
 	PrefixManifest *PrefixManifest `json:"prefix_manifest,omitempty"`
 	// CachePlan describes the effective Provider cache decision for a model request
 	CachePlan *CachePlan `json:"cache_plan,omitempty"`
+	// PredictiveBudget describes the model-context preflight and decision
+	PredictiveBudget *PredictiveBudgetPlan `json:"predictive_budget,omitempty"`
 	// ProviderCall is the one-based Run-wide Provider attempt for model request and retry Events
 	ProviderCall int `json:"provider_call,omitempty"`
 	// ProviderAttempt is the one-based attempt within one logical model request
@@ -458,9 +462,10 @@ type Event struct {
 	ProviderRetry *ProviderRetryInfo `json:"provider_retry,omitempty"`
 	// ProviderRateLimitWait describes why an outbound Provider attempt is queued
 	ProviderRateLimitWait *ProviderRateLimitWaitInfo `json:"provider_rate_limit_wait,omitempty"`
-	// ContextCheckpoint is the newly published Checkpoint for context.compacted
+	// ContextCheckpoint is the candidate for context.compaction.prepared or the
+	// newly active Checkpoint for context.compacted
 	ContextCheckpoint *ContextCheckpoint `json:"context_checkpoint,omitempty"`
-	// ContextCompaction describes the provider-neutral reduction for context.compacted
+	// ContextCompaction describes the provider-neutral prepared or adopted reduction
 	ContextCompaction *ContextCompactionReport `json:"context_compaction,omitempty"`
 	// Message is present for message events
 	Message *Message `json:"message,omitempty"`
@@ -526,4 +531,6 @@ type RunResult struct {
 	ContextCompaction *ContextCompactionReport `json:"context_compaction,omitempty"`
 	// CachePlan is the latest Provider cache decision used by this Run
 	CachePlan *CachePlan `json:"cache_plan,omitempty"`
+	// PredictiveBudget is the latest model-context preflight used by this Run
+	PredictiveBudget *PredictiveBudgetPlan `json:"predictive_budget,omitempty"`
 }

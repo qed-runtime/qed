@@ -1055,7 +1055,8 @@ func timelineItem(index int, event Event) sessionTimelineItem {
 func accessibleEvidenceReference(events []Event, digest string, access EvidenceAccess) (EvidenceObjectRef, error) {
 	byIdentity := make(map[string]EvidenceObjectRef)
 	for _, event := range events {
-		if event.Type != EventContextCompacted || event.ContextCompaction == nil {
+		if event.Type != EventContextCompacted && event.Type != EventContextCompactionPrepared ||
+			event.ContextCompaction == nil {
 			continue
 		}
 		for _, reference := range event.ContextCompaction.Externalized {

@@ -158,6 +158,11 @@ Hookは`current_world_state.captured`を購読できます
 payloadはfile、diff、stdout、stderr contentを含みませんが、workspace path、command argument、digest、provenanceを含みます
 sensitiveなSession metadataとして扱う必要があります
 
+Predictive Budgetを設定すると`context.compaction.prepared`が追加され、準備、採用、`model.request.started` payloadに任意の`predictive_budget` fieldが入ります
+planは本文を含みませんがprepared EventはsensitiveなSession contentを要約し得るbounded Checkpointとscope付きEvidence参照も持ちます
+payload全体をsensitiveとして扱い、`context.compacted`までcandidateをactiveと見なさないでください
+これらのEvent typeを扱うHook payload decoderは任意fieldを受け入れる必要があります
+
 ### Command
 
 Commandはname、description、JSON input schema、capabilityを宣言します

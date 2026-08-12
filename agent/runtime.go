@@ -84,6 +84,11 @@ type Options struct {
 	// An explicit host estimator takes precedence over a Provider that implements
 	// TokenEstimator. If neither exists, Runtime uses CanonicalByteTokenEstimator
 	TokenEstimator TokenEstimator
+	// PredictiveBudget reserves model output, estimation margin, and expected Tool
+	// output before every Provider request
+	//
+	// A non-nil policy requires ContextCompiler to implement PredictiveContextCompiler
+	PredictiveBudget *PredictiveBudgetPolicy
 	// EvidenceAccess configures tenant-scoped Evidence used by ContextCompiler
 	//
 	// A nil value preserves legacy unscoped compilation unless a parent context
@@ -129,6 +134,7 @@ type Runtime struct {
 	sessionStore            SessionStore
 	contextCompiler         ContextCompiler
 	tokenEstimator          TokenEstimator
+	predictiveBudget        *PredictiveBudgetPolicy
 	evidenceAccess          *RuntimeEvidenceAccess
 	contextRetrieval        *normalizedContextRetrievalOptions
 	currentWorldStateSource CurrentWorldStateSource
@@ -213,6 +219,15 @@ func NewRuntime(options Options) (*Runtime, error) {
 	if contextCompiler == nil {
 		contextCompiler = DefaultContextCompiler{}
 	}
+	predictiveBudget, err := normalizePredictiveBudgetPolicyOption(options.PredictiveBudget)
+	if err != nil {
+		return nil, fmt.Errorf("configure Predictive Budget: %w", err)
+	}
+	if predictiveBudget != nil {
+		if _, ok := contextCompiler.(PredictiveContextCompiler); !ok {
+			return nil, errors.New("Predictive Budget requires a Predictive Context Compiler")
+		}
+	}
 	evidenceAccess, err := normalizeRuntimeEvidenceAccess(options.EvidenceAccess)
 	if err != nil {
 		return nil, fmt.Errorf("configure Runtime Evidence access: %w", err)
@@ -253,6 +268,7 @@ func NewRuntime(options Options) (*Runtime, error) {
 		sessionStore:            options.SessionStore,
 		contextCompiler:         contextCompiler,
 		tokenEstimator:          tokenEstimator,
+		predictiveBudget:        predictiveBudget,
 		evidenceAccess:          evidenceAccess,
 		contextRetrieval:        contextRetrieval,
 		currentWorldStateSource: options.CurrentWorldStateSource,
@@ -649,12 +665,14 @@ func (runtime *Runtime) execute(
 	sessionRevision := loaded.revision
 	ledgerEvents := cloneEvents(loaded.events)
 	activeCheckpoint := cloneContextCheckpointPointer(loaded.checkpoint)
+	preparedContext := clonePreparedContextCandidate(loaded.preparedContext)
 	knownEvidence := make(map[string]struct{}, len(loaded.evidenceObjects))
 	for _, reference := range loaded.evidenceObjects {
 		knownEvidence[reference.Identity()] = struct{}{}
 	}
 	var latestCompaction *ContextCompactionReport
 	var latestCachePlan *CachePlan
+	var latestPredictiveBudget *PredictiveBudgetPlan
 	var latestWorldState *CurrentWorldState
 
 	ctx = WithRunInfo(ctx, RunInfo{
@@ -692,6 +710,9 @@ func (runtime *Runtime) execute(
 		event.AgentID = request.AgentID
 		event.SessionID = request.SessionID
 		event.Time = time.Now().UTC()
+		if err := validatePredictiveBudgetEvent(event); err != nil {
+			return fmt.Errorf("validate Predictive Budget Event: %w", err)
+		}
 		if event.FactDirective != nil {
 			preview := cloneEvent(event)
 			if runtime.sessionStore != nil && request.SessionID != "" {
@@ -702,14 +723,14 @@ func (runtime *Runtime) execute(
 				return fmt.Errorf("validate Fact lifecycle transition: %w", err)
 			}
 		}
-		if event.Type == EventContextCompacted {
+		if event.Type == EventContextCompacted || event.Type == EventContextCompactionPrepared {
 			preview := cloneEvent(event)
 			if runtime.sessionStore != nil && request.SessionID != "" {
 				preview.SessionRevision = sessionRevision + 1
 			}
 			previewEvents := append(cloneEvents(ledgerEvents), preview)
 			if _, err := BuildContextLedger(ctx, previewEvents); err != nil {
-				return fmt.Errorf("validate Context compaction: %w", err)
+				return fmt.Errorf("validate Context compaction transition: %w", err)
 			}
 		}
 		if event.Type == EventCurrentWorldStateCaptured && event.CurrentWorldState == nil {
@@ -897,6 +918,7 @@ func (runtime *Runtime) execute(
 			CurrentWorldState: cloneCurrentWorldStatePointer(latestWorldState),
 			ContextCompaction: cloneContextCompactionReport(latestCompaction),
 			CachePlan:         cloneCachePlanPointer(latestCachePlan),
+			PredictiveBudget:  clonePredictiveBudgetPlan(latestPredictiveBudget),
 		}, runErr)
 	}
 
@@ -1065,11 +1087,13 @@ func (runtime *Runtime) execute(
 			modelRequest,
 			sessionRevision,
 			activeCheckpoint,
+			activeCheckpoint,
 			&activeLedger,
 			ledgerEvents,
 			latestWorldState,
 			evidenceAccess,
 			evidenceSensitivity,
+			0,
 		)
 		if err != nil {
 			runtime.debug("context.compile.failed",
@@ -1139,6 +1163,7 @@ func (runtime *Runtime) execute(
 				fail(err)
 				return
 			}
+			preparedContext = nil
 			if checkpointChanged {
 				activeCheckpoint = cloneContextCheckpointPointer(compiled.Checkpoint)
 			}
@@ -1149,6 +1174,188 @@ func (runtime *Runtime) execute(
 		}
 		if compiled.Compaction != nil {
 			latestCompaction = cloneContextCompactionReport(compiled.Compaction)
+		}
+
+		var predictivePlan *PredictiveBudgetPlan
+		if runtime.predictiveBudget != nil {
+			cachePlan := compiled.ModelRequest.CachePlan
+			originalCompiledBytes := contextSegmentBytes(compiled.Segments)
+			plan, planErr := BuildPredictiveBudgetPlan(
+				*runtime.predictiveBudget,
+				cachePlan.InputTokenEstimate,
+				cachePlan.TokenEstimateKind,
+			)
+			if planErr != nil {
+				fail(fmt.Errorf("plan Predictive Budget: %w", planErr))
+				return
+			}
+			predictivePlan = &plan
+			latestPredictiveBudget = clonePredictiveBudgetPlan(&plan)
+
+			if plan.Level == PredictiveBudgetSoft || plan.Level == PredictiveBudgetHard {
+				candidateInputLimit := plan.MaxInputTokens
+				if plan.Level == PredictiveBudgetSoft {
+					candidateInputLimit = plan.SoftThresholdTokens -
+						plan.RequiredReserveTokens - plan.PredictedToolOutputTokens - 1
+				}
+				activeLedger, err = BuildContextLedger(ctx, ledgerEvents)
+				if err != nil {
+					fail(fmt.Errorf("rebuild Context Ledger before Predictive Budget: %w", err))
+					return
+				}
+				var candidate CompiledContext
+				var candidateManifest PrefixManifest
+				var candidateReport *ContextCompactionReport
+				candidateReady := false
+				reusedPrepared := false
+				if preparedContext != nil {
+					candidate, candidateManifest, err = runtime.compileContext(
+						ctx,
+						runID,
+						modelRequest,
+						sessionRevision,
+						&preparedContext.Checkpoint,
+						activeCheckpoint,
+						&activeLedger,
+						ledgerEvents,
+						latestWorldState,
+						evidenceAccess,
+						evidenceSensitivity,
+						candidateInputLimit,
+					)
+					if err == nil && contextCheckpointsEqual(candidate.Checkpoint, &preparedContext.Checkpoint) &&
+						candidate.Compaction != nil && candidate.Compaction.Validation != nil &&
+						candidate.Compaction.Validation.Passed &&
+						candidate.ModelRequest.CachePlan.TokenEstimateKind == plan.TokenEstimateKind &&
+						candidate.ModelRequest.CachePlan.InputTokenEstimate <= candidateInputLimit {
+						candidateReport = predictiveCandidateReport(
+							preparedContext.Compaction,
+							candidate,
+							originalCompiledBytes,
+							len(modelRequest.Messages),
+						)
+						candidateReady = true
+						reusedPrepared = true
+					} else {
+						runtime.debug("predictive_budget.prepared_candidate.stale",
+							"run_id", runID,
+							"provider", runtime.provider.Name(),
+							"error_type", errorType(err),
+						)
+					}
+				}
+				if !candidateReady {
+					candidate, candidateManifest, err = runtime.compileContext(
+						ctx,
+						runID,
+						modelRequest,
+						sessionRevision,
+						activeCheckpoint,
+						activeCheckpoint,
+						&activeLedger,
+						ledgerEvents,
+						latestWorldState,
+						evidenceAccess,
+						evidenceSensitivity,
+						candidateInputLimit,
+					)
+					if err == nil && candidate.Checkpoint != nil && candidate.Compaction != nil &&
+						candidate.Compaction.Validation != nil && candidate.Compaction.Validation.Passed &&
+						candidate.ModelRequest.CachePlan.TokenEstimateKind == plan.TokenEstimateKind &&
+						candidate.ModelRequest.CachePlan.InputTokenEstimate <= candidateInputLimit {
+						candidateReport = cloneContextCompactionReport(candidate.Compaction)
+						candidateReport.OriginalBytes = originalCompiledBytes
+						candidateReady = true
+					}
+				}
+
+				if plan.Level == PredictiveBudgetHard && !candidateReady {
+					if err == nil {
+						err = errors.New("Predictive Context Compiler did not return a fitting validated Checkpoint")
+					}
+					fail(fmt.Errorf("adopt Predictive Budget candidate: %w", err))
+					return
+				}
+				if candidateReady {
+					action := PredictiveBudgetActionPrepare
+					if plan.Level == PredictiveBudgetHard {
+						action = PredictiveBudgetActionAdopt
+					}
+					plan, planErr = predictiveBudgetWithDecision(
+						plan,
+						action,
+						candidate.ModelRequest.CachePlan.InputTokenEstimate,
+						candidate.Checkpoint.Generation,
+					)
+					if planErr != nil {
+						fail(fmt.Errorf("finalize Predictive Budget: %w", planErr))
+						return
+					}
+					predictivePlan = &plan
+					latestPredictiveBudget = clonePredictiveBudgetPlan(&plan)
+					candidateReport.Reason = "predictive_budget_prepare"
+					if action == PredictiveBudgetActionAdopt {
+						candidateReport.Reason = "predictive_budget_adopt"
+					}
+					newEvidence = newEvidence[:0]
+					for _, reference := range candidateReport.Externalized {
+						if _, exists := knownEvidence[reference.Identity()]; !exists {
+							newEvidence = append(newEvidence, reference)
+						}
+					}
+					candidateReport.Externalized = cloneEvidenceObjectRefs(newEvidence)
+					budgetEvent := clonePredictiveBudgetPlan(&plan)
+					checkpointEvent := cloneContextCheckpointPointer(candidate.Checkpoint)
+					reportEvent := cloneContextCompactionReport(candidateReport)
+					if action == PredictiveBudgetActionPrepare {
+						if !reusedPrepared || len(newEvidence) > 0 {
+							if err := emit(Event{
+								Type:              EventContextCompactionPrepared,
+								PredictiveBudget:  budgetEvent,
+								ContextCheckpoint: checkpointEvent,
+								ContextCompaction: reportEvent,
+							}); err != nil {
+								fail(err)
+								return
+							}
+						}
+						preparedContext = &PreparedContextCandidate{
+							Checkpoint: *cloneContextCheckpointPointer(candidate.Checkpoint),
+							Compaction: *cloneContextCompactionReport(candidateReport),
+							Budget:     plan,
+						}
+					} else {
+						if err := emit(Event{
+							Type:              EventContextCompacted,
+							PredictiveBudget:  budgetEvent,
+							ContextCheckpoint: checkpointEvent,
+							ContextCompaction: reportEvent,
+						}); err != nil {
+							fail(err)
+							return
+						}
+						compiled = candidate
+						manifest = candidateManifest
+						activeCheckpoint = cloneContextCheckpointPointer(candidate.Checkpoint)
+						preparedContext = nil
+						latestCompaction = cloneContextCompactionReport(candidateReport)
+					}
+					for _, reference := range newEvidence {
+						knownEvidence[reference.Identity()] = struct{}{}
+					}
+				}
+			}
+			runtime.debug("predictive_budget.planned",
+				"run_id", runID,
+				"provider", runtime.provider.Name(),
+				"level", plan.Level,
+				"action", plan.Action,
+				"input_token_estimate", plan.InputTokenEstimate,
+				"candidate_input_token_estimate", plan.CandidateInputTokenEstimate,
+				"provider_input_token_estimate", plan.ProviderInputTokenEstimate,
+				"predicted_total_tokens", plan.PredictedTotalTokens,
+				"context_window_tokens", plan.ContextWindowTokens,
+			)
 		}
 
 		var message Message
@@ -1220,18 +1427,21 @@ func (runtime *Runtime) execute(
 			)
 			manifestEvent := clonePrefixManifest(manifest)
 			cachePlanEvent := cloneCachePlanPointer(compiled.ModelRequest.CachePlan)
+			predictiveBudgetEvent := clonePredictiveBudgetPlan(predictivePlan)
 			if err := emit(Event{
-				Type:            EventModelRequest,
-				PrefixManifest:  &manifestEvent,
-				CachePlan:       cachePlanEvent,
-				ProviderCall:    providerCalls,
-				ProviderAttempt: providerAttempt,
+				Type:             EventModelRequest,
+				PrefixManifest:   &manifestEvent,
+				CachePlan:        cachePlanEvent,
+				PredictiveBudget: predictiveBudgetEvent,
+				ProviderCall:     providerCalls,
+				ProviderAttempt:  providerAttempt,
 			}); err != nil {
 				releaseProvider()
 				fail(err)
 				return
 			}
 			latestCachePlan = cloneCachePlanPointer(cachePlanEvent)
+			latestPredictiveBudget = clonePredictiveBudgetPlan(predictiveBudgetEvent)
 
 			phase := "failed"
 			stream, providerErr := runtime.provider.Stream(ctx, compiled.ModelRequest)
@@ -1452,23 +1662,51 @@ func (runtime *Runtime) debug(message string, arguments ...any) {
 	}
 }
 
+func predictiveCandidateReport(
+	prepared ContextCompactionReport,
+	compiled CompiledContext,
+	originalBytes int64,
+	messageCount int,
+) *ContextCompactionReport {
+	report := cloneContextCompactionReport(&prepared)
+	report.Applied = true
+	report.OriginalBytes = originalBytes
+	report.CompiledBytes = contextSegmentBytes(compiled.Segments)
+	report.RecentMessageCount = messageCount - report.SourceMessageCount
+	if report.RecentMessageCount < 0 {
+		report.RecentMessageCount = 0
+	}
+	if compiled.Compaction != nil {
+		report.Externalized = uniqueEvidenceRefs(append(
+			report.Externalized,
+			compiled.Compaction.Externalized...,
+		))
+		if compiled.Compaction.Validation != nil {
+			report.Validation = cloneContextValidationReport(compiled.Compaction.Validation)
+		}
+	}
+	return report
+}
+
 func (runtime *Runtime) compileContext(
 	ctx context.Context,
 	runID string,
 	request ModelRequest,
 	sessionRevision uint64,
 	checkpoint *ContextCheckpoint,
+	validationPrevious *ContextCheckpoint,
 	ledger *ContextLedger,
 	events []Event,
 	worldState *CurrentWorldState,
 	evidenceAccess *EvidenceAccess,
 	evidenceSensitivity EvidenceSensitivity,
+	maxInputTokens int64,
 ) (CompiledContext, PrefixManifest, error) {
 	model := ""
 	if provider, ok := runtime.provider.(ModelIDProvider); ok {
 		model = provider.ModelID()
 	}
-	compiled, err := runtime.contextCompiler.Compile(ctx, ContextCompileRequest{
+	compileRequest := ContextCompileRequest{
 		Provider:            runtime.provider.Name(),
 		Model:               model,
 		ModelRequest:        cloneModelRequest(request),
@@ -1480,7 +1718,18 @@ func (runtime *Runtime) compileContext(
 		EvidenceAccess:      cloneEvidenceAccessPointer(evidenceAccess),
 		EvidenceSensitivity: evidenceSensitivity,
 		TokenEstimator:      runtime.tokenEstimator,
-	})
+	}
+	var compiled CompiledContext
+	var err error
+	if maxInputTokens > 0 {
+		compiler, ok := runtime.contextCompiler.(PredictiveContextCompiler)
+		if !ok {
+			return CompiledContext{}, PrefixManifest{}, errors.New("Context Compiler does not support Predictive Budget")
+		}
+		compiled, err = compiler.CompileToTokenLimit(ctx, compileRequest, maxInputTokens)
+	} else {
+		compiled, err = runtime.contextCompiler.Compile(ctx, compileRequest)
+	}
 	if err != nil {
 		return CompiledContext{}, PrefixManifest{}, err
 	}
@@ -1488,7 +1737,7 @@ func (runtime *Runtime) compileContext(
 	compiled.Segments = cloneContextSegments(compiled.Segments)
 	compiled.Checkpoint = cloneContextCheckpointPointer(compiled.Checkpoint)
 	compiled.Compaction = cloneContextCompactionReport(compiled.Compaction)
-	if err := validateCompiledContextValidation(compiled.Compaction, compiled.Checkpoint, checkpoint); err != nil {
+	if err := validateCompiledContextValidation(compiled.Compaction, compiled.Checkpoint, validationPrevious); err != nil {
 		return CompiledContext{}, PrefixManifest{}, fmt.Errorf("validate Context preservation report: %w", err)
 	}
 	if compiled.ModelRequest.AgentID != request.AgentID {
@@ -1520,6 +1769,31 @@ func (runtime *Runtime) compileContext(
 		model,
 	); err != nil {
 		return CompiledContext{}, PrefixManifest{}, err
+	}
+	if runtime.predictiveBudget != nil {
+		var estimatedInput int64
+		compiled.Segments, estimatedInput, _, err = estimateContextInput(
+			ctx,
+			runtime.tokenEstimator,
+			runtime.provider.Name(),
+			model,
+			compiled.ModelRequest,
+			compiled.Segments,
+			nil,
+		)
+		if err != nil {
+			return CompiledContext{}, PrefixManifest{}, fmt.Errorf(
+				"independently estimate Predictive Context input: %w",
+				err,
+			)
+		}
+		if maxInputTokens > 0 && estimatedInput > maxInputTokens {
+			return CompiledContext{}, PrefixManifest{}, fmt.Errorf(
+				"Predictive Context Compiler returned %d estimated input tokens, limit is %d",
+				estimatedInput,
+				maxInputTokens,
+			)
+		}
 	}
 	toolNames := make(map[string]struct{}, len(compiled.ModelRequest.Tools))
 	for _, definition := range compiled.ModelRequest.Tools {
@@ -1683,6 +1957,7 @@ type loadedSession struct {
 	events          []Event
 	revision        uint64
 	checkpoint      *ContextCheckpoint
+	preparedContext *PreparedContextCandidate
 	evidenceObjects []EvidenceObjectRef
 	pendingWait     *WaitRequest
 	pendingTool     *ToolCall
@@ -1725,6 +2000,7 @@ func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (lo
 			events:          cloneEvents(snapshot.Events),
 			revision:        snapshot.Revision,
 			checkpoint:      cloneContextCheckpointPointer(snapshot.Checkpoint),
+			preparedContext: clonePreparedContextCandidate(snapshot.PreparedContext),
 			evidenceObjects: cloneEvidenceObjectRefs(snapshot.EvidenceObjects),
 			pendingWait:     &wait,
 			pendingTool:     &tool,
@@ -1739,6 +2015,7 @@ func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (lo
 		events:          cloneEvents(snapshot.Events),
 		revision:        snapshot.Revision,
 		checkpoint:      cloneContextCheckpointPointer(snapshot.Checkpoint),
+		preparedContext: clonePreparedContextCandidate(snapshot.PreparedContext),
 		evidenceObjects: cloneEvidenceObjectRefs(snapshot.EvidenceObjects),
 	}, release, nil
 }
@@ -2088,6 +2365,7 @@ func cloneEvent(event Event) Event {
 		event.PrefixManifest = &manifest
 	}
 	event.CachePlan = cloneCachePlanPointer(event.CachePlan)
+	event.PredictiveBudget = clonePredictiveBudgetPlan(event.PredictiveBudget)
 	if event.ProviderError != nil {
 		providerError := *event.ProviderError
 		event.ProviderError = &providerError
@@ -2154,6 +2432,7 @@ func cloneRunResult(result RunResult) RunResult {
 	result.CurrentWorldState = cloneCurrentWorldStatePointer(result.CurrentWorldState)
 	result.ContextCompaction = cloneContextCompactionReport(result.ContextCompaction)
 	result.CachePlan = cloneCachePlanPointer(result.CachePlan)
+	result.PredictiveBudget = clonePredictiveBudgetPlan(result.PredictiveBudget)
 	return result
 }
 

@@ -76,6 +76,13 @@ QEDは1つのstrictなJSON documentからProvider profile、process分離Extensi
         "max_input_bytes": 65536,
         "recent_messages": 12,
         "rebase_generation_interval": 4,
+        "predictive_budget": {
+          "context_window_tokens": 128000,
+          "output_reserve_tokens": 8192,
+          "safety_margin_tokens": 4096,
+          "predicted_tool_output_tokens": 4096,
+          "soft_threshold_tokens": 102400
+        },
         "retrieval": {
           "max_calls_per_run": 16,
           "max_items_per_call": 32,
@@ -411,6 +418,18 @@ QEDは正確なcompact済みmessage prefixと外部化したTool outputをconten
 | `checkpoint_max_bytes` | no | encoded Checkpoint上限、既定値`8192` |
 | `rebase_generation_interval` | no | 前回semantic Checkpointを使わず再構築するまでの新しいgeneration数、既定値`4`、最大`64` |
 | `evidence_sensitivity` | no | `private`または`secret`、既定値`private`、built-in JSON Storeは暗号化しないため`secret`を拒否 |
+| `predictive_budget` | no | 後述するmodel context preflight、soft準備、hard採用policy |
+
+`predictive_budget`は任意です
+必須値はoperatorが指定するmodelまたはworkloadのfactであり暗黙の既定値はありません
+
+| Predictive Budget field | 必須 | 意味 |
+| --- | --- | --- |
+| `context_window_tokens` | yes | model inputとoutputを合わせた完全なcontext上限 |
+| `output_reserve_tokens` | yes | 次のmodel response用に予約するcapacity、実効Provider output上限以上を指定 |
+| `safety_margin_tokens` | no | estimate誤差用の代替reserve、既定値`0`、`output_reserve_tokens`との大きい方を使用 |
+| `predicted_tool_output_tokens` | no | 次に想定するTool result用に予約するcapacity、既定値`0` |
+| `soft_threshold_tokens` | yes | 検証済みinactive Checkpointの準備を始めるpredicted total、fixed reserveより大きくcontext windowより小さい値が必要 |
 
 任意の`retrieval` objectはRuntime所有のread-only Toolである`context_search`、`context_fetch`、`session_timeline`、`artifact_history`、`execution_history`を登録します
 Context圧縮と同じscope付きJSON Evidence Storeが必要です
@@ -450,10 +469,16 @@ kindは`[a-z0-9][a-z0-9._/:-]{0,127}`に一致する必要があります
 Context compileのestimate failureはProvider call前に停止し、relevance estimate failureはboundedな通常Tool errorになります
 外部開示、credential、rate limit、cost、決定性はhostが所有します
 
-`max_input_bytes`は決定的なProvider neutral値でありtokenizer basedなmodel context limitではありません
+`max_input_bytes`は決定的なProvider neutral hard境界として維持され、tokenizer basedなPredictive Budgetから独立します
 QEDはraw Session messageを書き換えません
-検証済みCheckpointとrecent raw tailをcompileし、Tool、approval、subagent、edit-verification、commitの安全なtransaction境界でhard limit内に収まらなければProvider call前に停止します
-predictive budget policyが将来有効になるまではToken Estimateをobservationalに扱います
+検証済みCheckpointとrecent raw tailをcompileし、Tool、approval、subagent、edit-verification、commitの安全なtransaction境界でいずれかのhard limit内に収まらなければProvider call前に停止します
+
+Predictive preflightは`input estimate + predicted Tool output + max(output reserve, safety margin)`を評価します
+soft thresholdでは設定済みcompacting compilerへsoft threshold未満のcandidateを要求し、Provider requestを変更せず`context.compaction.prepared`として永続化します
+元の予測値が`context_window_tokens`を超える場合は収まる検証済みcandidateを`context.compacted`で採用します
+収まるcandidateがなければProvider I/O前にRunを停止します
+`model.request.started`と`RunResult.PredictiveBudget`は本文を含まないlevel、action、元、candidate、Providerのestimate、reserve、limit、candidate generationを公開します
+soft準備failureは元のrequestがhard limit未満のためterminalにしません
 
 最初のCheckpointと設定間隔ごとのRaw Event Rebaseは前回semantic Checkpointを使わず再構築します
 明示的なFact lifecycle変更とcurrent Ledgerで失効したCheckpoint FactもRebase triggerになります

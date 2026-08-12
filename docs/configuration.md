@@ -77,6 +77,13 @@ The format is used by `qed run`, `qed tui`, and `qed session resume`
         "max_input_bytes": 65536,
         "recent_messages": 12,
         "rebase_generation_interval": 4,
+        "predictive_budget": {
+          "context_window_tokens": 128000,
+          "output_reserve_tokens": 8192,
+          "safety_margin_tokens": 4096,
+          "predicted_tool_output_tokens": 4096,
+          "soft_threshold_tokens": 102400
+        },
         "retrieval": {
           "max_calls_per_run": 16,
           "max_items_per_call": 32,
@@ -435,6 +442,18 @@ output as content-addressed objects
 | `checkpoint_max_bytes` | no | Maximum encoded Checkpoint size, default `8192` |
 | `rebase_generation_interval` | no | Rebuild without the previous semantic Checkpoint after this many newer generations, default `4`, maximum `64` |
 | `evidence_sensitivity` | no | `private` or `secret`, default `private`; the built-in JSON Store rejects `secret` because it is not encrypted |
+| `predictive_budget` | no | Model-context preflight, soft preparation, and hard adoption policy described below |
+
+`predictive_budget` is optional. Its required values are operator-supplied model
+or workload facts and have no implicit defaults
+
+| Predictive Budget field | Required | Meaning |
+| --- | --- | --- |
+| `context_window_tokens` | yes | Complete model input and output context limit |
+| `output_reserve_tokens` | yes | Reserved capacity for the next model response; keep it at least as large as the effective Provider output limit |
+| `safety_margin_tokens` | no | Alternate reserve for estimate error, default `0`; QED uses the larger of this and `output_reserve_tokens` |
+| `predicted_tool_output_tokens` | no | Capacity reserved for the next likely Tool result, default `0` |
+| `soft_threshold_tokens` | yes | Predicted total at which QED prepares a validated inactive Checkpoint; it must exceed fixed reserves and remain below the context window |
 
 The optional `retrieval` object registers five Runtime-owned read-only Tools:
 `context_search`, `context_fetch`, `session_timeline`, `artifact_history`, and
@@ -485,12 +504,23 @@ them. A Context compilation estimate failure stops before the Provider call; a
 relevance estimate failure becomes a normal bounded Tool error. The host owns
 external disclosure, credentials, rate limits, cost, and determinism
 
-`max_input_bytes` is deterministic and Provider-neutral, not a tokenizer-backed
-model context limit. QED never rewrites raw Session messages. It compiles a
-validated Checkpoint followed by a recent raw tail, and stops before a Provider
-call when no safe Tool, approval, subagent, edit-verification, or commit
-transaction boundary fits the hard limit. Token estimates are observational
-until predictive budgeting is enabled by a later policy
+`max_input_bytes` remains a deterministic Provider-neutral hard boundary and is
+independent of the tokenizer-backed Predictive Budget. QED never rewrites raw
+Session messages. It compiles a validated Checkpoint followed by a recent raw
+tail, and stops before a Provider call when no safe Tool, approval, subagent,
+edit-verification, or commit transaction boundary fits either hard limit
+
+Predictive preflight evaluates `input estimate + predicted Tool output +
+max(output reserve, safety margin)`. At the soft threshold QED asks the
+configured compacting compiler for a candidate below the soft threshold and
+persists it as `context.compaction.prepared` without changing the Provider
+request. When the original prediction exceeds `context_window_tokens`, QED
+adopts a fitting validated candidate with `context.compacted`. If no fitting
+candidate exists, the Run stops before Provider I/O. `model.request.started`
+and `RunResult.PredictiveBudget` expose content-free levels, actions, original,
+candidate, and Provider estimates, reserves, limits, and candidate generation.
+A soft preparation failure remains
+non-terminal because the original request is still below the hard limit
 
 The first Checkpoint and every configured Raw Event Rebase are rebuilt without
 the previous semantic Checkpoint. Explicit Fact lifecycle changes and a

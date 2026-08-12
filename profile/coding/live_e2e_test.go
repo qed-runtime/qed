@@ -1164,7 +1164,7 @@ func (trace *liveCodingEventTrace) observe(event agent.Event) string {
 	prefix := fmt.Sprintf("live trace elapsed_ms=%d sequence=%d event=%s", elapsed, event.Sequence, event.Type)
 
 	switch event.Type {
-	case agent.EventRunStarted, agent.EventContextCompacted:
+	case agent.EventRunStarted, agent.EventContextCompactionPrepared, agent.EventContextCompacted:
 		return prefix
 	case agent.EventProviderRateLimitWait:
 		if event.ProviderRateLimitWait == nil {
