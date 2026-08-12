@@ -343,6 +343,20 @@ func (compiler *CompactingContextCompiler) Compile(
 	if err := ctx.Err(); err != nil {
 		return CompiledContext{}, err
 	}
+	if request.EvidenceAccess != nil {
+		if err := ValidateEvidenceAccess(*request.EvidenceAccess); err != nil {
+			return CompiledContext{}, fmt.Errorf("validate Context Evidence access: %w", err)
+		}
+		if _, ok := compiler.objects.(ScopedEvidenceObjectStore); !ok {
+			return CompiledContext{}, errors.New("scoped Context Evidence requires a Scoped Evidence Object Store")
+		}
+		if request.EvidenceSensitivity == "" {
+			request.EvidenceSensitivity = EvidenceSensitivityPrivate
+		}
+		if err := validateEvidenceSensitivity(request.EvidenceSensitivity); err != nil {
+			return CompiledContext{}, err
+		}
+	}
 	canonical, err := canonicalModelRequest(request.ModelRequest)
 	if err != nil {
 		return CompiledContext{}, err
@@ -360,7 +374,9 @@ func (compiler *CompactingContextCompiler) Compile(
 		if err := validateCheckpoint(*request.Checkpoint, canonical.Messages, request.Ledger, compiler.policy.CheckpointMaxBytes); err != nil {
 			return CompiledContext{}, fmt.Errorf("validate active Context Checkpoint: %w", err)
 		}
-		if err := compiler.validateCheckpointEvidence(ctx, *request.Checkpoint, canonical.Messages); err != nil {
+		if err := compiler.validateCheckpointEvidence(
+			ctx, request.EvidenceAccess, *request.Checkpoint, canonical.Messages,
+		); err != nil {
 			return CompiledContext{}, fmt.Errorf("validate active Context Checkpoint Evidence: %w", err)
 		}
 	}
@@ -369,7 +385,9 @@ func (compiler *CompactingContextCompiler) Compile(
 		return CompiledContext{}, fmt.Errorf("select Raw Event Rebase: %w", err)
 	}
 
-	baseline, baselineRefs, err := compiler.compiledView(ctx, canonical, request.Checkpoint, request.Ledger)
+	baseline, baselineRefs, err := compiler.compiledView(
+		ctx, request.EvidenceAccess, request.EvidenceSensitivity, canonical, request.Checkpoint, request.Ledger,
+	)
 	if err != nil {
 		return CompiledContext{}, err
 	}
@@ -417,7 +435,9 @@ func (compiler *CompactingContextCompiler) Compile(
 			failedValidation = cloneContextValidationReport(validation)
 			validationFallback = fallback
 		} else {
-			candidate, refs, viewErr := compiler.compiledView(ctx, canonical, &checkpoint, request.Ledger)
+			candidate, refs, viewErr := compiler.compiledView(
+				ctx, request.EvidenceAccess, request.EvidenceSensitivity, canonical, &checkpoint, request.Ledger,
+			)
 			if viewErr != nil {
 				return CompiledContext{}, viewErr
 			}
@@ -466,7 +486,7 @@ func (compiler *CompactingContextCompiler) Compile(
 				CompiledBytes:      baselineBytes,
 				SourceMessageCount: checkpointSourceCount(request.Checkpoint),
 				RecentMessageCount: len(canonical.Messages) - checkpointSourceCount(request.Checkpoint),
-				Externalized:       append([]EvidenceObjectRef(nil), baselineRefs...),
+				Externalized:       cloneEvidenceObjectRefs(baselineRefs),
 			}
 		}
 		return CompiledContext{
@@ -538,7 +558,9 @@ func (compiler *CompactingContextCompiler) Compile(
 			validationFallback = fallback
 			continue
 		}
-		candidate, refs, viewErr := compiler.compiledView(ctx, canonical, &checkpoint, request.Ledger)
+		candidate, refs, viewErr := compiler.compiledView(
+			ctx, request.EvidenceAccess, request.EvidenceSensitivity, canonical, &checkpoint, request.Ledger,
+		)
 		if viewErr != nil {
 			return CompiledContext{}, viewErr
 		}
@@ -606,7 +628,9 @@ func (compiler *CompactingContextCompiler) buildCheckpoint(
 	if err != nil {
 		return ContextCheckpoint{}, EvidenceObjectRef{}, "", nil, fmt.Errorf("encode Checkpoint source: %w", err)
 	}
-	sourceRef, err := compiler.objects.PutObject(ctx, checkpointMediaType, encoded)
+	sourceRef, err := compiler.putEvidenceObject(
+		ctx, request.EvidenceAccess, request.EvidenceSensitivity, checkpointMediaType, encoded,
+	)
 	if err != nil {
 		return ContextCheckpoint{}, EvidenceObjectRef{}, "", nil, fmt.Errorf("store Checkpoint source Evidence: %w", err)
 	}
@@ -670,11 +694,14 @@ func (compiler *CompactingContextCompiler) buildCheckpoint(
 				request.SessionRevision,
 			)
 		}
-		if err := compiler.validateCheckpointEvidence(ctx, checkpoint, messages); err != nil {
+		if err := compiler.validateCheckpointEvidence(
+			ctx, request.EvidenceAccess, checkpoint, messages,
+		); err != nil {
 			return ContextValidationReport{}, err
 		}
 		return compiler.validateContextCandidate(
 			ctx,
+			request.EvidenceAccess,
 			&checkpoint,
 			messages,
 			request.Ledger,
@@ -740,7 +767,7 @@ func (compiler *CompactingContextCompiler) rollbackContextValidation(
 	if baselineBytes > compiler.policy.MaxInputBytes {
 		return CompiledContext{}, contextValidationFailureError(*failed)
 	}
-	evidence := append([]EvidenceObjectRef(nil), baselineRefs...)
+	evidence := cloneEvidenceObjectRefs(baselineRefs)
 	rollback := ContextValidationRollbackRaw
 	if request.Checkpoint != nil {
 		rollback = ContextValidationRollbackPrevious
@@ -748,6 +775,7 @@ func (compiler *CompactingContextCompiler) rollbackContextValidation(
 	}
 	effective, err := compiler.validateContextCandidate(
 		ctx,
+		request.EvidenceAccess,
 		request.Checkpoint,
 		canonical.Messages,
 		request.Ledger,
@@ -774,7 +802,7 @@ func (compiler *CompactingContextCompiler) rollbackContextValidation(
 			CompiledBytes:      baselineBytes,
 			SourceMessageCount: checkpointSourceCount(request.Checkpoint),
 			RecentMessageCount: len(canonical.Messages) - checkpointSourceCount(request.Checkpoint),
-			Externalized:       append([]EvidenceObjectRef(nil), baselineRefs...),
+			Externalized:       cloneEvidenceObjectRefs(baselineRefs),
 			Fallback:           fallback,
 			Validation:         report,
 		},
@@ -783,6 +811,7 @@ func (compiler *CompactingContextCompiler) rollbackContextValidation(
 
 func (compiler *CompactingContextCompiler) validateCheckpointEvidence(
 	ctx context.Context,
+	access *EvidenceAccess,
 	checkpoint ContextCheckpoint,
 	messages []Message,
 ) error {
@@ -793,7 +822,7 @@ func (compiler *CompactingContextCompiler) validateCheckpointEvidence(
 	wantDigest := sha256Digest(encoded)
 	sourceFound := false
 	for _, reference := range checkpoint.Evidence {
-		stored, err := compiler.objects.GetObject(ctx, reference)
+		stored, err := compiler.getEvidenceObject(ctx, access, reference)
 		if err != nil {
 			return fmt.Errorf("read Checkpoint Evidence object %s: %w", reference.Digest, err)
 		}
@@ -813,6 +842,8 @@ func (compiler *CompactingContextCompiler) validateCheckpointEvidence(
 
 func (compiler *CompactingContextCompiler) compiledView(
 	ctx context.Context,
+	access *EvidenceAccess,
+	sensitivity EvidenceSensitivity,
 	request ModelRequest,
 	checkpoint *ContextCheckpoint,
 	ledger *ContextLedger,
@@ -835,8 +866,10 @@ func (compiler *CompactingContextCompiler) compiledView(
 		if view.Messages[index].Role != RoleTool || len(view.Messages[index].Text) < compiler.policy.EvidenceThresholdBytes {
 			continue
 		}
-		reference, err := compiler.objects.PutObject(
+		reference, err := compiler.putEvidenceObject(
 			ctx,
+			access,
+			sensitivity,
 			"text/plain; charset=utf-8",
 			[]byte(view.Messages[index].Text),
 		)
@@ -851,6 +884,55 @@ func (compiler *CompactingContextCompiler) compiledView(
 		references = append(references, reference)
 	}
 	return view, uniqueEvidenceRefs(references), nil
+}
+
+func (compiler *CompactingContextCompiler) putEvidenceObject(
+	ctx context.Context,
+	access *EvidenceAccess,
+	sensitivity EvidenceSensitivity,
+	mediaType string,
+	content []byte,
+) (EvidenceObjectRef, error) {
+	if access == nil {
+		return compiler.objects.PutObject(ctx, mediaType, content)
+	}
+	store, ok := compiler.objects.(ScopedEvidenceObjectStore)
+	if !ok {
+		return EvidenceObjectRef{}, errors.New("scoped Context Evidence requires a Scoped Evidence Object Store")
+	}
+	if sensitivity == "" {
+		sensitivity = EvidenceSensitivityPrivate
+	}
+	return store.PutObjectScoped(ctx, EvidenceObjectPutRequest{
+		Access:               cloneEvidenceAccess(*access),
+		MediaType:            mediaType,
+		Content:              append([]byte(nil), content...),
+		RequiredCapabilities: []string{EvidenceReadCapability},
+		Sensitivity:          sensitivity,
+	})
+}
+
+func (compiler *CompactingContextCompiler) getEvidenceObject(
+	ctx context.Context,
+	access *EvidenceAccess,
+	reference EvidenceObjectRef,
+) ([]byte, error) {
+	if access == nil {
+		if reference.Scope != nil {
+			return nil, ErrEvidenceScopeRequired
+		}
+		return compiler.objects.GetObject(ctx, reference)
+	}
+	if reference.Scope == nil {
+		return nil, ErrEvidenceScopeRequired
+	}
+	store, ok := compiler.objects.(ScopedEvidenceObjectStore)
+	if !ok {
+		return nil, errors.New("scoped Context Evidence requires a Scoped Evidence Object Store")
+	}
+	return store.GetObjectScoped(ctx, EvidenceObjectGetRequest{
+		Access: cloneEvidenceAccess(*access), Reference: cloneEvidenceObjectRef(reference),
+	})
 }
 
 func checkpointLifecycleView(checkpoint ContextCheckpoint, ledger *ContextLedger) (ContextCheckpoint, error) {
@@ -1039,10 +1121,15 @@ func validateCheckpoint(checkpoint ContextCheckpoint, messages []Message, ledger
 	if len(checkpoint.Evidence) == 0 {
 		return errors.New("Checkpoint requires exact source Evidence")
 	}
+	seenEvidence := make(map[string]struct{}, len(checkpoint.Evidence))
 	for _, reference := range checkpoint.Evidence {
-		if !validSHA256Digest(reference.Digest) || reference.Bytes < 0 || strings.TrimSpace(reference.MediaType) == "" {
+		if err := ValidateEvidenceObjectRef(reference); err != nil || strings.TrimSpace(reference.MediaType) == "" {
 			return errors.New("Checkpoint contains an invalid Evidence reference")
 		}
+		if _, duplicate := seenEvidence[reference.Identity()]; duplicate {
+			return errors.New("Checkpoint contains a duplicate Evidence reference")
+		}
+		seenEvidence[reference.Identity()] = struct{}{}
 	}
 	var activeConstraintMessages map[int]struct{}
 	if checkpoint.Ledger != nil && ledger != nil && *checkpoint.Ledger == ledger.Reference() {
@@ -1361,11 +1448,11 @@ func uniqueEvidenceRefs(references []EvidenceObjectRef) []EvidenceObjectRef {
 	seen := make(map[string]struct{}, len(references))
 	result := make([]EvidenceObjectRef, 0, len(references))
 	for _, reference := range references {
-		if _, exists := seen[reference.Digest]; exists {
+		if _, exists := seen[reference.Identity()]; exists {
 			continue
 		}
-		seen[reference.Digest] = struct{}{}
-		result = append(result, reference)
+		seen[reference.Identity()] = struct{}{}
+		result = append(result, cloneEvidenceObjectRef(reference))
 	}
 	return result
 }
@@ -1386,7 +1473,7 @@ func cloneContextCheckpointPointer(checkpoint *ContextCheckpoint) *ContextCheckp
 	cloned.Facts = append([]CheckpointFact(nil), checkpoint.Facts...)
 	cloned.Decisions = append([]CheckpointFact(nil), checkpoint.Decisions...)
 	cloned.Executions = append([]CheckpointExecution(nil), checkpoint.Executions...)
-	cloned.Evidence = append([]EvidenceObjectRef(nil), checkpoint.Evidence...)
+	cloned.Evidence = cloneEvidenceObjectRefs(checkpoint.Evidence)
 	return &cloned
 }
 
@@ -1395,7 +1482,7 @@ func cloneContextCompactionReport(report *ContextCompactionReport) *ContextCompa
 		return nil
 	}
 	cloned := *report
-	cloned.Externalized = append([]EvidenceObjectRef(nil), report.Externalized...)
+	cloned.Externalized = cloneEvidenceObjectRefs(report.Externalized)
 	cloned.Validation = cloneContextValidationReport(report.Validation)
 	return &cloned
 }

@@ -408,6 +408,102 @@ func TestEvidenceFetchReadsContentAddressedObject(t *testing.T) {
 	}
 }
 
+func TestEvidenceFetchResolvesAndAuditsScopedObjectFromRunBundle(t *testing.T) {
+	t.Parallel()
+
+	storeRoot := filepath.Join(t.TempDir(), "evidence")
+	store, err := evidence.NewJSONStore(storeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	access := agent.EvidenceAccess{
+		Scope: agent.EvidenceScope{
+			TenantID: "tenant", SessionID: "session", ProfileID: "profile",
+		},
+		PrincipalID:  "runtime",
+		Capabilities: []string{agent.EvidenceReadCapability, agent.EvidenceWriteCapability},
+	}
+	reference, err := store.PutObjectScoped(context.Background(), agent.EvidenceObjectPutRequest{
+		Access:               access,
+		MediaType:            "text/plain",
+		Content:              []byte("scoped object content"),
+		RequiredCapabilities: []string{agent.EvidenceReadCapability},
+		Sensitivity:          agent.EvidenceSensitivityPrivate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := evidence.NewBundle(agent.RunResult{
+		RunID: "run_scoped_fetch", Status: agent.RunStatusCompleted,
+	}, evidence.BundleOptions{Events: []agent.Event{{
+		Sequence: 1, Type: agent.EventContextCompacted, RunID: "run_scoped_fetch",
+		ContextCompaction: &agent.ContextCompactionReport{
+			Applied: true, Reason: "externalize_evidence", Externalized: []agent.EvidenceObjectRef{reference},
+		},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(context.Background(), bundle); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run(context.Background(), []string{
+		"evidence", "fetch", reference.Digest,
+		"--run-id", "run_scoped_fetch",
+		"--store", storeRoot,
+	}, &stdout, &stderr)
+	if exitCode != 0 || stdout.String() != "scoped object content" {
+		t.Fatalf("exit/stdout/stderr = %d/%q/%q", exitCode, stdout.String(), stderr.String())
+	}
+	records, err := store.EvidenceObjectAccessRecords(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || records[1].Operation != agent.EvidenceObjectAccessAdminGet ||
+		records[1].Outcome != agent.EvidenceObjectAccessAllowed {
+		t.Fatalf("access records = %#v", records)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = run(context.Background(), []string{
+		"evidence", "fetch", reference.Digest, "--store", storeRoot,
+	}, &stdout, &stderr)
+	if exitCode == 0 || !strings.Contains(stderr.String(), "use --run-id") {
+		t.Fatalf("unscoped exit/stdout/stderr = %d/%q/%q", exitCode, stdout.String(), stderr.String())
+	}
+}
+
+func TestEvidenceReferenceFromBundleRejectsInvalidMatchingReference(t *testing.T) {
+	t.Parallel()
+
+	access := agent.EvidenceAccess{
+		Scope: agent.EvidenceScope{
+			TenantID: "tenant", SessionID: "session", ProfileID: "profile",
+		},
+		PrincipalID:  "runtime",
+		Capabilities: []string{agent.EvidenceReadCapability, agent.EvidenceWriteCapability},
+	}
+	reference, err := agent.BindEvidenceObjectReference(agent.EvidenceObjectRef{
+		Digest: "sha256:" + strings.Repeat("a", 64), Bytes: 7, MediaType: "text/plain",
+	}, access, []string{agent.EvidenceReadCapability}, agent.EvidenceSensitivityPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference.Scope.BindingDigest = "invalid"
+	bundle := evidence.Bundle{Events: []agent.Event{{
+		ContextCompaction: &agent.ContextCompactionReport{
+			Externalized: []agent.EvidenceObjectRef{reference},
+		},
+	}}}
+	if _, err := evidenceReferenceFromBundle(bundle, reference.Digest); err == nil ||
+		!strings.Contains(err.Error(), "validate Evidence Object reference") {
+		t.Fatalf("evidenceReferenceFromBundle() error = %v", err)
+	}
+}
+
 func TestCacheStatusReadsPlanUsageAndCost(t *testing.T) {
 	t.Parallel()
 

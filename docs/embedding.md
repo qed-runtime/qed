@@ -167,6 +167,59 @@ Ledger. For `CheckpointBuildRawRebase`, `Previous` is always nil and
 `RebaseReason` identifies the deterministic trigger. The Strategy must rebuild
 from raw source instead of recursively summarizing its prior semantic output
 
+## Scoped Evidence access
+
+An embedding host that uses `CompactingContextCompiler` should configure a
+scoped Object Store and Runtime identity together
+
+```go
+objects := evidence.NewMemoryObjectStore()
+compiler, err := agent.NewCompactingContextCompiler(policy, objects, nil)
+if err != nil {
+    return err
+}
+
+runtime, err := agent.NewRuntime(agent.Options{
+    Provider:        provider,
+    ContextCompiler: compiler,
+    EvidenceAccess: &agent.RuntimeEvidenceAccess{
+        TenantID:     "tenant-a",
+        ProfileID:    "coding",
+        PrincipalID:  "company-agent",
+        Capabilities: []string{
+            agent.EvidenceReadCapability,
+            agent.EvidenceWriteCapability,
+        },
+        Sensitivity: agent.EvidenceSensitivityPrivate,
+    },
+})
+```
+
+Runtime derives the concrete scope instead of accepting it from the model. A
+Run with a Session ID uses tenant, Session, and Profile, so terminal follow-ups
+share exact Evidence. A Run without a Session uses its generated Run ID and is
+isolated from every other ephemeral Run. Subagents inherit the authenticated
+tenant through context while deriving their own Run and Profile scope
+
+For a multi-tenant server, leave `RuntimeEvidenceAccess.TenantID` empty and set
+the authenticated tenant at the request boundary
+
+```go
+ctx := agent.WithEvidenceTenant(request.Context(), authenticatedTenantID)
+handle, err := runtime.Run(ctx, runRequest)
+```
+
+If Runtime has a fixed tenant, a different contextual tenant is rejected with
+`agent.ErrEvidenceAccessDenied`. A parent `EvidenceAccess` further restricts a
+child Runtime to the intersection of parent and configured capabilities
+
+`EvidenceObjectRef.Digest` is only content identity. Scoped retrieval requires
+the complete opaque binding plus matching `EvidenceAccess`. Built-in Memory and
+JSON Stores implement `ScopedEvidenceObjectStore`, reject `secret` content,
+and record access attempts. An allowed retrieval returns no content when its
+audit record cannot be committed. A trusted local operator may use the
+optional `EvidenceObjectAdminStore`; that bypass is also audited
+
 An embedding host can inject canonical state independently of any Profile
 
 ```go

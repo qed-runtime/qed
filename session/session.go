@@ -466,7 +466,7 @@ func cloneSnapshot(snapshot agent.SessionSnapshot) agent.SessionSnapshot {
 	snapshot.Events = cloneEvents(snapshot.Events)
 	snapshot.Checkpoint = cloneContextCheckpoint(snapshot.Checkpoint)
 	snapshot.CurrentWorldState = cloneCurrentWorldState(snapshot.CurrentWorldState)
-	snapshot.EvidenceObjects = append([]agent.EvidenceObjectRef(nil), snapshot.EvidenceObjects...)
+	snapshot.EvidenceObjects = cloneEvidenceObjectRefs(snapshot.EvidenceObjects)
 	if snapshot.PendingWait != nil {
 		request := cloneWaitRequest(*snapshot.PendingWait)
 		snapshot.PendingWait = &request
@@ -511,7 +511,7 @@ func cloneEvent(event agent.Event) agent.Event {
 	event.ContextCheckpoint = cloneContextCheckpoint(event.ContextCheckpoint)
 	if event.ContextCompaction != nil {
 		report := *event.ContextCompaction
-		report.Externalized = append([]agent.EvidenceObjectRef(nil), event.ContextCompaction.Externalized...)
+		report.Externalized = cloneEvidenceObjectRefs(event.ContextCompaction.Externalized)
 		if event.ContextCompaction.Validation != nil {
 			validation := *event.ContextCompaction.Validation
 			validation.Failures = append(
@@ -657,7 +657,7 @@ func cloneContextCheckpoint(checkpoint *agent.ContextCheckpoint) *agent.ContextC
 	cloned.Facts = append([]agent.CheckpointFact(nil), checkpoint.Facts...)
 	cloned.Decisions = append([]agent.CheckpointFact(nil), checkpoint.Decisions...)
 	cloned.Executions = append([]agent.CheckpointExecution(nil), checkpoint.Executions...)
-	cloned.Evidence = append([]agent.EvidenceObjectRef(nil), checkpoint.Evidence...)
+	cloned.Evidence = cloneEvidenceObjectRefs(checkpoint.Evidence)
 	return &cloned
 }
 
@@ -684,12 +684,33 @@ func appendUniqueEvidenceObjects(
 ) []agent.EvidenceObjectRef {
 	seen := make(map[string]struct{}, len(current)+len(additional))
 	result := make([]agent.EvidenceObjectRef, 0, len(current)+len(additional))
-	for _, reference := range append(append([]agent.EvidenceObjectRef(nil), current...), additional...) {
-		if _, exists := seen[reference.Digest]; exists {
+	for _, reference := range append(cloneEvidenceObjectRefs(current), additional...) {
+		if _, exists := seen[reference.Identity()]; exists {
 			continue
 		}
-		seen[reference.Digest] = struct{}{}
-		result = append(result, reference)
+		seen[reference.Identity()] = struct{}{}
+		result = append(result, cloneEvidenceObjectRef(reference))
+	}
+	return result
+}
+
+func cloneEvidenceObjectRef(reference agent.EvidenceObjectRef) agent.EvidenceObjectRef {
+	if reference.Scope == nil {
+		return reference
+	}
+	scope := *reference.Scope
+	scope.RequiredCapabilities = append([]string(nil), reference.Scope.RequiredCapabilities...)
+	reference.Scope = &scope
+	return reference
+}
+
+func cloneEvidenceObjectRefs(references []agent.EvidenceObjectRef) []agent.EvidenceObjectRef {
+	if references == nil {
+		return nil
+	}
+	result := make([]agent.EvidenceObjectRef, len(references))
+	for index, reference := range references {
+		result[index] = cloneEvidenceObjectRef(reference)
 	}
 	return result
 }

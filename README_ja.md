@@ -63,9 +63,11 @@ prompt cache usageを返すProviderではcache read、write、uncached inputの�
 ```sh
 qed cache status --store .qed/evidence
 qed context inspect <run-id> --store .qed/evidence
-qed evidence fetch sha256:<digest> --store .qed/evidence
+qed evidence fetch sha256:<digest> --run-id <run-id> --store .qed/evidence
 ```
 
+設定済みContext Evidenceはtenant、Sessionまたはephemeral Run、execution Profile、required Capabilityへbindingされます
+content digest自体はaccess tokenではありません
 [Context compilation、圧縮、prompt cache](docs/context-caching_ja.md)を参照してください
 
 root flagでstderrへの安全な構造化diagnosticsを有効にできます

@@ -440,6 +440,33 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 			want: "Context Rebase generation interval exceeds 64",
 		},
 		{
+			name: "Evidence isolation key with surrounding whitespace",
+			document: `{
+				"version": 1,
+				"providers": {"local": {"protocol": "echo"}},
+				"evidence": {"store": "json", "path": "evidence", "isolation_key": "tenant "},
+				"agents": {"main": {"provider": "local"}}
+			}`,
+			want: "tenant ID is required and must not have surrounding whitespace",
+		},
+		{
+			name: "unsupported Evidence sensitivity",
+			document: `{
+				"version": 1,
+				"providers": {"local": {"protocol": "echo"}},
+				"evidence": {"store": "json", "path": "evidence"},
+				"agents": {"main": {
+					"provider": "local",
+					"context": {
+						"max_input_bytes": 4096,
+						"checkpoint_max_bytes": 512,
+						"evidence_sensitivity": "classified"
+					}
+				}}
+			}`,
+			want: "unsupported Evidence sensitivity",
+		},
+		{
 			name: "incomplete cache pricing",
 			document: `{
 				"version": 1,
@@ -608,11 +635,13 @@ func TestLoadBuildsContextAndCacheConfiguration(t *testing.T) {
 	if result.ContextCheckpoint == nil || result.CachePlan == nil || result.CachePlan.Mode != agent.CacheModeDisabled {
 		t.Fatalf("configured Run result = %#v", result)
 	}
-	objects, ok := configuration.EvidenceStore.(agent.EvidenceObjectStore)
-	if !ok || len(result.ContextCheckpoint.Evidence) == 0 {
+	objects, ok := configuration.EvidenceStore.(agent.EvidenceObjectAdminStore)
+	if !ok || len(result.ContextCheckpoint.Evidence) == 0 || result.ContextCheckpoint.Evidence[0].Scope == nil {
 		t.Fatal("configuration did not expose Checkpoint Evidence Objects")
 	}
-	if _, err := objects.GetObject(context.Background(), result.ContextCheckpoint.Evidence[0]); err != nil {
+	if _, err := objects.GetObjectAdmin(
+		context.Background(), result.ContextCheckpoint.Evidence[0], "agentconfig-test",
+	); err != nil {
 		t.Fatalf("load Checkpoint source Evidence: %v", err)
 	}
 }

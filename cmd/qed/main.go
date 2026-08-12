@@ -1277,6 +1277,12 @@ func fetchEvidenceCommand() *cli.Command {
 				Required().
 				Help("Evidence Object sha256 digest"),
 		).
+		Option(
+			cli.ValueOption(runIDArgumentID).
+				Long("run-id").
+				Parser(cli.StringParser()).
+				Help("Run Bundle used to resolve a scoped Evidence reference"),
+		).
 		Option(evidenceStoreOption()).
 		Handle(func(commandContext *cli.Context, invocation *cli.Invocation) (cli.Outcome, error) {
 			digest, diagnostic := requiredString(invocation, evidenceDigestArgumentID)
@@ -1287,7 +1293,30 @@ func fetchEvidenceCommand() *cli.Command {
 			if diagnostic != nil {
 				return cli.Outcome{}, diagnostic
 			}
-			content, err := store.GetObject(commandContext.Cancellation(), agent.EvidenceObjectRef{Digest: digest})
+			ctx := commandContext.Cancellation()
+			runID := optionalString(invocation, runIDArgumentID)
+			var content []byte
+			var err error
+			if runID == "" {
+				content, err = store.GetObject(ctx, agent.EvidenceObjectRef{Digest: digest})
+				if errors.Is(err, evidence.ErrObjectNotFound) {
+					err = fmt.Errorf("%w; use --run-id for a scoped Object", err)
+				}
+			} else {
+				var bundle evidence.Bundle
+				bundle, err = store.Load(ctx, runID)
+				if err == nil {
+					var reference agent.EvidenceObjectRef
+					reference, err = evidenceReferenceFromBundle(bundle, digest)
+					if err == nil {
+						if reference.Scope == nil {
+							content, err = store.GetObject(ctx, reference)
+						} else {
+							content, err = store.GetObjectAdmin(ctx, reference, "qed.cli:evidence-fetch")
+						}
+					}
+				}
+			}
 			if err != nil {
 				return cli.Outcome{}, cli.NewDiagnostic(cli.CodeHandlerError, fmt.Sprintf("fetch Evidence Object: %v", err))
 			}
@@ -1296,6 +1325,50 @@ func fetchEvidenceCommand() *cli.Command {
 			}
 			return cli.Success(), nil
 		})
+}
+
+func evidenceReferenceFromBundle(bundle evidence.Bundle, digest string) (agent.EvidenceObjectRef, error) {
+	if err := agent.ValidateEvidenceObjectRef(agent.EvidenceObjectRef{Digest: digest}); err != nil {
+		return agent.EvidenceObjectRef{}, err
+	}
+	byIdentity := make(map[string]agent.EvidenceObjectRef)
+	var invalidReference error
+	appendReferences := func(references []agent.EvidenceObjectRef) {
+		for _, reference := range references {
+			if strings.EqualFold(reference.Digest, digest) {
+				if err := agent.ValidateEvidenceObjectRef(reference); err != nil {
+					invalidReference = errors.Join(invalidReference, err)
+					continue
+				}
+				byIdentity[reference.Identity()] = reference
+			}
+		}
+	}
+	for _, event := range bundle.Events {
+		if event.ContextCheckpoint != nil {
+			appendReferences(event.ContextCheckpoint.Evidence)
+		}
+		if event.ContextCompaction != nil {
+			appendReferences(event.ContextCompaction.Externalized)
+		}
+	}
+	if invalidReference != nil {
+		return agent.EvidenceObjectRef{}, fmt.Errorf("validate Evidence Object reference: %w", invalidReference)
+	}
+	if len(byIdentity) == 0 {
+		return agent.EvidenceObjectRef{}, fmt.Errorf(
+			"Run %q does not reference Evidence Object %s", bundle.Run.ID, digest,
+		)
+	}
+	if len(byIdentity) > 1 {
+		return agent.EvidenceObjectRef{}, fmt.Errorf(
+			"Run %q has multiple scoped references for Evidence Object %s", bundle.Run.ID, digest,
+		)
+	}
+	for _, reference := range byIdentity {
+		return reference, nil
+	}
+	return agent.EvidenceObjectRef{}, errors.New("Evidence Object reference resolution failed")
 }
 
 func inspectEvidenceCommand() *cli.Command {

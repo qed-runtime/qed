@@ -518,6 +518,18 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 	for name, construct := range stores {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
+			reference, err := agent.BindEvidenceObjectReference(agent.EvidenceObjectRef{
+				Digest: "sha256:" + strings.Repeat("2", 64), Bytes: 10, MediaType: "application/json",
+			}, agent.EvidenceAccess{
+				Scope: agent.EvidenceScope{
+					TenantID: "tenant", SessionID: "checkpoint", ProfileID: "profile",
+				},
+				PrincipalID:  "runtime",
+				Capabilities: []string{agent.EvidenceReadCapability, agent.EvidenceWriteCapability},
+			}, []string{agent.EvidenceReadCapability}, agent.EvidenceSensitivityPrivate)
+			if err != nil {
+				t.Fatal(err)
+			}
 			checkpoint := agent.ContextCheckpoint{
 				Version:              1,
 				Generation:           2,
@@ -529,11 +541,7 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 					SourceEventCount: 2, SourceHash: "sha256:" + strings.Repeat("4", 64), SessionRevision: 2,
 				},
 				Narrative: "checkpoint",
-				Evidence: []agent.EvidenceObjectRef{{
-					Digest:    "sha256:" + strings.Repeat("2", 64),
-					Bytes:     10,
-					MediaType: "application/json",
-				}},
+				Evidence:  []agent.EvidenceObjectRef{reference},
 			}
 			report := agent.ContextCompactionReport{
 				Applied:            true,
@@ -563,6 +571,7 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 			}
 			checkpoint.Narrative = "mutated"
 			checkpoint.Ledger.Digest = "mutated"
+			checkpoint.Evidence[0].Scope.RequiredCapabilities[0] = "mutated"
 			report.Externalized[0].Digest = "mutated"
 			report.Validation.ActiveConstraints.Required = 99
 			snapshot, err := store.Load(context.Background(), "checkpoint")
@@ -572,8 +581,18 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 			if snapshot.Checkpoint == nil || snapshot.Checkpoint.Narrative != "checkpoint" ||
 				snapshot.Checkpoint.LastRebaseGeneration != 2 ||
 				snapshot.Checkpoint.Ledger == nil || snapshot.Checkpoint.Ledger.Digest == "mutated" ||
-				len(snapshot.EvidenceObjects) != 1 || snapshot.EvidenceObjects[0].Digest == "mutated" {
+				len(snapshot.EvidenceObjects) != 1 || snapshot.EvidenceObjects[0].Digest == "mutated" ||
+				snapshot.Checkpoint.Evidence[0].Scope == nil ||
+				snapshot.Checkpoint.Evidence[0].Scope.RequiredCapabilities[0] != agent.EvidenceReadCapability {
 				t.Fatalf("Checkpoint Snapshot = %#v", snapshot)
+			}
+			snapshot.Checkpoint.Evidence[0].Scope.RequiredCapabilities[0] = "caller-mutated"
+			again, err := store.Load(context.Background(), "checkpoint")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if again.Checkpoint.Evidence[0].Scope.RequiredCapabilities[0] != agent.EvidenceReadCapability {
+				t.Fatal("Checkpoint Evidence scope aliases a loaded snapshot")
 			}
 			if len(snapshot.Events) != 1 || snapshot.Events[0].ContextCompaction == nil ||
 				!snapshot.Events[0].ContextCompaction.Rebased ||

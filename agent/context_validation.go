@@ -86,6 +86,7 @@ type ContextValidationReport struct {
 
 func (compiler *CompactingContextCompiler) validateContextCandidate(
 	ctx context.Context,
+	access *EvidenceAccess,
 	checkpoint *ContextCheckpoint,
 	messages []Message,
 	ledger *ContextLedger,
@@ -110,6 +111,7 @@ func (compiler *CompactingContextCompiler) validateContextCandidate(
 	var err error
 	report.Evidence, err = compiler.validateEvidencePreservation(
 		ctx,
+		access,
 		requiredEvidence,
 		preservedEvidence,
 	)
@@ -257,13 +259,14 @@ func rawTailContainsToolCall(messages []Message, callID, name string) bool {
 
 func (compiler *CompactingContextCompiler) validateEvidencePreservation(
 	ctx context.Context,
+	access *EvidenceAccess,
 	required []EvidenceObjectRef,
 	preserved []EvidenceObjectRef,
 ) (ContextPreservationCount, error) {
 	result := ContextPreservationCount{}
-	preservedByDigest := make(map[string]EvidenceObjectRef, len(preserved))
+	preservedByIdentity := make(map[string]EvidenceObjectRef, len(preserved))
 	for _, reference := range uniqueEvidenceRefs(preserved) {
-		preservedByDigest[reference.Digest] = reference
+		preservedByIdentity[reference.Identity()] = reference
 	}
 	for _, reference := range uniqueEvidenceRefs(required) {
 		if err := ctx.Err(); err != nil {
@@ -274,11 +277,11 @@ func (compiler *CompactingContextCompiler) validateEvidencePreservation(
 		}
 		result.Required++
 		result.RequiredBytes += reference.Bytes
-		candidate, exists := preservedByDigest[reference.Digest]
-		if !exists || candidate != reference {
+		candidate, exists := preservedByIdentity[reference.Identity()]
+		if !exists || !evidenceObjectRefsEqual(candidate, reference) {
 			continue
 		}
-		stored, err := compiler.objects.GetObject(ctx, candidate)
+		stored, err := compiler.getEvidenceObject(ctx, access, candidate)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ContextPreservationCount{}, ctxErr

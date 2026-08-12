@@ -149,6 +149,54 @@ custom `CheckpointStrategy`は明示的な`CheckpointRequest.Mode`、target `Gen
 `CheckpointBuildRawRebase`では`Previous`が常にnilになり、`RebaseReason`が決定的なtriggerを示します
 Strategyは前回semantic outputを再要約せずraw sourceから再構築する必要があります
 
+## scope付きEvidence access
+
+`CompactingContextCompiler`を使うembedding hostはscope付きObject StoreとRuntime identityを組み合わせて設定します
+
+```go
+objects := evidence.NewMemoryObjectStore()
+compiler, err := agent.NewCompactingContextCompiler(policy, objects, nil)
+if err != nil {
+    return err
+}
+
+runtime, err := agent.NewRuntime(agent.Options{
+    Provider:        provider,
+    ContextCompiler: compiler,
+    EvidenceAccess: &agent.RuntimeEvidenceAccess{
+        TenantID:     "tenant-a",
+        ProfileID:    "coding",
+        PrincipalID:  "company-agent",
+        Capabilities: []string{
+            agent.EvidenceReadCapability,
+            agent.EvidenceWriteCapability,
+        },
+        Sensitivity: agent.EvidenceSensitivityPrivate,
+    },
+})
+```
+
+Runtimeはconcrete scopeをmodelから受け取らず自分で導出します
+Session ID付きRunはtenant、Session、Profileを使うためterminal follow-up間でexact Evidenceを共有します
+SessionなしRunは生成済みRun IDを使い、他のephemeral Runから分離されます
+subagentはcontextから認証済みtenantを継承しつつ独自RunとProfile scopeを導出します
+
+multi-tenant serverでは`RuntimeEvidenceAccess.TenantID`を空にし、request境界で認証済みtenantを設定します
+
+```go
+ctx := agent.WithEvidenceTenant(request.Context(), authenticatedTenantID)
+handle, err := runtime.Run(ctx, runRequest)
+```
+
+Runtimeに固定tenantがある場合、異なるcontextual tenantは`agent.ErrEvidenceAccessDenied`になります
+parent `EvidenceAccess`がある場合、child RuntimeのCapabilityはparentと設定値の共通部分へ制限されます
+
+`EvidenceObjectRef.Digest`はcontent identityに限られます
+scope付きretrievalには完全なopaque bindingと一致する`EvidenceAccess`が必要です
+built-in MemoryとJSON Storeは`ScopedEvidenceObjectStore`を実装し、`secret` contentを拒否してaccess attemptを記録します
+許可済みretrievalもaudit recordをcommitできなければcontentを返しません
+trusted local operatorはoptionalな`EvidenceObjectAdminStore`を利用でき、そのbypassも監査されます
+
 embedding hostはProfileと独立してcanonical stateを注入できます
 
 ```go

@@ -601,7 +601,7 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 				ledger.CheckpointReferences = append(ledger.CheckpointReferences, *event.ContextCheckpoint.Ledger)
 			}
 			for _, reference := range event.ContextCompaction.Externalized {
-				if !validSHA256Digest(reference.Digest) || reference.Bytes < 0 || strings.TrimSpace(reference.MediaType) == "" {
+				if err := ValidateEvidenceObjectRef(reference); err != nil || strings.TrimSpace(reference.MediaType) == "" {
 					return ContextLedger{}, errors.New("context.compacted contains an invalid Evidence Object reference")
 				}
 				if err := addEvidenceArtifact(artifacts, reference, ref, index); err != nil {
@@ -862,7 +862,7 @@ func reduceLegacyLedgerEvent(
 			return err
 		}
 		for _, reference := range event.ContextCompaction.Externalized {
-			if !validSHA256Digest(reference.Digest) || reference.Bytes < 0 || strings.TrimSpace(reference.MediaType) == "" {
+			if err := ValidateEvidenceObjectRef(reference); err != nil || strings.TrimSpace(reference.MediaType) == "" {
 				return errors.New("legacy context.compacted contains an invalid Evidence Object reference")
 			}
 			if err := addEvidenceArtifact(artifacts, reference, ref, order); err != nil {
@@ -1133,7 +1133,8 @@ func addEvidenceArtifact(
 	ref ContextLedgerEventRef,
 	order int,
 ) error {
-	key := "evidence\x00" + reference.Digest
+	identity := reference.Identity()
+	key := "evidence\x00" + identity
 	if current := artifacts[key]; current != nil {
 		if current.entry.Bytes != reference.Bytes || current.entry.MediaType != reference.MediaType {
 			return errors.New("Evidence Object metadata changes for one digest")
@@ -1142,7 +1143,7 @@ func addEvidenceArtifact(
 		return nil
 	}
 	artifacts[key] = &ledgerArtifact{order: order, entry: ArtifactLedgerEntry{
-		ID:        contextLedgerID("artifact", "evidence", reference.Digest),
+		ID:        contextLedgerID("artifact", "evidence", identity),
 		Kind:      ArtifactLedgerEvidenceObject,
 		Name:      "evidence_object",
 		Digest:    reference.Digest,

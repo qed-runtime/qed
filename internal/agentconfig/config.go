@@ -232,8 +232,9 @@ type sessionProfile struct {
 }
 
 type evidenceProfile struct {
-	Store string `json:"store"`
-	Path  string `json:"path"`
+	Store        string `json:"store"`
+	Path         string `json:"path"`
+	IsolationKey string `json:"isolation_key,omitempty"`
 }
 
 type stateProfile struct {
@@ -283,12 +284,13 @@ type providerRetryProfile struct {
 }
 
 type contextProfile struct {
-	MaxInputBytes            int64  `json:"max_input_bytes"`
-	RecentMessages           int    `json:"recent_messages,omitempty"`
-	EvidenceThresholdBytes   int    `json:"evidence_threshold_bytes,omitempty"`
-	EvidenceExcerptBytes     int    `json:"evidence_excerpt_bytes,omitempty"`
-	CheckpointMaxBytes       int    `json:"checkpoint_max_bytes,omitempty"`
-	RebaseGenerationInterval uint64 `json:"rebase_generation_interval,omitempty"`
+	MaxInputBytes            int64                     `json:"max_input_bytes"`
+	RecentMessages           int                       `json:"recent_messages,omitempty"`
+	EvidenceThresholdBytes   int                       `json:"evidence_threshold_bytes,omitempty"`
+	EvidenceExcerptBytes     int                       `json:"evidence_excerpt_bytes,omitempty"`
+	CheckpointMaxBytes       int                       `json:"checkpoint_max_bytes,omitempty"`
+	RebaseGenerationInterval uint64                    `json:"rebase_generation_interval,omitempty"`
+	EvidenceSensitivity      agent.EvidenceSensitivity `json:"evidence_sensitivity,omitempty"`
 }
 
 type cacheProfile struct {
@@ -421,17 +423,18 @@ func build(document fileConfig, options LoadOptions, configurationDirectory stri
 	}
 
 	builder := graphBuilder{
-		agents:        document.Agents,
-		providers:     providers,
-		limiters:      providerLimiters,
-		profiles:      profiles,
-		registry:      registry,
-		sessions:      sessions,
-		objects:       objectStore,
-		pricing:       pricing,
-		states:        make(map[string]buildState, len(document.Agents)),
-		logger:        options.Logger,
-		toolValidator: options.ToolInputValidator,
+		agents:         document.Agents,
+		providers:      providers,
+		limiters:       providerLimiters,
+		profiles:       profiles,
+		registry:       registry,
+		sessions:       sessions,
+		objects:        objectStore,
+		evidenceTenant: evidenceIsolationKey(document.Evidence),
+		pricing:        pricing,
+		states:         make(map[string]buildState, len(document.Agents)),
+		logger:         options.Logger,
+		toolValidator:  options.ToolInputValidator,
 	}
 	for _, agentID := range sortedKeys(document.Agents) {
 		if err := validateID("agent ID", agentID); err != nil {
@@ -1058,18 +1061,19 @@ const (
 )
 
 type graphBuilder struct {
-	agents        map[string]agentProfile
-	providers     map[string]agent.Provider
-	limiters      map[string]*agent.ProviderRateLimiter
-	profiles      map[string]*coding.Profile
-	registry      *orchestration.AgentRegistry
-	sessions      agent.SessionStore
-	objects       agent.EvidenceObjectStore
-	pricing       map[string]*agent.CachePricing
-	states        map[string]buildState
-	stack         []string
-	logger        *slog.Logger
-	toolValidator agent.ToolInputValidator
+	agents         map[string]agentProfile
+	providers      map[string]agent.Provider
+	limiters       map[string]*agent.ProviderRateLimiter
+	profiles       map[string]*coding.Profile
+	registry       *orchestration.AgentRegistry
+	sessions       agent.SessionStore
+	objects        agent.EvidenceObjectStore
+	evidenceTenant string
+	pricing        map[string]*agent.CachePricing
+	states         map[string]buildState
+	stack          []string
+	logger         *slog.Logger
+	toolValidator  agent.ToolInputValidator
 }
 
 func (builder *graphBuilder) buildAgent(agentID string) error {
@@ -1147,6 +1151,24 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 	if err != nil {
 		return fmt.Errorf("agent %q Provider retry: %w", agentID, err)
 	}
+	var runtimeEvidenceAccess *agent.RuntimeEvidenceAccess
+	if builder.objects != nil {
+		profileID := specification.Profile
+		if profileID == "" {
+			profileID = agentID
+		}
+		sensitivity := agent.EvidenceSensitivityPrivate
+		if specification.Context != nil && specification.Context.EvidenceSensitivity != "" {
+			sensitivity = specification.Context.EvidenceSensitivity
+		}
+		runtimeEvidenceAccess = &agent.RuntimeEvidenceAccess{
+			TenantID:     builder.evidenceTenant,
+			ProfileID:    profileID,
+			PrincipalID:  "qed.runtime:" + agentID,
+			Capabilities: []string{agent.EvidenceReadCapability, agent.EvidenceWriteCapability},
+			Sensitivity:  sensitivity,
+		}
+	}
 
 	for index, delegation := range specification.Delegations {
 		if delegation.Name == "" || strings.TrimSpace(delegation.Name) != delegation.Name {
@@ -1197,6 +1219,7 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 		MaxToolCalls:            specification.MaxToolCalls,
 		SessionStore:            builder.sessions,
 		ContextCompiler:         contextCompiler,
+		EvidenceAccess:          runtimeEvidenceAccess,
 		CurrentWorldStateSource: currentWorldStateSource,
 		CachePolicy:             cachePolicy,
 		ProviderRetry:           providerRetry,
@@ -1214,6 +1237,13 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 	}
 	builder.states[agentID] = buildComplete
 	return nil
+}
+
+func evidenceIsolationKey(specification *evidenceProfile) string {
+	if specification == nil || specification.IsolationKey == "" {
+		return "local"
+	}
+	return specification.IsolationKey
 }
 
 func buildProviderRetryPolicy(specification *providerRetryProfile) (agent.ProviderRetryPolicy, error) {

@@ -45,11 +45,14 @@ Before every Provider call, `agent.ContextCompiler` produces a canonical
 Prefix Manifest on `model.request.started`; Session and Evidence Stores retain
 that Event. The default compiler stabilizes Tool order and JSON schemas. The
 optional compacting compiler keeps raw Session messages immutable, stores exact
-compacted prefixes and large Tool output in a content-addressed Evidence Object
-Store, and publishes a validated typed Checkpoint plus recent raw tail. Runtime
-also supplies an isolated copy of the exact Event prefix. The compiler validates
-that prefix against the Ledger and derives safe cuts without relying on Tool
-names in Runtime Core
+compacted prefixes and large Tool output in a scoped content-addressed Evidence
+Object Store, and publishes a validated typed Checkpoint plus recent raw tail.
+Runtime derives the object scope from a host-authenticated tenant, Session or
+ephemeral Run, and execution Profile. The reference binds required capabilities
+and sensitivity; its content digest never acts as authorization. Runtime also
+supplies an isolated copy of the exact Event prefix. The compiler validates that
+prefix against the Ledger and derives safe cuts without relying on Tool names in
+Runtime Core
 
 The first Checkpoint is a Raw Event Rebase. Later generations may update from a
 validated previous semantic view, while a deterministic generation interval,
@@ -62,12 +65,13 @@ Rebase generation in the Checkpoint
 Every new candidate also produces a deterministic, content-free preservation
 report. Core compares active Constraint identities across the Checkpoint and
 raw tail, keeps Current World State changes and failures, protects pending Tool
-transactions, and resolves each required Evidence object by digest and size. A
-custom candidate that fails these checks falls back to the deterministic
-strategy. A failed deterministic candidate is never published: Runtime keeps a
-validated previous Checkpoint plus raw tail when it fits, records the rollback
-before the next model request, or stops before Provider I/O. Event replay checks
-the report counts, candidate generation, and rollback transition
+transactions, and resolves each required Evidence object through its scope and
+capabilities before verifying digest and size. A custom candidate that fails
+these checks falls back to the deterministic strategy. A failed deterministic
+candidate is never published: Runtime keeps a validated previous Checkpoint plus
+raw tail when it fits, records the rollback before the next model request, or
+stops before Provider I/O. Event replay checks the report counts, candidate
+generation, and rollback transition
 
 `agent.BuildContextReport` projects the persisted public Event stream into a
 content-free timeline and aggregate metrics. The projection keeps stable reason
@@ -170,7 +174,12 @@ host-owned Tool traces. Tool trace fields use payload digests, while public
 Events retain their observable payload for audit and replay. Evidence storage
 must therefore be treated as content-bearing and potentially sensitive. Its
 JSON Store also implements the content-addressed Object Store required by
-context compression, with bounded reads and digest verification
+context compression. Legacy objects remain addressable only through the legacy
+API. Scoped objects are keyed by an authorization binding rather than their
+content digest, use bounded reads and digest verification, and append
+content-free access outcomes to a protected audit log. Built-in Stores reject
+the `secret` sensitivity because they do not encrypt at rest, and an allowed
+retrieval fails closed when its audit record cannot be persisted
 
 `workspace` provides a canonical filesystem boundary and process-local locks
 for official workspace-scoped Tools. Traversal-resistant `os.Root` operations and edit

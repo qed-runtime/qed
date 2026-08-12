@@ -27,6 +27,25 @@ var ErrProviderCallLimit = errors.New("provider call limit reached")
 // ErrToolCallLimit indicates that a Run exhausted its Tool call budget
 var ErrToolCallLimit = errors.New("tool call limit reached")
 
+// RuntimeEvidenceAccess configures scoped Evidence identity for every Run
+//
+// TenantID may be empty when the embedding host uses WithEvidenceTenant or
+// supplies EvidenceAccess on the Run context. ProfileID may be empty to use
+// RunRequest.AgentID. When configured and contextual identities are both
+// present, tenants must match and capabilities are intersected.
+type RuntimeEvidenceAccess struct {
+	// TenantID is the optional fixed tenant or local isolation domain
+	TenantID string
+	// ProfileID is the optional fixed execution Profile identity
+	ProfileID string
+	// PrincipalID identifies this Runtime in access audit records
+	PrincipalID string
+	// Capabilities contains the maximum Evidence capabilities granted to the Runtime
+	Capabilities []string
+	// Sensitivity selects protection for newly externalized content
+	Sensitivity EvidenceSensitivity
+}
+
 // Options configures a Runtime
 type Options struct {
 	// Provider is required and is shared by every Run
@@ -60,6 +79,11 @@ type Options struct {
 	//
 	// A nil Compiler uses DefaultContextCompiler
 	ContextCompiler ContextCompiler
+	// EvidenceAccess configures tenant-scoped Evidence used by ContextCompiler
+	//
+	// A nil value preserves legacy unscoped compilation unless a parent context
+	// carries EvidenceAccess.
+	EvidenceAccess *RuntimeEvidenceAccess
 	// CurrentWorldStateSource reads canonical host state before each logical Provider request
 	//
 	// A nil Source disables Current World State capture
@@ -95,6 +119,7 @@ type Runtime struct {
 	maxToolCalls            int
 	sessionStore            SessionStore
 	contextCompiler         ContextCompiler
+	evidenceAccess          *RuntimeEvidenceAccess
 	currentWorldStateSource CurrentWorldStateSource
 	cachePlanner            CachePlanner
 	cachePolicy             CachePolicy
@@ -158,6 +183,10 @@ func NewRuntime(options Options) (*Runtime, error) {
 	if contextCompiler == nil {
 		contextCompiler = DefaultContextCompiler{}
 	}
+	evidenceAccess, err := normalizeRuntimeEvidenceAccess(options.EvidenceAccess)
+	if err != nil {
+		return nil, fmt.Errorf("configure Runtime Evidence access: %w", err)
+	}
 	cachePlanner := options.CachePlanner
 	if cachePlanner == nil {
 		cachePlanner = DefaultCachePlanner{}
@@ -193,6 +222,7 @@ func NewRuntime(options Options) (*Runtime, error) {
 		maxToolCalls:            maxToolCalls,
 		sessionStore:            options.SessionStore,
 		contextCompiler:         contextCompiler,
+		evidenceAccess:          evidenceAccess,
 		currentWorldStateSource: options.CurrentWorldStateSource,
 		cachePlanner:            cachePlanner,
 		cachePolicy:             cachePolicy,
@@ -201,6 +231,140 @@ func NewRuntime(options Options) (*Runtime, error) {
 		logger:                  options.Logger,
 		sessionLocks:            make(map[string]*runtimeSessionLock),
 	}, nil
+}
+
+func normalizeRuntimeEvidenceAccess(configured *RuntimeEvidenceAccess) (*RuntimeEvidenceAccess, error) {
+	if configured == nil {
+		return nil, nil
+	}
+	normalized := *configured
+	if normalized.TenantID != "" {
+		if err := validateEvidenceIdentity("tenant ID", normalized.TenantID); err != nil {
+			return nil, err
+		}
+	}
+	if normalized.ProfileID != "" {
+		if err := validateEvidenceIdentity("Profile ID", normalized.ProfileID); err != nil {
+			return nil, err
+		}
+	}
+	if err := validateEvidenceIdentity("principal ID", normalized.PrincipalID); err != nil {
+		return nil, err
+	}
+	capabilities, err := normalizeEvidenceCapabilities(normalized.Capabilities)
+	if err != nil {
+		return nil, err
+	}
+	if len(capabilities) == 0 {
+		return nil, errors.New("Runtime Evidence access requires at least one capability")
+	}
+	normalized.Capabilities = capabilities
+	if normalized.Sensitivity == "" {
+		normalized.Sensitivity = EvidenceSensitivityPrivate
+	}
+	if err := validateEvidenceSensitivity(normalized.Sensitivity); err != nil {
+		return nil, err
+	}
+	return &normalized, nil
+}
+
+func (runtime *Runtime) evidenceAccessForRun(
+	ctx context.Context,
+	runID string,
+	request RunRequest,
+) (*EvidenceAccess, EvidenceSensitivity, error) {
+	contextTenantID, contextTenantOK := EvidenceTenantFromContext(ctx)
+	if contextTenantOK {
+		if err := validateEvidenceIdentity("tenant ID", contextTenantID); err != nil {
+			return nil, "", fmt.Errorf("validate Context Evidence tenant: %w", err)
+		}
+	}
+	inherited, inheritedOK := EvidenceAccessFromContext(ctx)
+	if inheritedOK {
+		if err := ValidateEvidenceAccess(inherited); err != nil {
+			return nil, "", fmt.Errorf("validate inherited Evidence access: %w", err)
+		}
+	}
+	if runtime.evidenceAccess == nil && !inheritedOK && !contextTenantOK {
+		return nil, "", nil
+	}
+
+	tenantID := ""
+	profileID := request.AgentID
+	principalID := ""
+	var capabilities []string
+	sensitivity := EvidenceSensitivityPrivate
+	if runtime.evidenceAccess != nil {
+		tenantID = runtime.evidenceAccess.TenantID
+		if runtime.evidenceAccess.ProfileID != "" {
+			profileID = runtime.evidenceAccess.ProfileID
+		}
+		principalID = runtime.evidenceAccess.PrincipalID
+		capabilities = append([]string(nil), runtime.evidenceAccess.Capabilities...)
+		sensitivity = runtime.evidenceAccess.Sensitivity
+	}
+	if contextTenantOK {
+		if tenantID != "" && tenantID != contextTenantID {
+			return nil, "", fmt.Errorf("%w: Context tenant does not match Runtime tenant", ErrEvidenceAccessDenied)
+		}
+		tenantID = contextTenantID
+	}
+	if inheritedOK {
+		if contextTenantOK && contextTenantID != inherited.Scope.TenantID {
+			return nil, "", fmt.Errorf("%w: Context tenant does not match inherited tenant", ErrEvidenceAccessDenied)
+		}
+		if tenantID != "" && tenantID != inherited.Scope.TenantID {
+			return nil, "", fmt.Errorf("%w: inherited tenant does not match Runtime tenant", ErrEvidenceAccessDenied)
+		}
+		tenantID = inherited.Scope.TenantID
+		if principalID == "" {
+			principalID = inherited.PrincipalID
+		}
+		if runtime.evidenceAccess == nil {
+			capabilities = append([]string(nil), inherited.Capabilities...)
+		} else {
+			capabilities = intersectEvidenceCapabilities(capabilities, inherited.Capabilities)
+		}
+	}
+	access := EvidenceAccess{
+		Scope: EvidenceScope{
+			TenantID:  tenantID,
+			ProfileID: profileID,
+		},
+		PrincipalID:  principalID,
+		Capabilities: capabilities,
+	}
+	if request.SessionID != "" {
+		access.Scope.SessionID = request.SessionID
+	} else {
+		access.Scope.RunID = runID
+	}
+	if err := ValidateEvidenceAccess(access); err != nil {
+		return nil, "", fmt.Errorf("build Run Evidence access: %w", err)
+	}
+	return &access, sensitivity, nil
+}
+
+func intersectEvidenceCapabilities(first, second []string) []string {
+	available := make(map[string]struct{}, len(second))
+	for _, capability := range second {
+		available[capability] = struct{}{}
+	}
+	result := make([]string, 0, len(first))
+	for _, capability := range first {
+		if _, ok := available[capability]; ok {
+			result = append(result, capability)
+		}
+	}
+	return result
+}
+
+func cloneEvidenceAccessPointer(access *EvidenceAccess) *EvidenceAccess {
+	if access == nil {
+		return nil
+	}
+	cloned := cloneEvidenceAccess(*access)
+	return &cloned
 }
 
 func newRuntimeHooks(configured []Hook) ([]runtimeHook, error) {
@@ -409,6 +573,27 @@ func (runtime *Runtime) execute(
 	release := func() { releaseOnce.Do(releaseTools) }
 	defer release()
 	defer handle.cancel()
+	evidenceAccess, evidenceSensitivity, err := runtime.evidenceAccessForRun(ctx, runID, request)
+	if err != nil {
+		runtime.debug("run.execution.finished",
+			"run_id", runID,
+			"status", RunStatusFailed,
+			"provider_calls", 0,
+			"tool_calls", 0,
+			"duration_ms", time.Since(runStartedAt).Milliseconds(),
+			"error_type", errorType(err),
+		)
+		handle.complete(RunResult{
+			RunID:     runID,
+			AgentID:   request.AgentID,
+			SessionID: request.SessionID,
+			Status:    RunStatusFailed,
+		}, err)
+		return
+	}
+	if evidenceAccess != nil {
+		ctx = WithEvidenceAccess(ctx, *evidenceAccess)
+	}
 	loaded, releaseSession, err := runtime.loadSession(ctx, request)
 	if err != nil {
 		runtime.debug("run.execution.finished",
@@ -434,7 +619,7 @@ func (runtime *Runtime) execute(
 	activeCheckpoint := cloneContextCheckpointPointer(loaded.checkpoint)
 	knownEvidence := make(map[string]struct{}, len(loaded.evidenceObjects))
 	for _, reference := range loaded.evidenceObjects {
-		knownEvidence[reference.Digest] = struct{}{}
+		knownEvidence[reference.Identity()] = struct{}{}
 	}
 	var latestCompaction *ContextCompactionReport
 	var latestCachePlan *CachePlan
@@ -843,6 +1028,8 @@ func (runtime *Runtime) execute(
 			&activeLedger,
 			ledgerEvents,
 			latestWorldState,
+			evidenceAccess,
+			evidenceSensitivity,
 		)
 		if err != nil {
 			runtime.debug("context.compile.failed",
@@ -890,7 +1077,7 @@ func (runtime *Runtime) execute(
 		var newEvidence []EvidenceObjectRef
 		if compiled.Compaction != nil {
 			for _, reference := range compiled.Compaction.Externalized {
-				if _, exists := knownEvidence[reference.Digest]; exists {
+				if _, exists := knownEvidence[reference.Identity()]; exists {
 					continue
 				}
 				newEvidence = append(newEvidence, reference)
@@ -901,7 +1088,7 @@ func (runtime *Runtime) execute(
 			if report == nil {
 				report = &ContextCompactionReport{Applied: true, Reason: "checkpoint"}
 			}
-			report.Externalized = append([]EvidenceObjectRef(nil), newEvidence...)
+			report.Externalized = cloneEvidenceObjectRefs(newEvidence)
 			event := Event{Type: EventContextCompacted, ContextCompaction: report}
 			if checkpointChanged {
 				event.ContextCheckpoint = cloneContextCheckpointPointer(compiled.Checkpoint)
@@ -914,7 +1101,7 @@ func (runtime *Runtime) execute(
 				activeCheckpoint = cloneContextCheckpointPointer(compiled.Checkpoint)
 			}
 			for _, reference := range newEvidence {
-				knownEvidence[reference.Digest] = struct{}{}
+				knownEvidence[reference.Identity()] = struct{}{}
 			}
 			latestCompaction = cloneContextCompactionReport(report)
 		}
@@ -1232,20 +1419,24 @@ func (runtime *Runtime) compileContext(
 	ledger *ContextLedger,
 	events []Event,
 	worldState *CurrentWorldState,
+	evidenceAccess *EvidenceAccess,
+	evidenceSensitivity EvidenceSensitivity,
 ) (CompiledContext, PrefixManifest, error) {
 	model := ""
 	if provider, ok := runtime.provider.(ModelIDProvider); ok {
 		model = provider.ModelID()
 	}
 	compiled, err := runtime.contextCompiler.Compile(ctx, ContextCompileRequest{
-		Provider:          runtime.provider.Name(),
-		Model:             model,
-		ModelRequest:      cloneModelRequest(request),
-		SessionRevision:   sessionRevision,
-		Checkpoint:        cloneContextCheckpointPointer(checkpoint),
-		Ledger:            cloneContextLedgerPointer(ledger),
-		Events:            cloneEvents(events),
-		CurrentWorldState: cloneCurrentWorldStatePointer(worldState),
+		Provider:            runtime.provider.Name(),
+		Model:               model,
+		ModelRequest:        cloneModelRequest(request),
+		SessionRevision:     sessionRevision,
+		Checkpoint:          cloneContextCheckpointPointer(checkpoint),
+		Ledger:              cloneContextLedgerPointer(ledger),
+		Events:              cloneEvents(events),
+		CurrentWorldState:   cloneCurrentWorldStatePointer(worldState),
+		EvidenceAccess:      cloneEvidenceAccessPointer(evidenceAccess),
+		EvidenceSensitivity: evidenceSensitivity,
 	})
 	if err != nil {
 		return CompiledContext{}, PrefixManifest{}, err
@@ -1484,7 +1675,7 @@ func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (lo
 			events:          cloneEvents(snapshot.Events),
 			revision:        snapshot.Revision,
 			checkpoint:      cloneContextCheckpointPointer(snapshot.Checkpoint),
-			evidenceObjects: append([]EvidenceObjectRef(nil), snapshot.EvidenceObjects...),
+			evidenceObjects: cloneEvidenceObjectRefs(snapshot.EvidenceObjects),
 			pendingWait:     &wait,
 			pendingTool:     &tool,
 		}, release, nil
@@ -1498,7 +1689,7 @@ func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (lo
 		events:          cloneEvents(snapshot.Events),
 		revision:        snapshot.Revision,
 		checkpoint:      cloneContextCheckpointPointer(snapshot.Checkpoint),
-		evidenceObjects: append([]EvidenceObjectRef(nil), snapshot.EvidenceObjects...),
+		evidenceObjects: cloneEvidenceObjectRefs(snapshot.EvidenceObjects),
 	}, release, nil
 }
 

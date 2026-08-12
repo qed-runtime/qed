@@ -377,14 +377,13 @@ func validateContextMetricEvent(event Event) error {
 	}
 	seenEvidence := make(map[string]struct{}, len(report.Externalized))
 	for _, reference := range report.Externalized {
-		if !validSHA256Digest(reference.Digest) || reference.Bytes < 0 || strings.TrimSpace(reference.MediaType) == "" {
+		if err := ValidateEvidenceObjectRef(reference); err != nil || strings.TrimSpace(reference.MediaType) == "" {
 			return errors.New("context.compacted contains an invalid Evidence Object reference")
 		}
-		digestKey := strings.ToLower(reference.Digest)
-		if _, exists := seenEvidence[digestKey]; exists {
+		if _, exists := seenEvidence[reference.Identity()]; exists {
 			return errors.New("context.compacted contains a duplicate Evidence Object reference")
 		}
-		seenEvidence[digestKey] = struct{}{}
+		seenEvidence[reference.Identity()] = struct{}{}
 	}
 	return validateContextRebaseEvent(event)
 }

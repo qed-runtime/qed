@@ -72,10 +72,12 @@ Evidence Stores also retain exact compacted context objects
 ```sh
 qed cache status --store .qed/evidence
 qed context inspect <run-id> --store .qed/evidence
-qed evidence fetch sha256:<digest> --store .qed/evidence
+qed evidence fetch sha256:<digest> --run-id <run-id> --store .qed/evidence
 ```
 
-See [Context compilation, compression, and prompt caching](docs/context-caching.md)
+Configured Context Evidence is bound to tenant, Session or ephemeral Run,
+execution Profile, and required capabilities. The content digest is not an
+access token. See [Context compilation, compression, and prompt caching](docs/context-caching.md)
 
 Enable safe structured diagnostics on stderr with the root flag
 

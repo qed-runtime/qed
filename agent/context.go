@@ -157,6 +157,15 @@ type ContextCompileRequest struct {
 	// Runtime appends its required volatile Context Segment after Compile returns.
 	// Compilers with input limits must reserve its rendered byte size.
 	CurrentWorldState *CurrentWorldState
+	// EvidenceAccess is the host-authenticated identity used for scoped Object access
+	//
+	// A nil value retains legacy unscoped compiler behavior. Scoped references
+	// require a non-nil value and a ScopedEvidenceObjectStore.
+	EvidenceAccess *EvidenceAccess
+	// EvidenceSensitivity selects protection for newly externalized content
+	//
+	// The zero value selects EvidenceSensitivityPrivate when EvidenceAccess is set.
+	EvidenceSensitivity EvidenceSensitivity
 }
 
 // CompiledContext contains a canonical model request and its logical Segments

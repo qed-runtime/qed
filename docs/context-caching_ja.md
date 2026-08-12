@@ -238,8 +238,8 @@ QEDのstable allowlistにないcompaction reasonとfallback labelは`unrecognize
 candidate validation reportがないEventはunreported validation countとして表示されます
 対象にはdeterministic validation以前のEventと現在のEvidence-only compaction Eventの両方が含まれます
 選択Bundleが以前のRunから継承したgenerationを確定できない場合もunavailableとして表示します
-現在のpublic Event schemaはretrievalを記録しないため、compaction後のmodel rereadは0ではなくunavailableとして表示します
-Stage 4のretrieval auditによりvalidation時のobject checkから推測せず、このmetricを記録できるようになります
+scoped Storeのaccess recordはRun単位のpublic Event timelineへjoinされないため、compaction後のmodel rereadは0ではなくunavailableとして表示します
+独立audit logの値をvalidation時のreadから推測しません
 
 embedding hostは`agent.BuildContextReport`で同じJSON互換構造を構築し、`ContextReport.Snapshot`で選択し、`agent.DiffContextSnapshots`で比較できます
 
@@ -248,13 +248,32 @@ embedding hostは`agent.BuildContextReport`で同じJSON互換構造を構築し
 cache planningのtoken estimateだけはcanonical byteを4で割った決定的な近似を使い、実行後はProvider Usageを正とします
 
 Evidence Objectはprivate contentです
-JSON Evidence Storeは`objects/`配下へSHA-256名、mode `0600`、bounded read、atomic rename、digest検証を使って保存します
+設定済みContext Compilerは新規参照をtenant、Sessionまたはephemeral Run、execution Profileのopaque digest、required retrieval Capability、sensitivityへbindingします
+content digestはbyte列を識別しますがaccessを許可しません
+同じSessionとProfileのfollow-up Runはobjectを再利用できますが、ephemeral Run、別tenant、別Profileからは利用できません
+
+built-in JSON Storeはscope付きobjectをbinding digest名で`scoped-objects/`配下へ保存し、mode `0600`、bounded read、atomic rename、content digest検証を適用します
 object単位の上限は64 MiBです
-正確なobjectは次で取得できます
+`private` contentは保存でき、`secret` contentはbuilt-in Storeがat-rest encryptionを持たないため保存前に拒否します
+embedding hostは暗号化するscoped Store Adapterを供給できます
+
+有効なscope付きputとretrieval attemptは保護済み`object-access.jsonl`へ本文なしrecordを追記します
+recordはdigest、operation、outcome、size、timeを含みますがraw tenant、Session、Run、Profile、principal、Capability、object contentを含みません
+許可済みretrievalもaudit recordを書けない場合はfail closedになります
+
+Run Bundleから完全なscope参照を解決し、監査付きlocal administrative readを行うcommandは次です
 
 ```sh
-qed evidence fetch sha256:<digest> --store .qed/evidence
+qed evidence fetch sha256:<digest> --run-id <run-id> --store .qed/evidence
 ```
+
+`--run-id`なしのcommandは`objects/`配下にあるlegacy unscoped object向けに維持されます
+scope付き参照はlegacy Object Store APIから取得できません
+QEDはscope付きEvidence retrievalをmodel Toolとしてまだ公開していません
+
+設定済みRuntimeはlegacy unscoped参照を含むCheckpointのscopeを推測しません
+旧Sessionはscope付き設定の下で新しく開始する必要があります
+旧contentを暗黙にrebindすると新しいisolation境界を迂回するためです
 
 ## Prefix Manifest
 

@@ -99,7 +99,8 @@ QEDは1つのstrictなJSON documentからProvider profile、process分離Extensi
   },
   "evidence": {
     "store": "json",
-    "path": ".qed/evidence"
+    "path": ".qed/evidence",
+    "isolation_key": "tenant-a"
   },
   "extension_state": {
     "store": "json",
@@ -133,7 +134,7 @@ go run ./cmd/qed run \
 | `profiles` | no | 名前付きexecution Profile |
 | `agents` | yes | 名前付きAgent定義 |
 | `session` | no | MemoryまたはJSONL Session Store |
-| `evidence` | no | JSON Evidence Bundle Store |
+| `evidence` | no | JSON Evidence Bundle、scope付きObject、access audit Store |
 | `extension_state` | no | MemoryまたはJSON Extension State Store |
 
 `default_agent`を省略した場合、CLIでは`--agent`が必要です
@@ -402,6 +403,7 @@ QEDは正確なcompact済みmessage prefixと外部化したTool outputをconten
 | `evidence_excerpt_bytes` | no | 両端に保持するbyte数、既定値`2048` |
 | `checkpoint_max_bytes` | no | encoded Checkpoint上限、既定値`8192` |
 | `rebase_generation_interval` | no | 前回semantic Checkpointを使わず再構築するまでの新しいgeneration数、既定値`4`、最大`64` |
+| `evidence_sensitivity` | no | `private`または`secret`、既定値`private`、built-in JSON Storeは暗号化しないため`secret`を拒否 |
 
 `max_input_bytes`は決定的なProvider neutral値でありtokenizer basedなmodel context limitではありません
 QEDはraw Session messageを書き換えません
@@ -513,13 +515,24 @@ Session Storeが未設定の場合、Session IDはmessageを保持しないた�
 
 ```json
 {
-  "evidence": {"store": "json", "path": ".qed/evidence"}
+  "evidence": {
+    "store": "json",
+    "path": ".qed/evidence",
+    "isolation_key": "tenant-a"
+  }
 }
 ```
 
+| Field | 必須 | 意味と既定値 |
+| --- | --- | --- |
+| `store` | yes | `json`固定 |
+| `path` | yes | privateなEvidence Bundle、Object、access audit directory |
+| `isolation_key` | no | tenantまたはlocal isolation domain、既定値`local`、保存Object参照にはderived scope digestだけを保持 |
+
 設定済みCLI Runとmulti-turn TUI chat内で完了した各Runはterminal完了後にversion付きBundleを保存します
 Bundleはpublic Event、usage、configとworkspaceのdigest、host所有Tool traceを含みます
-同じStoreがcontext圧縮用のcontent-addressed objectも保持します
+同じStoreがcontext圧縮用のauthorization-bound content-addressed objectも保持します
+Object参照はraw scope値を保存せずtenant、Sessionまたはephemeral Run、execution Profile、required Capability、sensitivityへbindingされます
 2つのcommand familyからBundleをinspectまたはexportできます
 
 Tool trace payloadはdigestで表現されますが、public Eventは通常のobservable payloadを保持します
@@ -531,7 +544,7 @@ qed run inspect <run-id> --store .qed/evidence
 qed run export <run-id> --store .qed/evidence
 qed evidence inspect <run-id> --store .qed/evidence
 qed evidence export <run-id> --store .qed/evidence
-qed evidence fetch sha256:<digest> --store .qed/evidence
+qed evidence fetch sha256:<digest> --run-id <run-id> --store .qed/evidence
 qed cache status [run-id] --store .qed/evidence
 qed context inspect <run-id> --store .qed/evidence
 qed context explain RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
@@ -542,6 +555,11 @@ qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after RUN_ID[@EVENT_SEQUENCE
 
 Context commandは同じ保存済みpublic Eventから本文を含まないtimeline、集計metrics、before-to-after変更を導出します
 message、path、command、Evidence object digest、object contentは出力しません
+
+scope付きObject accessは`object-access.jsonl`へ別途記録されます
+logは保護対象digestとoutcomeを含みますがraw identityやcontentを含みません
+fetch commandは`--run-id`でBundleから完全な参照を解決し、administrative readを記録します
+`--run-id`省略時はlegacy unscoped objectだけを扱います
 
 ## Extension State Store
 

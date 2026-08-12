@@ -19,6 +19,7 @@ func TestValidateContextCandidatePreservesPendingToolOnlyInRawTail(t *testing.T)
 	compiler := &CompactingContextCompiler{}
 	report, err := compiler.validateContextCandidate(
 		context.Background(),
+		nil,
 		&ContextCheckpoint{Generation: 1, SourceMessageCount: 1},
 		messages,
 		ledger,
@@ -34,6 +35,7 @@ func TestValidateContextCandidatePreservesPendingToolOnlyInRawTail(t *testing.T)
 	}
 	report, err = compiler.validateContextCandidate(
 		context.Background(),
+		nil,
 		&ContextCheckpoint{Generation: 1, SourceMessageCount: 2},
 		messages,
 		ledger,

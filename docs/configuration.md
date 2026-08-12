@@ -100,7 +100,8 @@ The format is used by `qed run`, `qed tui`, and `qed session resume`
   },
   "evidence": {
     "store": "json",
-    "path": ".qed/evidence"
+    "path": ".qed/evidence",
+    "isolation_key": "tenant-a"
   },
   "extension_state": {
     "store": "json",
@@ -134,7 +135,7 @@ go run ./cmd/qed run \
 | `profiles` | no | Named execution Profiles |
 | `agents` | yes | Named Agent definitions |
 | `session` | no | Memory or JSONL Session Store |
-| `evidence` | no | JSON Evidence Bundle Store |
+| `evidence` | no | JSON Evidence Bundle, scoped Object, and access-audit Store |
 | `extension_state` | no | Memory or JSON Extension State Store |
 
 If `default_agent` is absent, the CLI requires `--agent`
@@ -426,6 +427,7 @@ output as content-addressed objects
 | `evidence_excerpt_bytes` | no | Retain this many bytes from both ends, default `2048` |
 | `checkpoint_max_bytes` | no | Maximum encoded Checkpoint size, default `8192` |
 | `rebase_generation_interval` | no | Rebuild without the previous semantic Checkpoint after this many newer generations, default `4`, maximum `64` |
+| `evidence_sensitivity` | no | `private` or `secret`, default `private`; the built-in JSON Store rejects `secret` because it is not encrypted |
 
 `max_input_bytes` is deterministic and Provider-neutral, not a tokenizer-backed
 model context limit. QED never rewrites raw Session messages. It compiles a
@@ -552,15 +554,27 @@ does not retain messages and the caller must supply prior context
 
 ```json
 {
-  "evidence": {"store": "json", "path": ".qed/evidence"}
+  "evidence": {
+    "store": "json",
+    "path": ".qed/evidence",
+    "isolation_key": "tenant-a"
+  }
 }
 ```
+
+| Field | Required | Meaning and default |
+| --- | --- | --- |
+| `store` | yes | Must be `json` |
+| `path` | yes | Private Evidence Bundle, Object, and access-audit directory |
+| `isolation_key` | no | Tenant or local isolation domain, default `local`; stored Object references contain only its derived scope digest |
 
 Configured CLI Runs and every completed Run in a configured multi-turn TUI chat
 save one versioned Bundle after terminal completion, including public Events,
 usage, config/workspace digests, and host-owned Tool trace records. The same
-Store keeps content-addressed objects used by context compression. Inspect or
-export Bundles with either command family
+Store keeps authorization-bound content-addressed objects used by context
+compression. Object references bind tenant, Session or ephemeral Run,
+execution Profile, required capabilities, and sensitivity without storing the
+raw scope values. Inspect or export Bundles with either command family
 
 Tool trace payloads are represented by digests, but public Events retain their
 normal observable payload. A Bundle may therefore contain prompts, assistant
@@ -572,7 +586,7 @@ qed run inspect <run-id> --store .qed/evidence
 qed run export <run-id> --store .qed/evidence
 qed evidence inspect <run-id> --store .qed/evidence
 qed evidence export <run-id> --store .qed/evidence
-qed evidence fetch sha256:<digest> --store .qed/evidence
+qed evidence fetch sha256:<digest> --run-id <run-id> --store .qed/evidence
 qed cache status [run-id] --store .qed/evidence
 qed context inspect <run-id> --store .qed/evidence
 qed context explain RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
@@ -586,6 +600,12 @@ Prefix divergence, and latest compaction record
 The Context commands derive content-free timelines, aggregate metrics, and
 before-to-after changes from the same stored public Events. They do not print
 messages, paths, commands, Evidence object digests, or object content
+
+Scoped Object access is recorded separately in `object-access.jsonl`. The log
+contains protected digests and outcomes but no raw identity or content. The
+fetch command uses `--run-id` to resolve the complete reference from a Bundle
+and records an administrative read. Omitting `--run-id` supports legacy
+unscoped objects only
 
 ## Extension State Store
 

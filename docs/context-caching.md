@@ -317,10 +317,9 @@ Events without a candidate validation report remain visible with an unreported
 validation count. This includes both older Events and current Evidence-only
 compaction Events. A generation inherited from an earlier Run is also
 unavailable when the selected Bundle does not establish it. Post-compaction
-model rereads are reported as unavailable, not zero, because the current public
-Event schema does not record retrieval.
-Stage 4 retrieval auditing can populate that metric without guessing from
-validation-time object checks
+model rereads are reported as unavailable, not zero, because scoped Store
+access records are not joined into the per-Run public Event timeline. The
+separate audit log must not be inferred from validation-time reads
 
 Embedding hosts can build the same JSON-compatible structures with
 `agent.BuildContextReport`, select with `ContextReport.Snapshot`, and compare
@@ -332,14 +331,41 @@ must be calibrated conservatively for the selected model. QED currently uses
 canonical bytes divided by four only for cache-planning token estimates;
 Provider Usage remains authoritative
 
-Evidence Objects are private content. The JSON Evidence Store writes objects
-below `objects/` using a SHA-256 name, mode `0600`, bounded reads, atomic rename,
-and digest verification. Individual objects are limited to 64 MiB. Fetch an
-exact object with
+Evidence Objects are private content. Configured Context compilers bind each
+new reference to an opaque digest of tenant, Session or ephemeral Run, and
+execution Profile, plus the required retrieval capabilities and sensitivity.
+The content digest identifies bytes but never grants access. A follow-up Run
+with the same Session and Profile can reuse its objects; an ephemeral Run or a
+different tenant or Profile cannot
+
+The built-in JSON Store writes scoped objects below `scoped-objects/` by binding
+digest using mode `0600`, bounded reads, atomic rename, and content-digest
+verification. Individual objects are limited to 64 MiB. `private` content is
+accepted. `secret` content is rejected before persistence because the built-in
+Store does not encrypt at rest; an embedding host may supply a scoped Store
+adapter that does
+
+Every valid scoped put and retrieval attempt appends a content-free record to
+the protected `object-access.jsonl` log. It contains digests, operation,
+outcome, size, and time, but no raw tenant, Session, Run, Profile, principal,
+capability, or object content. An allowed retrieval fails closed if its audit
+record cannot be written
+
+Resolve the complete scoped reference from its Run Bundle and perform an
+audited local administrative read with
 
 ```sh
-qed evidence fetch sha256:<digest> --store .qed/evidence
+qed evidence fetch sha256:<digest> --run-id <run-id> --store .qed/evidence
 ```
+
+The command without `--run-id` remains available for legacy unscoped objects
+below `objects/`. A scoped reference cannot be read through the legacy Object
+Store API. QED does not yet expose scoped Evidence retrieval as a model Tool
+
+Configured Runtimes do not infer a scope for Checkpoints created with legacy
+unscoped references. Such a Session must start again under the scoped
+configuration; silently rebinding old content would bypass the new isolation
+boundary
 
 ## Prefix Manifest
 
