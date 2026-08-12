@@ -56,13 +56,13 @@ RuntimeはContext Compiler callの前に完全なordered Event prefixから`agen
 terminal `agent.RunResult`にはterminal Event反映後のLedgerが入ります
 custom Compilerは`ContextCompileRequest.Ledger`からisolated copyを受け取り、変更してもRuntime stateには影響しません
 
-v1 Reducerはmodel callやlive workspace readを行わず5つのtyped Ledgerを生成します
+v2 Reducerはmodel callやlive workspace readを行わず5つのtyped Ledgerを生成します
 
 | Ledger | Runtimeから観測できる内容 |
 | --- | --- |
 | Artifact | Tool outputと外部化したEvidence Objectの正確なdigest |
 | Execution | pending、succeeded、failed、canceledを持つProvider attemptとTool call |
-| Constraint | steering originを含む解釈前の正確なuser input |
+| Constraint | steering originを含むactive、superseded、resolved状態の正確なuser Fact |
 | Policy | host Tool authorization metadataとhuman approval decision |
 | Task | Runごとのrunning、waiting、completed、failed、canceled state |
 
@@ -74,9 +74,35 @@ Ledgerはderived stateであり2つ目の正本として保存しません
 MemoryとJSONL Session Storeは同じEventを同じdigestへreplayします
 新しいCheckpointは本文を含まない`ContextLedgerReference`を持ち、後続`context.compacted` Eventのreplay時に直前の正確なEvent prefixと照合します
 
-Constraint entryはすべてのuser messageがactiveだと判断するものではありません
-次のstageでFact lifecycleとしてactive、superseded、resolvedの関係を追加します
-Artifact entryも現在のfileやGit stateではなく、Current World Stateで正規sourceから取得する予定です
+Fact lifecycle宣言がないuser MessageはactiveなConstraint Factを作ります
+hostは`Message.FactDirective`へ`supersede`または`resolve` actionと1つ以上の過去のactive Fact IDを明示できます
+supersedeは全targetを失効させ、現在のMessageから1つのactive replacement Factを作ります
+resolveは全targetを解決済みにし、解決を伝える現在のMessage自体はConstraint Factにしません
+Runtimeは自然言語の類似性からtransitionを推測しません
+
+`ConstraintFactID`はsource Event参照からstable IDを生成します
+Constraint entryはraw Session message index、現在state、stateを確定したEvent、supersedes関係の両側、全transition sourceを公開します
+targetは過去の一意なactive Factである必要があり、missing、future、duplicate、retired済み、malformed、循環関係を拒否します
+1つの宣言は`MaxFactLifecycleTargets`を上限とします
+
+Runtimeはinputの`Message.FactDirective`をHook、永続化、publishより前に独立した`Event.FactDirective` fieldへ移します
+このEventがlifecycleのcommit pointです
+保存conversation、Provider request、terminal `RunResult.Messages`にはhost control metadataを含めません
+RuntimeはHookやSession Storeが観測する前に完全なEvent prefixへcandidate transitionを適用して検証します
+shape errorは`Runtime.Run`または`RunHandle.Steer`が返し、安全なsteering境界へ到達する前にtargetが無効になった場合はcandidate EventをcommitせずRunを失敗させます
+
+Fact IDはsource Eventを識別するため、terminal RunをまたぐtransitionにはEventをreplayするSession Storeが必要です
+ephemeral Runでも`user.message.added` Eventを観測した後のsteeringなら同じRun内のFactを遷移できますが、過去Messageだけを後続Runへ渡しても以前のEvent identityは再生成されません
+
+Ledger schema v2はFact lifecycle fieldを追加します
+新しいCheckpointはv2を参照し、replayではLedger v1が生成した参照も引き続き検証します
+deterministic Checkpoint Strategyは新しいmodel向けCheckpointからsupersededとresolvedのConstraint Factを除外し、Ledger参照が完全なlifecycle snapshotをcommitします
+過去のCheckpointを再利用する場合も、Compilerは永続Checkpointを変更せず現在Ledgerに照らして一時的なmodel viewをfilterします
+Artifact entryは現在のfileやGit stateではなく、Current World Stateで正規sourceから取得する予定です
+
+`ContextLedgerVersion`とsnapshot digest domainはv1からv2へ変更しました
+standaloneなv1 snapshotはderived dataであるためEvent Logから再構築し、`ValidateContextLedger`は渡されたstateを現在のv2 reductionと比較します
+互換対応は永続Checkpointへ埋め込まれたv1 referenceに限定します
 
 互換性のためRuntimeはcallerが渡したassistantまたはTool履歴を含む全`RunRequest.Input` entryを`user.message.added` Eventとしてemitします
 Reducerはすべてをsourceとして保持し、roleが`user`のMessageだけをConstraint entryにします
@@ -204,7 +230,7 @@ messageごとのUsageは個別resultを保持します
 
 ## 現在の制限
 
-- deterministic LedgerはRuntimeから観測できるstateを扱うが、Fact lifecycle、canonical workspace再構築、model-based semantic verificationは未実装
+- deterministic Ledgerは明示的なFact lifecycleとRuntimeから観測できるstateを扱うが、canonical workspace再構築とmodel-based semantic verificationは未実装
 - RuntimeはCompiler call前に完全なEvent prefixからLedgerを再構築し、incremental reducer indexは未実装
 - tokenizer-backed context limitとpredictive output reserveは未実装
 - Evidence retrievalはCLIとAPI経由でありmodel Toolへ自動公開しない

@@ -161,6 +161,43 @@ retain exact user text; store and transmit it with the same protection as
 Session Events. A custom Context Compiler receives an isolated in-progress copy
 through `ContextCompileRequest.Ledger`
 
+Constraint Facts use explicit lifecycle control rather than natural-language
+inference. A user Message without a directive creates an active Fact. Use an ID
+from `ContextLedger.Constraints`, or derive one from its source Event with
+`agent.ConstraintFactID`, when a later Run supersedes or resolves it
+
+```go
+targetID := previous.ContextLedger.Constraints[0].ID
+
+handle, err := runtime.Run(ctx, agent.RunRequest{
+    SessionID: previous.SessionID,
+    Input: []agent.Message{{
+        Role: agent.RoleUser,
+        Text: "Use PostgreSQL instead",
+        FactDirective: &agent.FactLifecycleDirective{
+            Action:  agent.FactLifecycleSupersede,
+            Targets: []string{targetID},
+        },
+    }},
+})
+```
+
+`supersede` retires every named active target and creates one active Fact from
+the current Message. `resolve` retires the targets without creating a Fact from
+the resolution Message. Targets must be unique earlier active Facts and are
+bounded by `agent.MaxFactLifecycleTargets`. Invalid shape returns
+`agent.ErrInvalidFactDirective`; `Steer` also classifies it as
+`agent.ErrInvalidSteeringMessage`. Runtime validates target state against the
+current Event prefix before Hooks or persistence; a steering target that is no
+longer active at its safe boundary fails the Run without committing that Event
+
+Runtime transfers input `Message.FactDirective` to `Event.FactDirective`. The
+stored and Provider-facing Message remains free of host lifecycle metadata. A
+published `user.message.added` Event is therefore the transition commit point
+
+Cross-Run transitions require a Session Store because target IDs identify
+source Events; replaying only prior Messages does not preserve those identities
+
 Use `Host.Start` instead when another request or worker must retain the handle,
 stream Events independently, or resume the Run later. A `Start` caller owns
 Event draining and `Wait`, and may call `Host.SaveRunEvidence` after completion
@@ -204,17 +241,22 @@ persisted Session. Without a Store, the caller must provide prior context.
 Reuse the same `*agent.Budget` explicitly only when one shared limit must span
 both Runs
 
-Compatibility note: steering adds the optional `user_message_origin` field to
-Event JSON, and existing Hooks subscribed to `user.message.added` also observe
-steering Messages. External decoders must accept that optional field. The Go
-`agent.Event` struct gained an exported field, so external composite literals
-should use field names
+Compatibility note: steering adds the optional `user_message_origin` field and
+Fact lifecycle adds the optional `fact_directive` field to Event JSON. Existing
+Hooks subscribed to `user.message.added` also observe these Events. External
+decoders must accept the optional fields. The Go `agent.Message` and
+`agent.Event` structs gained exported fields, and Ledger v2 extends
+`agent.ConstraintLedgerEntry`, so external composite literals should use field
+names
 
 Deterministic Ledgers add optional `policy` metadata to Tool results,
 `context_ledger` to terminal Run results, and `ledger` references to new
 Checkpoints. The raw host Policy reason is not included, and Policy metadata is
 not copied into the model-facing Tool Message. Strict external JSON decoders
-must accept these additive fields
+must accept these additive fields. Ledger schema v2 adds Fact state and
+transition provenance; replay continues to verify Checkpoint references created
+by Ledger v1. Standalone v1 Ledger snapshots must be rebuilt from Events before
+validation because `ValidateContextLedger` compares against the current schema
 
 At shutdown, stop accepting new work, cancel or finish active Runs, and then
 call `Host.CloseContext` to drain and stop every owned Extension process

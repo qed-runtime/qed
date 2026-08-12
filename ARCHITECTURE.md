@@ -50,9 +50,12 @@ Store, and publishes a validated typed Checkpoint plus recent raw tail
 
 Before each Context Compiler call, Runtime reduces the complete ordered Session
 and active-Run Event prefix into an `agent.ContextLedger`. Its five typed
-ledgers describe only Runtime-observable artifacts, executions, uninterpreted
-user constraints, authorization decisions, and Run tasks. The reducer neither
-calls a model nor reads live filesystem or Git state. A custom Compiler receives
+ledgers describe only Runtime-observable artifacts, executions, explicit user
+Fact lifecycle, authorization decisions, and Run tasks. A user Message creates
+an active Constraint Fact unless the host explicitly marks earlier active Fact
+IDs as superseded or resolved. The reducer never infers a transition from text.
+It neither calls a model nor reads live filesystem or Git state. A custom
+Compiler receives
 an isolated Ledger copy, the terminal `RunResult` exposes the final generation,
 and a compacted Checkpoint retains a content-free reference that replay verifies
 against its exact preceding Event prefix
@@ -152,6 +155,7 @@ For each candidate Event, Runtime performs this order
 
 ```text
 assign Run identity and candidate sequence
+  -> validate an explicit Fact transition against the Event prefix
   -> invoke matching synchronous Hooks
   -> append to the Session Store when configured
   -> publish to RunHandle.Events
@@ -175,6 +179,16 @@ queued steering as `user.message.added` Events before compiling the next
 Provider request. These Events set `UserMessageOrigin` to `steering`; Event
 publication is the observable point at which steering has entered Session
 state. A queue acceptance alone is not a persistence acknowledgement
+
+Fact lifecycle is host control metadata on user input. Runtime validates its
+shape at submission, moves it from `Message.FactDirective` to
+`Event.FactDirective`, and checks target existence and active state before Hooks
+or persistence. `supersede` retires earlier targets and creates one active
+replacement, while `resolve` retires targets without creating a Fact from the
+resolution Message. Stored and Provider-facing conversation Messages do not
+retain the directive. Ledger v2 records the raw message index, current state,
+state source, transition sources, and both directions of supersedes edges;
+replay also validates references emitted by Ledger v1
 
 An observed `run.waiting` rejects new steering with `ErrRunWaiting`. Steering
 queued before the wait remains pending until the matching resume and Tool

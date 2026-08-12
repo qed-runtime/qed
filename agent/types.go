@@ -25,6 +25,12 @@ type Message struct {
 	Role Role `json:"role"`
 	// Text contains user, assistant, or Tool output text
 	Text string `json:"text,omitempty"`
+	// FactDirective explicitly changes earlier Constraint Facts
+	//
+	// Runtime accepts this field only on user input. It moves the directive to
+	// the corresponding user.message.added Event and removes it from Provider
+	// conversation history.
+	FactDirective *FactLifecycleDirective `json:"fact_directive,omitempty"`
 	// ToolCallID correlates a Tool result message with its request
 	ToolCallID string `json:"tool_call_id,omitempty"`
 	// ToolName identifies the Tool that produced a result message
@@ -48,6 +54,34 @@ type Message struct {
 	// ProviderState is not serialized. Callers must treat it as opaque and only
 	// pass it back to a Provider with the same name
 	ProviderState *ProviderState `json:"-"`
+}
+
+// FactLifecycleAction identifies an explicit Constraint Fact transition
+type FactLifecycleAction string
+
+// Fact lifecycle actions supported by Runtime
+const (
+	// FactLifecycleSupersede retires every target and makes the current user Message active
+	FactLifecycleSupersede FactLifecycleAction = "supersede"
+	// FactLifecycleResolve retires every target without creating a new Constraint Fact
+	FactLifecycleResolve FactLifecycleAction = "resolve"
+)
+
+const (
+	// MaxFactLifecycleTargets bounds one deterministic lifecycle transition
+	MaxFactLifecycleTargets = 64
+)
+
+// FactLifecycleDirective explicitly transitions earlier active Constraint Facts
+//
+// Targets contains stable Constraint Fact IDs returned by ConstraintFactID or
+// exposed through ContextLedger.Constraints. Runtime applies targets in the
+// supplied order after rejecting empty, duplicate, missing, or non-active IDs.
+type FactLifecycleDirective struct {
+	// Action identifies whether Targets are superseded or resolved
+	Action FactLifecycleAction `json:"action"`
+	// Targets identifies earlier active Constraint Facts
+	Targets []string `json:"targets"`
 }
 
 // StopReason identifies why a Provider stopped generating a message
@@ -423,6 +457,11 @@ type Event struct {
 	// It is only meaningful for user.message.added Events. An empty value means
 	// the Message came from RunRequest.Input, including a follow-up Run.
 	UserMessageOrigin UserMessageOrigin `json:"user_message_origin,omitempty"`
+	// FactDirective records an explicit Constraint Fact transition
+	//
+	// Runtime moves this value from user Message input to the Event before
+	// persistence. Event.Message therefore remains provider-neutral history.
+	FactDirective *FactLifecycleDirective `json:"fact_directive,omitempty"`
 	// Delta contains incremental assistant text for message.delta
 	Delta string `json:"delta,omitempty"`
 	// ToolCall is present for Tool events

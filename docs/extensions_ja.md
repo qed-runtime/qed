@@ -138,6 +138,8 @@ Extension RPCとStore appendは単一transactionではないため、Hook成功�
 
 active Runのsteeringは`user.message.added` Event typeを維持し、任意fieldの`user_message_origin`を`steering`に設定します
 このtypeを購読するHookはRun inputとsteering Messageの両方を受け取るため、strict protocol decoderは任意fieldを含める必要があります
+明示的なFact lifecycle transitionも同じEvent typeを使い、Runtimeがtarget Event prefixを検証した後に任意の`fact_directive` metadataを追加します
+nested Messageにはhost専用directiveを残しません
 
 ### Command
 

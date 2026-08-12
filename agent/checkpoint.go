@@ -180,6 +180,10 @@ func (DeterministicCheckpointStrategy) BuildCheckpoint(
 		reference := request.Ledger.Reference()
 		checkpoint.Ledger = &reference
 	}
+	activeConstraintMessages, err := activeConstraintSourceMessages(request.Ledger, len(request.Messages))
+	if err != nil {
+		return ContextCheckpoint{}, err
+	}
 	for index, message := range request.Messages {
 		digest, err := checkpointMessageHash(message)
 		if err != nil {
@@ -187,6 +191,11 @@ func (DeterministicCheckpointStrategy) BuildCheckpoint(
 		}
 		switch message.Role {
 		case RoleUser:
+			if activeConstraintMessages != nil {
+				if _, active := activeConstraintMessages[index]; !active {
+					continue
+				}
+			}
 			fact := CheckpointFact{
 				Kind:          "user_input",
 				Summary:       boundedCheckpointText(message.Text, maximumCheckpointSummary),
@@ -289,7 +298,7 @@ func (compiler *CompactingContextCompiler) Compile(
 		}
 	}
 
-	baseline, baselineRefs, err := compiler.compiledView(ctx, canonical, request.Checkpoint)
+	baseline, baselineRefs, err := compiler.compiledView(ctx, canonical, request.Checkpoint, request.Ledger)
 	if err != nil {
 		return CompiledContext{}, err
 	}
@@ -344,7 +353,7 @@ func (compiler *CompactingContextCompiler) Compile(
 		if buildErr != nil {
 			return CompiledContext{}, buildErr
 		}
-		candidate, refs, viewErr := compiler.compiledView(ctx, canonical, &checkpoint)
+		candidate, refs, viewErr := compiler.compiledView(ctx, canonical, &checkpoint, request.Ledger)
 		if viewErr != nil {
 			return CompiledContext{}, viewErr
 		}
@@ -489,11 +498,16 @@ func (compiler *CompactingContextCompiler) compiledView(
 	ctx context.Context,
 	request ModelRequest,
 	checkpoint *ContextCheckpoint,
+	ledger *ContextLedger,
 ) (ModelRequest, []EvidenceObjectRef, error) {
 	view := cloneModelRequest(request)
 	start := checkpointSourceCount(checkpoint)
 	if checkpoint != nil {
-		rendered, err := renderContextCheckpoint(*checkpoint)
+		currentView, err := checkpointLifecycleView(*checkpoint, ledger)
+		if err != nil {
+			return ModelRequest{}, nil, err
+		}
+		rendered, err := renderContextCheckpoint(currentView)
 		if err != nil {
 			return ModelRequest{}, nil, err
 		}
@@ -520,6 +534,31 @@ func (compiler *CompactingContextCompiler) compiledView(
 		references = append(references, reference)
 	}
 	return view, uniqueEvidenceRefs(references), nil
+}
+
+func checkpointLifecycleView(checkpoint ContextCheckpoint, ledger *ContextLedger) (ContextCheckpoint, error) {
+	view := *cloneContextCheckpointPointer(&checkpoint)
+	if ledger == nil {
+		return view, nil
+	}
+	active, err := activeConstraintSourceMessages(ledger, checkpoint.SourceMessageCount)
+	if err != nil {
+		return ContextCheckpoint{}, err
+	}
+	facts := make([]CheckpointFact, 0, len(view.Facts))
+	for _, fact := range view.Facts {
+		if _, exists := active[fact.SourceMessage]; exists {
+			facts = append(facts, fact)
+		}
+	}
+	view.Facts = facts
+	if view.Goal != nil {
+		if _, exists := active[view.Goal.SourceMessage]; !exists {
+			view.Goal = nil
+		}
+	}
+	view.Narrative = deterministicCheckpointNarrative(view)
+	return view, nil
 }
 
 func normalizeCompressionPolicy(policy ContextCompressionPolicy) (ContextCompressionPolicy, error) {
@@ -554,6 +593,26 @@ func normalizeCompressionPolicy(policy ContextCompressionPolicy) (ContextCompres
 	return policy, nil
 }
 
+func activeConstraintSourceMessages(ledger *ContextLedger, messageLimit int) (map[int]struct{}, error) {
+	if ledger == nil {
+		return nil, nil
+	}
+	active := make(map[int]struct{})
+	for _, constraint := range ledger.Constraints {
+		if constraint.SourceMessage < 0 {
+			return nil, fmt.Errorf("Constraint Fact %q has a negative source Message", constraint.ID)
+		}
+		if constraint.SourceMessage >= messageLimit || constraint.State != FactActive {
+			continue
+		}
+		if _, duplicate := active[constraint.SourceMessage]; duplicate {
+			return nil, fmt.Errorf("multiple active Constraint Facts reference Message %d", constraint.SourceMessage)
+		}
+		active[constraint.SourceMessage] = struct{}{}
+	}
+	return active, nil
+}
+
 func validateCheckpoint(checkpoint ContextCheckpoint, messages []Message, ledger *ContextLedger, maxBytes int) error {
 	if checkpoint.Version != contextCheckpointVersion {
 		return fmt.Errorf("Checkpoint version = %d, want %d", checkpoint.Version, contextCheckpointVersion)
@@ -581,12 +640,25 @@ func validateCheckpoint(checkpoint ContextCheckpoint, messages []Message, ledger
 			return errors.New("Checkpoint contains an invalid Evidence reference")
 		}
 	}
+	var activeConstraintMessages map[int]struct{}
+	if checkpoint.Ledger != nil && ledger != nil && *checkpoint.Ledger == ledger.Reference() {
+		var err error
+		activeConstraintMessages, err = activeConstraintSourceMessages(ledger, checkpoint.SourceMessageCount)
+		if err != nil {
+			return err
+		}
+	}
 	for _, fact := range checkpoint.Facts {
 		if fact.SourceMessage < 0 || fact.SourceMessage >= checkpoint.SourceMessageCount {
 			return errors.New("Checkpoint Fact source is outside the compacted message range")
 		}
 		if messages[fact.SourceMessage].Role != RoleUser {
 			return errors.New("Checkpoint Fact does not reference a user message")
+		}
+		if activeConstraintMessages != nil {
+			if _, active := activeConstraintMessages[fact.SourceMessage]; !active {
+				return errors.New("Checkpoint Fact does not reference an active Constraint Fact")
+			}
 		}
 		wantHash, err := checkpointMessageHash(messages[fact.SourceMessage])
 		if err != nil {
@@ -617,6 +689,11 @@ func validateCheckpoint(checkpoint ContextCheckpoint, messages []Message, ledger
 		}
 		if messages[checkpoint.Goal.SourceMessage].Role != RoleUser {
 			return errors.New("Checkpoint Goal does not reference a user message")
+		}
+		if activeConstraintMessages != nil {
+			if _, active := activeConstraintMessages[checkpoint.Goal.SourceMessage]; !active {
+				return errors.New("Checkpoint Goal does not reference an active Constraint Fact")
+			}
 		}
 		wantHash, err := checkpointMessageHash(messages[checkpoint.Goal.SourceMessage])
 		if err != nil {

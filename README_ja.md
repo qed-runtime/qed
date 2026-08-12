@@ -18,7 +18,7 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - lifecycle contract test付きで既存fileを上書きしないGo Extension scaffold
 - fork不要でapplicationが所有する`extensions.lock` catalogとlive manifest validation
 - host所有Evidence Bundle
-- ordered Session Eventから再構築するdeterministicなArtifact、Execution、Constraint、Policy、Task Ledger
+- ordered Session Eventから明示的なFact lifecycleを含めて再構築するdeterministicなArtifact、Execution、Constraint、Policy、Task Ledger
 - Evidence preservingなContext圧縮、Prefix Manifest、prompt cache Plan、正規化cache Usage
 - NagiベースのCLIとmulti-turn TUI
 - 末端のExtension processまで伝搬する安全な構造化diagnostics
@@ -276,6 +276,10 @@ in-flight Provider request、retry、Tool batchは中断しません
 cancel、Deadline切れ、terminal Run failureでは、このEventへ到達していないsteeringを破棄する場合があります
 follow-upは新しいRun IDとRun local上限を持ち、Session Storeがない場合はcallerが過去contextを渡す必要があります
 複数Runで上限を共有する場合だけ同じ`*agent.Budget`を明示的に再利用します
+
+hostはuser Messageへ`FactLifecycleDirective`を付け、過去のactive Constraint Fact IDをsupersedeまたはresolveできます
+Runtimeはdirectiveをcommit対象の`user.message.added` Eventへ移し、Provider conversation historyへ含めず、自然言語を解釈せずにactive、superseded、resolved stateを決定的に再構築します
+lifecycle契約は[Contextとcache](docs/context-caching_ja.md)を参照してください
 
 実験的TUIではEnterをactive Runへのsteeringへ割り当て、現在のRunがterminal resultへ達した後はfollow-up Runを開始します
 設定済み`--session-id`がある場合は永続Sessionをreplayし、ない場合はそのchatが続く間だけ前Runのmessageを引き継ぎます

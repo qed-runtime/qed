@@ -81,6 +81,146 @@ func TestCompactingContextCompilerCreatesRebuildableCheckpoint(t *testing.T) {
 	}
 }
 
+func TestDeterministicCheckpointStrategyUsesOnlyActiveConstraintFacts(t *testing.T) {
+	t.Parallel()
+
+	firstID, err := agent.ConstraintFactID(agent.ContextLedgerEventRef{RunID: "run-first", Sequence: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []agent.Event{
+		{RunID: "run-first", Sequence: 1, Type: agent.EventRunStarted},
+		{RunID: "run-first", Sequence: 2, Type: agent.EventUserMessageAdded, Message: &agent.Message{Role: agent.RoleUser, Text: "use sqlite"}},
+		{RunID: "run-first", Sequence: 3, Type: agent.EventRunCompleted},
+		{RunID: "run-second", Sequence: 1, Type: agent.EventRunStarted},
+		{
+			RunID: "run-second", Sequence: 2, Type: agent.EventUserMessageAdded,
+			Message: &agent.Message{Role: agent.RoleUser, Text: "use postgres"},
+			FactDirective: &agent.FactLifecycleDirective{
+				Action: agent.FactLifecycleSupersede, Targets: []string{firstID},
+			},
+		},
+		{RunID: "run-second", Sequence: 3, Type: agent.EventRunCompleted},
+	}
+	ledger, err := agent.BuildContextLedger(context.Background(), events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := []agent.Message{
+		{Role: agent.RoleUser, Text: "use sqlite"},
+		{Role: agent.RoleUser, Text: "use postgres"},
+	}
+	checkpoint, err := (agent.DeterministicCheckpointStrategy{}).BuildCheckpoint(context.Background(), agent.CheckpointRequest{
+		Messages: messages, SourceHash: "source", Ledger: &ledger, MaxBytes: 4096,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.Goal == nil || checkpoint.Goal.SourceMessage != 1 || len(checkpoint.Facts) != 0 {
+		t.Fatalf("Fact-aware Checkpoint = %#v", checkpoint)
+	}
+}
+
+func TestCompactingContextCompilerFiltersRetiredFactFromReusedCheckpointView(t *testing.T) {
+	t.Parallel()
+
+	objects := evidence.NewMemoryObjectStore()
+	initialCompiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
+		MaxInputBytes:          1800,
+		RecentMessages:         2,
+		EvidenceThresholdBytes: 4096,
+		EvidenceExcerptBytes:   256,
+		CheckpointMaxBytes:     900,
+	}, objects, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := make([]agent.Message, 8)
+	events := []agent.Event{{RunID: "run-old", Sequence: 1, Type: agent.EventRunStarted}}
+	for index := range messages {
+		messages[index] = agent.Message{
+			Role: agent.RoleUser,
+			Text: strings.Repeat(string(rune('a'+index)), 500),
+		}
+		message := messages[index]
+		events = append(events, agent.Event{
+			RunID: "run-old", Sequence: uint64(index + 2), Type: agent.EventUserMessageAdded,
+			Message: &message,
+		})
+	}
+	prefixLedger, err := agent.BuildContextLedger(context.Background(), events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := initialCompiler.Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: messages},
+		Ledger:       &prefixLedger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initial.Checkpoint == nil || initial.Checkpoint.Goal == nil {
+		t.Fatalf("initial Checkpoint = %#v", initial.Checkpoint)
+	}
+	retiredSummary := initial.Checkpoint.Goal.Summary
+	retiredSource := initial.Checkpoint.Goal.SourceMessage
+	if retiredSource < 0 || retiredSource >= len(prefixLedger.Constraints) {
+		t.Fatalf("retired source Message = %d", retiredSource)
+	}
+	targetID := prefixLedger.Constraints[retiredSource].ID
+
+	checkpointEvent := agent.Event{
+		RunID: "run-old", Sequence: uint64(len(events) + 1), Type: agent.EventContextCompacted,
+		ContextCheckpoint: initial.Checkpoint,
+		ContextCompaction: initial.Compaction,
+	}
+	events = append(events, checkpointEvent)
+	events = append(events, agent.Event{
+		RunID: "run-old", Sequence: uint64(len(events) + 1), Type: agent.EventRunCompleted,
+	})
+	events = append(events,
+		agent.Event{RunID: "run-new", Sequence: 1, Type: agent.EventRunStarted},
+		agent.Event{
+			RunID: "run-new", Sequence: 2, Type: agent.EventUserMessageAdded,
+			Message: &agent.Message{Role: agent.RoleUser, Text: "replacement"},
+			FactDirective: &agent.FactLifecycleDirective{
+				Action: agent.FactLifecycleSupersede, Targets: []string{targetID},
+			},
+		},
+	)
+	currentLedger, err := agent.BuildContextLedger(context.Background(), events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages = append(messages, agent.Message{Role: agent.RoleUser, Text: "replacement"})
+	reuseCompiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
+		MaxInputBytes:          1 << 20,
+		RecentMessages:         2,
+		EvidenceThresholdBytes: 4096,
+		EvidenceExcerptBytes:   256,
+		CheckpointMaxBytes:     4096,
+	}, objects, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reused, err := reuseCompiler.Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: messages},
+		Checkpoint:   initial.Checkpoint,
+		Ledger:       &currentLedger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused.Checkpoint == nil || reused.Checkpoint.Goal == nil ||
+		reused.Checkpoint.Goal.Summary != retiredSummary {
+		t.Fatalf("persisted Checkpoint changed = %#v", reused.Checkpoint)
+	}
+	if len(reused.ModelRequest.Messages) == 0 ||
+		strings.Contains(reused.ModelRequest.Messages[0].Text, retiredSummary) {
+		t.Fatalf("reused model view retained retired Fact: %#v", reused.ModelRequest.Messages)
+	}
+}
+
 func TestCompactingContextCompilerAdvancesCheckpointGeneration(t *testing.T) {
 	t.Parallel()
 

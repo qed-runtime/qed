@@ -31,6 +31,7 @@ const (
 // Steer queues one user Message for the next safe Provider request boundary
 //
 // The Message must have RoleUser, non-empty text, and no Provider or Tool state.
+// An optional FactDirective may explicitly supersede or resolve earlier Facts.
 // Steer does not interrupt an in-flight Provider request, retry, or Tool batch.
 // A nil error means the Message was queued, while the corresponding
 // user.message.added Event confirms that Runtime applied it and, when a
@@ -77,6 +78,9 @@ func validateSteeringMessage(message Message) error {
 		message.Usage != nil || message.ResponseID != "" || message.Model != "" ||
 		message.ProviderState != nil {
 		return fmt.Errorf("%w: user message contains Provider or Tool state", ErrInvalidSteeringMessage)
+	}
+	if err := validateFactDirectiveMessage(message); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidSteeringMessage, err)
 	}
 	return nil
 }

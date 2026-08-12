@@ -420,7 +420,9 @@ func applyEvent(snapshot *agent.SessionSnapshot, event agent.Event) {
 	switch event.Type {
 	case agent.EventUserMessageAdded, agent.EventMessageCompleted:
 		if event.Message != nil {
-			snapshot.Messages = append(snapshot.Messages, cloneMessage(*event.Message))
+			message := cloneMessage(*event.Message)
+			message.FactDirective = nil
+			snapshot.Messages = append(snapshot.Messages, message)
 		}
 	case agent.EventContextCompacted:
 		if event.ContextCheckpoint != nil {
@@ -439,7 +441,9 @@ func applyEvent(snapshot *agent.SessionSnapshot, event agent.Event) {
 		}
 	case agent.EventToolCompleted:
 		if event.Message != nil {
-			snapshot.Messages = append(snapshot.Messages, cloneMessage(*event.Message))
+			message := cloneMessage(*event.Message)
+			message.FactDirective = nil
+			snapshot.Messages = append(snapshot.Messages, message)
 		}
 		snapshot.PendingTool = nil
 	case agent.EventRunWaiting:
@@ -507,6 +511,7 @@ func cloneEvent(event agent.Event) agent.Event {
 		report.Externalized = append([]agent.EvidenceObjectRef(nil), event.ContextCompaction.Externalized...)
 		event.ContextCompaction = &report
 	}
+	event.FactDirective = cloneFactLifecycleDirective(event.FactDirective)
 	if event.Message != nil {
 		message := cloneMessage(*event.Message)
 		event.Message = &message
@@ -548,6 +553,7 @@ func cloneMessages(messages []agent.Message) []agent.Message {
 }
 
 func cloneMessage(message agent.Message) agent.Message {
+	message.FactDirective = cloneFactLifecycleDirective(message.FactDirective)
 	if message.ToolCalls != nil {
 		message.ToolCalls = make([]agent.ToolCall, len(message.ToolCalls))
 		for index := range message.ToolCalls {
@@ -564,6 +570,15 @@ func cloneMessage(message agent.Message) agent.Message {
 		message.ProviderState = &state
 	}
 	return message
+}
+
+func cloneFactLifecycleDirective(directive *agent.FactLifecycleDirective) *agent.FactLifecycleDirective {
+	if directive == nil {
+		return nil
+	}
+	cloned := *directive
+	cloned.Targets = append([]string(nil), directive.Targets...)
+	return &cloned
 }
 
 func cloneToolCall(call agent.ToolCall) agent.ToolCall {

@@ -64,14 +64,14 @@ the complete ordered Event prefix. The terminal `agent.RunResult` contains the
 Ledger after the terminal Event. A custom Compiler receives an isolated copy in
 `ContextCompileRequest.Ledger`; changing it cannot alter Runtime state
 
-The v1 Reducer produces five typed ledgers without calling a model or reading a
+The v2 Reducer produces five typed ledgers without calling a model or reading a
 live workspace
 
 | Ledger | Runtime-observable contents |
 | --- | --- |
 | Artifact | exact digests of Tool output and externalized Evidence Objects |
 | Execution | Provider attempts and Tool calls with pending, succeeded, failed, or canceled state |
-| Constraint | exact user input retained as uninterpreted data, including steering origin |
+| Constraint | exact user Facts with active, superseded, or resolved state, including steering origin |
 | Policy | host Tool authorization metadata and human approval decisions |
 | Task | each Run's latest running, waiting, completed, failed, or canceled state |
 
@@ -88,10 +88,50 @@ New Checkpoints contain a content-free `ContextLedgerReference`; replay of the
 subsequent `context.compacted` Event verifies that reference against the exact
 preceding Event prefix
 
-Constraint entries are not yet claims that every user message remains active
-Fact lifecycle will add active, superseded, and resolved relationships in the
-next stage. Artifact entries do not yet represent current file or Git state
+Every user Message without a lifecycle directive creates an active Constraint
+Fact. The host can explicitly attach `Message.FactDirective` with action
+`supersede` or `resolve` and one or more earlier active Fact IDs. Superseding
+retires every target and creates one active replacement Fact from the current
+Message. Resolving retires every target and does not turn the resolution
+Message itself into a Constraint Fact. Runtime never infers these transitions
+from natural-language similarity
+
+`ConstraintFactID` derives the stable ID from the source Event reference.
+Constraint entries expose the raw Session message index, current state, the
+Event that established that state, both sides of a supersedes relation, and all
+transition sources. Targets must be unique earlier active Facts; missing,
+future, duplicate, already retired, malformed, and cyclic relationships are
+rejected. One directive is bounded by `MaxFactLifecycleTargets`
+
+Runtime moves a directive from input `Message.FactDirective` to the separate
+`Event.FactDirective` field before Hooks, persistence, and publication. The
+Event is the lifecycle commit point. The stored conversation, Provider request,
+and terminal `RunResult.Messages` do not contain this host control metadata.
+Runtime validates the candidate transition against the complete Event prefix
+before any Hook or Session Store observes it. Shape errors are returned by
+`Runtime.Run` or `RunHandle.Steer`; a target that becomes invalid before the
+safe steering boundary fails the Run without committing the candidate Event
+
+Because Fact IDs identify source Events, a transition across terminal Run
+boundaries requires a configured Session Store that replays those Events. An
+ephemeral Run can transition a Fact through steering after observing its
+`user.message.added` Event, but passing prior Messages alone to a later Run does
+not recreate their earlier Event identities
+
+Ledger schema v2 adds Fact lifecycle fields. New Checkpoints reference v2,
+while replay still verifies references produced by Ledger v1. The deterministic
+Checkpoint strategy omits superseded and resolved Constraint Facts from a new
+model-facing Checkpoint. When reusing an earlier Checkpoint, the Compiler also
+filters its transient model view against the current Ledger without mutating
+the persisted Checkpoint. Its Ledger reference commits the complete lifecycle
+snapshot. Artifact entries still do not represent current file or Git state.
 Current World State will obtain those facts from their canonical sources
+
+`ContextLedgerVersion` and the snapshot digest domain changed from v1 to v2.
+Standalone v1 snapshots are derived data and should be rebuilt from their Event
+Log; `ValidateContextLedger` compares supplied state with the current v2
+reduction. Compatibility support is limited to v1 references already embedded
+in persisted Checkpoints
 
 For compatibility, Runtime emits one `user.message.added` Event for every
 `RunRequest.Input` entry, including caller-supplied assistant or Tool history
@@ -244,9 +284,9 @@ reported a complete breakdown. Per-message Usage keeps each individual result
 
 ## Current limits
 
-- deterministic Ledgers cover Runtime-observable state, but Fact lifecycle,
-  canonical workspace reconstruction, and model-based semantic verification do
-  not exist yet
+- deterministic Ledgers cover explicit Fact lifecycle and other
+  Runtime-observable state, but canonical workspace reconstruction and
+  model-based semantic verification do not exist yet
 - Runtime currently rebuilds a Ledger from the complete Event prefix before
   every Compiler call; no incremental reducer index exists yet
 - no tokenizer-backed context limit or predictive output reserve exists

@@ -286,6 +286,11 @@ func (runtime *Runtime) Run(ctx context.Context, request RunRequest) (*RunHandle
 			return nil, errors.New("resume request ID is required")
 		}
 	}
+	for index := range request.Input {
+		if err := validateFactDirectiveMessage(request.Input[index]); err != nil {
+			return nil, fmt.Errorf("run input Message %d: %w", index, err)
+		}
+	}
 	if !request.Deadline.IsZero() && !request.Deadline.After(time.Now()) {
 		return nil, context.DeadlineExceeded
 	}
@@ -458,6 +463,16 @@ func (runtime *Runtime) execute(
 		event.AgentID = request.AgentID
 		event.SessionID = request.SessionID
 		event.Time = time.Now().UTC()
+		if event.FactDirective != nil {
+			preview := cloneEvent(event)
+			if runtime.sessionStore != nil && request.SessionID != "" {
+				preview.SessionRevision = sessionRevision + 1
+			}
+			previewEvents := append(cloneEvents(ledgerEvents), preview)
+			if _, err := BuildContextLedger(ctx, previewEvents); err != nil {
+				return fmt.Errorf("validate Fact lifecycle transition: %w", err)
+			}
+		}
 		for _, configured := range hooks {
 			if _, observes := configured.eventTypes[event.Type]; !observes {
 				continue
@@ -527,10 +542,13 @@ func (runtime *Runtime) execute(
 				return err
 			}
 			message := cloneMessage(pending[index])
+			directive := cloneFactLifecycleDirective(message.FactDirective)
+			message.FactDirective = nil
 			if err := emit(Event{
 				Type:              EventUserMessageAdded,
 				Message:           &message,
 				UserMessageOrigin: UserMessageOriginSteering,
+				FactDirective:     directive,
 			}); err != nil {
 				return err
 			}
@@ -638,14 +656,18 @@ func (runtime *Runtime) execute(
 	}
 	for index := range request.Input {
 		input := cloneMessage(request.Input[index])
+		directive := cloneFactLifecycleDirective(input.FactDirective)
+		input.FactDirective = nil
 		if err := emit(Event{
 			Type:              EventUserMessageAdded,
 			Message:           &input,
 			UserMessageOrigin: UserMessageOriginRunInput,
+			FactDirective:     directive,
 		}); err != nil {
 			fail(err)
 			return
 		}
+		messages = append(messages, input)
 	}
 	if request.Resume != nil {
 		if loaded.pendingTool == nil {
@@ -966,6 +988,10 @@ func (runtime *Runtime) execute(
 			fail(fmt.Errorf("provider %q returned message role %q, want %q", runtime.provider.Name(), message.Role, RoleAssistant))
 			return
 		}
+		if message.FactDirective != nil {
+			fail(fmt.Errorf("provider %q returned host-only Fact lifecycle state", runtime.provider.Name()))
+			return
+		}
 		if err := validateUsage(message.Usage); err != nil {
 			fail(fmt.Errorf("provider %q returned invalid Usage: %w", runtime.provider.Name(), err))
 			return
@@ -1108,6 +1134,14 @@ func (runtime *Runtime) compileContext(
 	}
 	if !metadataEqual(compiled.ModelRequest.Metadata, request.Metadata) {
 		return CompiledContext{}, PrefixManifest{}, errors.New("Context Compiler changed request metadata")
+	}
+	for index := range compiled.ModelRequest.Messages {
+		if compiled.ModelRequest.Messages[index].FactDirective != nil {
+			return CompiledContext{}, PrefixManifest{}, fmt.Errorf(
+				"Context Compiler returned host-only Fact lifecycle state in Message %d",
+				index,
+			)
+		}
 	}
 	if len(compiled.ModelRequest.Messages) == 0 && compiled.ModelRequest.Instructions == "" {
 		return CompiledContext{}, PrefixManifest{}, errors.New("Context Compiler returned an empty model request")
@@ -1281,7 +1315,7 @@ type loadedSession struct {
 
 func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (loadedSession, func(), error) {
 	if runtime.sessionStore == nil || request.SessionID == "" {
-		return loadedSession{messages: cloneMessages(request.Input)}, func() {}, nil
+		return loadedSession{}, func() {}, nil
 	}
 	release, err := runtime.acquireSession(ctx, request.SessionID)
 	if err != nil {
@@ -1312,7 +1346,7 @@ func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (lo
 		wait := cloneWaitRequest(*snapshot.PendingWait)
 		tool := cloneToolCall(*snapshot.PendingTool)
 		return loadedSession{
-			messages:        cloneMessages(snapshot.Messages),
+			messages:        cloneMessagesWithoutFactDirectives(snapshot.Messages),
 			events:          cloneEvents(snapshot.Events),
 			revision:        snapshot.Revision,
 			checkpoint:      cloneContextCheckpointPointer(snapshot.Checkpoint),
@@ -1325,10 +1359,8 @@ func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (lo
 		release()
 		return loadedSession{}, func() {}, fmt.Errorf("Session %q has unfinished work and must be resumed", request.SessionID)
 	}
-	messages := cloneMessages(snapshot.Messages)
-	messages = append(messages, cloneMessages(request.Input)...)
 	return loadedSession{
-		messages:        messages,
+		messages:        cloneMessagesWithoutFactDirectives(snapshot.Messages),
 		events:          cloneEvents(snapshot.Events),
 		revision:        snapshot.Revision,
 		checkpoint:      cloneContextCheckpointPointer(snapshot.Checkpoint),
@@ -1556,6 +1588,7 @@ func cloneToolCalls(calls []ToolCall) []ToolCall {
 }
 
 func cloneMessage(message Message) Message {
+	message.FactDirective = cloneFactLifecycleDirective(message.FactDirective)
 	message.ToolCalls = cloneToolCalls(message.ToolCalls)
 	if message.Usage != nil {
 		usage := *message.Usage
@@ -1577,6 +1610,14 @@ func cloneMessages(messages []Message) []Message {
 	cloned := make([]Message, len(messages))
 	for index := range messages {
 		cloned[index] = cloneMessage(messages[index])
+	}
+	return cloned
+}
+
+func cloneMessagesWithoutFactDirectives(messages []Message) []Message {
+	cloned := cloneMessages(messages)
+	for index := range cloned {
+		cloned[index].FactDirective = nil
 	}
 	return cloned
 }
@@ -1640,6 +1681,7 @@ func cloneEvent(event Event) Event {
 	}
 	event.ContextCheckpoint = cloneContextCheckpointPointer(event.ContextCheckpoint)
 	event.ContextCompaction = cloneContextCompactionReport(event.ContextCompaction)
+	event.FactDirective = cloneFactLifecycleDirective(event.FactDirective)
 	if event.Message != nil {
 		message := cloneMessage(*event.Message)
 		event.Message = &message

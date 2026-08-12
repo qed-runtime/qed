@@ -16,10 +16,11 @@ import (
 
 const (
 	// ContextLedgerVersion is the schema version emitted by BuildContextLedger
-	ContextLedgerVersion uint32 = 1
+	ContextLedgerVersion uint32 = 2
 
 	contextLedgerSourceHashDomain = "qed.context.ledger.sources.v1"
-	contextLedgerDigestDomain     = "qed.context.ledger.v1"
+	contextLedgerDigestDomain     = "qed.context.ledger.v2"
+	contextLedgerV1DigestDomain   = "qed.context.ledger.v1"
 	contextLedgerEventHashDomain  = "qed.context.ledger.event.v1"
 	contextLedgerValueHashDomain  = "qed.context.ledger.value.v1"
 )
@@ -59,6 +60,19 @@ type ConstraintLedgerKind string
 // Constraint Ledger kinds reconstructed from Runtime Events
 const (
 	ConstraintLedgerUserInput ConstraintLedgerKind = "user_input"
+)
+
+// FactState identifies the deterministic lifecycle state of one Constraint Fact
+type FactState string
+
+// Constraint Fact lifecycle states
+const (
+	// FactActive identifies a Fact that remains part of current context
+	FactActive FactState = "active"
+	// FactSuperseded identifies a Fact replaced by a later Fact
+	FactSuperseded FactState = "superseded"
+	// FactResolved identifies a Fact explicitly retired without a replacement
+	FactResolved FactState = "resolved"
 )
 
 // PolicyLedgerKind identifies one host or human authorization boundary
@@ -158,19 +172,29 @@ type ExecutionLedgerEntry struct {
 	Sources []ContextLedgerEventRef `json:"sources"`
 }
 
-// ConstraintLedgerEntry preserves user input as data without inferring lifecycle state
+// ConstraintLedgerEntry preserves explicit user input and its deterministic lifecycle
 type ConstraintLedgerEntry struct {
 	// ID is a stable domain-separated identity for this user statement
 	ID string `json:"id"`
 	// Kind identifies how the statement entered Runtime
 	Kind ConstraintLedgerKind `json:"kind"`
-	// Text preserves exact user input for later Fact lifecycle processing
+	// Text preserves exact user input for lifecycle-aware context compilation
 	Text string `json:"text"`
 	// ContentHash identifies the complete provider-neutral user Message
 	ContentHash string `json:"content_hash"`
+	// SourceMessage is the zero-based raw Session message index
+	SourceMessage int `json:"source_message"`
 	// Origin distinguishes Run input from active-Run steering
 	Origin UserMessageOrigin `json:"origin,omitempty"`
-	// Sources identifies the source user.message.added Event
+	// State identifies whether this Fact remains active or has been retired
+	State FactState `json:"state"`
+	// StateSource identifies the Event that established the current State
+	StateSource ContextLedgerEventRef `json:"state_source"`
+	// Supersedes identifies earlier Facts retired by this active replacement
+	Supersedes []string `json:"supersedes,omitempty"`
+	// SupersededBy identifies the replacement Fact when State is superseded
+	SupersededBy string `json:"superseded_by,omitempty"`
+	// Sources identifies the source user.message.added Event and any transition Event
 	Sources []ContextLedgerEventRef `json:"sources"`
 }
 
@@ -238,7 +262,7 @@ type ContextLedger struct {
 	Artifacts []ArtifactLedgerEntry `json:"artifacts"`
 	// Executions contains Provider and Tool attempts
 	Executions []ExecutionLedgerEntry `json:"executions"`
-	// Constraints contains uninterpreted user inputs for later Fact lifecycle processing
+	// Constraints contains user Facts and explicit deterministic lifecycle state
 	Constraints []ConstraintLedgerEntry `json:"constraints"`
 	// Policies contains host authorization and human approval results
 	Policies []PolicyLedgerEntry `json:"policies"`
@@ -319,12 +343,14 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 	executions := make(map[string]*ledgerExecution)
 	artifacts := make(map[string]*ledgerArtifact)
 	policies := make(map[string]*ledgerPolicy)
+	constraintIndexes := make(map[string]int)
 	pendingProviders := make(map[string]string)
 	pendingApprovals := make(map[string]string)
 	perRunSequence := make(map[string]uint64)
 	runIdentity := make(map[string]Event)
 	seenEvents := make(map[string]struct{}, len(events))
 	persisted := false
+	sourceMessageCount := 0
 
 	for index := range events {
 		if err := ctx.Err(); err != nil {
@@ -338,10 +364,18 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 		if err != nil {
 			return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: %w", index, err)
 		}
+		if event.FactDirective != nil && event.Type != EventUserMessageAdded {
+			return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: Fact lifecycle directive requires user.message.added", index)
+		}
+		if event.Message != nil && event.Message.FactDirective != nil {
+			return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: Message retains a Fact lifecycle directive", index)
+		}
 		ledger.Sources = append(ledger.Sources, source)
 		ref := source.ContextLedgerEventRef
+		sourceMessage := sourceMessageCount
+		sourceMessageCount += ledgerEventMessageCount(event)
 		if event.RunID == "" {
-			if err := reduceLegacyLedgerEvent(&ledger, artifacts, policies, pendingApprovals, event, ref, index); err != nil {
+			if err := reduceLegacyLedgerEvent(&ledger, constraintIndexes, artifacts, policies, pendingApprovals, event, ref, sourceMessage, index); err != nil {
 				return ContextLedger{}, fmt.Errorf("Context Ledger legacy Event %d: %w", index, err)
 			}
 			continue
@@ -391,19 +425,8 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 			}
 			task.entry.InputCount++
 			task.entry.Sources = append(task.entry.Sources, ref)
-			if event.Message.Role == RoleUser {
-				contentHash, err := checkpointMessageHash(*event.Message)
-				if err != nil {
-					return ContextLedger{}, fmt.Errorf("hash user Message: %w", err)
-				}
-				ledger.Constraints = append(ledger.Constraints, ConstraintLedgerEntry{
-					ID:          contextLedgerID("constraint", event.RunID, fmt.Sprint(event.Sequence)),
-					Kind:        ConstraintLedgerUserInput,
-					Text:        event.Message.Text,
-					ContentHash: contentHash,
-					Origin:      event.UserMessageOrigin,
-					Sources:     []ContextLedgerEventRef{ref},
-				})
+			if err := applyConstraintFactEvent(&ledger, constraintIndexes, event, ref, sourceMessage); err != nil {
+				return ContextLedger{}, err
 			}
 
 		case EventModelRequest:
@@ -517,7 +540,11 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 				if err != nil {
 					return ContextLedger{}, err
 				}
-				if *event.ContextCheckpoint.Ledger != prefix.Reference() {
+				wantReference, err := contextLedgerReferenceForVersion(prefix, event.ContextCheckpoint.Ledger.Version)
+				if err != nil {
+					return ContextLedger{}, err
+				}
+				if *event.ContextCheckpoint.Ledger != wantReference {
 					return ContextLedger{}, errors.New("context.compacted Checkpoint Ledger reference does not match its Event prefix")
 				}
 				ledger.CheckpointReferences = append(ledger.CheckpointReferences, *event.ContextCheckpoint.Ledger)
@@ -637,7 +664,7 @@ func ValidateContextLedger(ctx context.Context, ledger ContextLedger, events []E
 }
 
 func validateContextLedgerReference(reference ContextLedgerReference, current *ContextLedger) error {
-	if reference.Version != ContextLedgerVersion || !validSHA256Digest(reference.Digest) ||
+	if (reference.Version != 1 && reference.Version != ContextLedgerVersion) || !validSHA256Digest(reference.Digest) ||
 		!validSHA256Digest(reference.SourceHash) || reference.SourceEventCount < 0 {
 		return errors.New("reference identity is invalid")
 	}
@@ -662,7 +689,11 @@ func validateContextLedgerReference(reference ContextLedgerReference, current *C
 		return errors.New("Session revision does not match current Event prefix")
 	}
 	if reference.SourceEventCount == current.SourceEventCount {
-		if reference.Digest != current.Digest {
+		want, err := contextLedgerReferenceForVersion(*current, reference.Version)
+		if err != nil {
+			return err
+		}
+		if reference != want {
 			return errors.New("digest does not match current Ledger")
 		}
 		return nil
@@ -745,11 +776,13 @@ func contextLedgerSource(event Event) (ContextLedgerSource, error) {
 
 func reduceLegacyLedgerEvent(
 	ledger *ContextLedger,
+	constraintIndexes map[string]int,
 	artifacts map[string]*ledgerArtifact,
 	policies map[string]*ledgerPolicy,
 	pendingApprovals map[string]string,
 	event Event,
 	ref ContextLedgerEventRef,
+	sourceMessage int,
 	order int,
 ) error {
 	switch event.Type {
@@ -765,21 +798,9 @@ func reduceLegacyLedgerEvent(
 				return fmt.Errorf("legacy steering user.message.added: %w", err)
 			}
 		}
-		if event.Message.Role != RoleUser {
-			return nil
-		}
-		contentHash, err := checkpointMessageHash(*event.Message)
-		if err != nil {
+		if err := applyConstraintFactEvent(ledger, constraintIndexes, event, ref, sourceMessage); err != nil {
 			return err
 		}
-		ledger.Constraints = append(ledger.Constraints, ConstraintLedgerEntry{
-			ID:          contextLedgerID("constraint", "session", fmt.Sprint(event.SessionRevision)),
-			Kind:        ConstraintLedgerUserInput,
-			Text:        event.Message.Text,
-			ContentHash: contentHash,
-			Origin:      event.UserMessageOrigin,
-			Sources:     []ContextLedgerEventRef{ref},
-		})
 	case EventContextCompacted:
 		if event.ContextCompaction == nil {
 			return errors.New("legacy context.compacted requires a compaction report")
@@ -813,6 +834,114 @@ func reduceLegacyLedgerEvent(
 			delete(pendingApprovals, event.WaitResponse.RequestID)
 		}
 	}
+	return nil
+}
+
+func ledgerEventMessageCount(event Event) int {
+	switch event.Type {
+	case EventUserMessageAdded, EventMessageCompleted, EventToolCompleted:
+		if event.Message != nil {
+			return 1
+		}
+	}
+	return 0
+}
+
+func applyConstraintFactEvent(
+	ledger *ContextLedger,
+	constraintIndexes map[string]int,
+	event Event,
+	ref ContextLedgerEventRef,
+	sourceMessage int,
+) error {
+	if event.Message == nil {
+		return errors.New("Fact lifecycle Event requires a Message")
+	}
+	if event.Message.FactDirective != nil {
+		return errors.New("user.message.added Message must not retain its Fact lifecycle directive")
+	}
+	directive := event.FactDirective
+	if directive != nil {
+		if event.Message.Role != RoleUser {
+			return fmt.Errorf("%w: directive requires a user Message", ErrInvalidFactDirective)
+		}
+		message := cloneMessage(*event.Message)
+		message.FactDirective = cloneFactLifecycleDirective(directive)
+		if err := validateFactDirectiveMessage(message); err != nil {
+			return err
+		}
+	}
+	if event.Message.Role != RoleUser {
+		return nil
+	}
+
+	if directive != nil {
+		for _, target := range directive.Targets {
+			entryIndex, exists := constraintIndexes[target]
+			if !exists {
+				return fmt.Errorf("%w: target %q does not exist in the earlier Event prefix", ErrInvalidFactDirective, target)
+			}
+			if ledger.Constraints[entryIndex].State != FactActive {
+				return fmt.Errorf(
+					"%w: target %q is %q instead of active",
+					ErrInvalidFactDirective,
+					target,
+					ledger.Constraints[entryIndex].State,
+				)
+			}
+		}
+	}
+
+	var newFactID string
+	if directive == nil || directive.Action == FactLifecycleSupersede {
+		var err error
+		newFactID, err = ConstraintFactID(ref)
+		if err != nil {
+			return err
+		}
+		if _, duplicate := constraintIndexes[newFactID]; duplicate {
+			return fmt.Errorf("Constraint Fact %q is duplicated", newFactID)
+		}
+	}
+
+	if directive != nil {
+		for _, target := range directive.Targets {
+			entry := &ledger.Constraints[constraintIndexes[target]]
+			entry.StateSource = ref
+			entry.Sources = append(entry.Sources, ref)
+			switch directive.Action {
+			case FactLifecycleSupersede:
+				entry.State = FactSuperseded
+				entry.SupersededBy = newFactID
+			case FactLifecycleResolve:
+				entry.State = FactResolved
+			}
+		}
+		if directive.Action == FactLifecycleResolve {
+			return nil
+		}
+	}
+
+	contentHash, err := checkpointMessageHash(*event.Message)
+	if err != nil {
+		return fmt.Errorf("hash user Message: %w", err)
+	}
+	entry := ConstraintLedgerEntry{
+		ID:            newFactID,
+		Kind:          ConstraintLedgerUserInput,
+		Text:          event.Message.Text,
+		ContentHash:   contentHash,
+		SourceMessage: sourceMessage,
+		Origin:        event.UserMessageOrigin,
+		State:         FactActive,
+		StateSource:   ref,
+		Sources:       []ContextLedgerEventRef{ref},
+	}
+	if directive != nil {
+		entry.Supersedes = append([]string(nil), directive.Targets...)
+	}
+	constraintIndexes[entry.ID] = len(ledger.Constraints)
+	ledger.Constraints = append(ledger.Constraints, entry)
 	return nil
 }
 
@@ -1099,6 +1228,9 @@ func finalizeContextLedger(
 	ledger.Executions = orderedExecutions(executions)
 	ledger.Artifacts = orderedArtifacts(artifacts)
 	ledger.Policies = orderedPolicies(policies)
+	if err := validateConstraintFacts(ledger.Constraints); err != nil {
+		return ContextLedger{}, err
+	}
 	ledger.SourceEventCount = len(ledger.Sources)
 	ledger.SessionRevision = 0
 	if len(ledger.Sources) > 0 {
@@ -1111,6 +1243,111 @@ func finalizeContextLedger(
 	}
 	ledger.Digest = digest
 	return ledger, nil
+}
+
+func validateConstraintFacts(entries []ConstraintLedgerEntry) error {
+	byID := make(map[string]int, len(entries))
+	lastSourceMessage := -1
+	for index := range entries {
+		entry := entries[index]
+		if !validConstraintFactID(entry.ID) || entry.Kind != ConstraintLedgerUserInput ||
+			!validSHA256Digest(entry.ContentHash) || len(entry.Sources) == 0 ||
+			entry.SourceMessage <= lastSourceMessage {
+			return fmt.Errorf("Constraint Fact %d has an invalid identity or source", index)
+		}
+		lastSourceMessage = entry.SourceMessage
+		wantID, err := ConstraintFactID(entry.Sources[0])
+		if err != nil || entry.ID != wantID {
+			return fmt.Errorf("Constraint Fact %q does not match its source Event", entry.ID)
+		}
+		if entry.StateSource != entry.Sources[len(entry.Sources)-1] {
+			return fmt.Errorf("Constraint Fact %q State source is not its latest source", entry.ID)
+		}
+		if _, duplicate := byID[entry.ID]; duplicate {
+			return fmt.Errorf("Constraint Fact %q is duplicated", entry.ID)
+		}
+		byID[entry.ID] = index
+	}
+
+	for index := range entries {
+		entry := entries[index]
+		switch entry.State {
+		case FactActive:
+			if entry.StateSource != entry.Sources[0] || entry.SupersededBy != "" {
+				return fmt.Errorf("active Constraint Fact %q has terminal transition state", entry.ID)
+			}
+		case FactSuperseded:
+			if len(entry.Sources) < 2 || entry.StateSource == entry.Sources[0] || !validConstraintFactID(entry.SupersededBy) {
+				return fmt.Errorf("superseded Constraint Fact %q has no valid replacement", entry.ID)
+			}
+		case FactResolved:
+			if len(entry.Sources) < 2 || entry.StateSource == entry.Sources[0] || entry.SupersededBy != "" {
+				return fmt.Errorf("resolved Constraint Fact %q names a replacement", entry.ID)
+			}
+		default:
+			return fmt.Errorf("Constraint Fact %q has unsupported state %q", entry.ID, entry.State)
+		}
+
+		seenTargets := make(map[string]struct{}, len(entry.Supersedes))
+		for _, target := range entry.Supersedes {
+			if _, duplicate := seenTargets[target]; duplicate {
+				return fmt.Errorf("Constraint Fact %q supersedes target %q more than once", entry.ID, target)
+			}
+			seenTargets[target] = struct{}{}
+			targetIndex, exists := byID[target]
+			if !exists {
+				return fmt.Errorf("Constraint Fact %q supersedes missing target %q", entry.ID, target)
+			}
+			targetEntry := entries[targetIndex]
+			if targetEntry.State != FactSuperseded || targetEntry.SupersededBy != entry.ID {
+				return fmt.Errorf("Constraint Fact %q has inconsistent supersedes target %q", entry.ID, target)
+			}
+		}
+		if entry.State == FactSuperseded {
+			replacementIndex, exists := byID[entry.SupersededBy]
+			if !exists {
+				return fmt.Errorf("Constraint Fact %q replacement is missing", entry.ID)
+			}
+			replacement := entries[replacementIndex]
+			found := false
+			for _, target := range replacement.Supersedes {
+				if target == entry.ID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("Constraint Fact %q replacement does not link back", entry.ID)
+			}
+		}
+	}
+
+	visiting := make(map[string]bool, len(entries))
+	visited := make(map[string]bool, len(entries))
+	var visit func(string) error
+	visit = func(id string) error {
+		if visiting[id] {
+			return fmt.Errorf("Constraint Fact supersedes relation contains a cycle at %q", id)
+		}
+		if visited[id] {
+			return nil
+		}
+		visiting[id] = true
+		for _, target := range entries[byID[id]].Supersedes {
+			if err := visit(target); err != nil {
+				return err
+			}
+		}
+		visiting[id] = false
+		visited[id] = true
+		return nil
+	}
+	for id := range byID {
+		if err := visit(id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func appendUniqueLedgerSourceRef(current []ContextLedgerEventRef, value ContextLedgerEventRef) []ContextLedgerEventRef {
@@ -1129,6 +1366,85 @@ func contextLedgerSnapshotDigest(ledger ContextLedger) (string, error) {
 		return "", fmt.Errorf("encode Context Ledger: %w", err)
 	}
 	return contextLedgerJSONDigest(contextLedgerDigestDomain, json.RawMessage(encoded)), nil
+}
+
+type contextLedgerV1Constraint struct {
+	ID          string                  `json:"id"`
+	Kind        ConstraintLedgerKind    `json:"kind"`
+	Text        string                  `json:"text"`
+	ContentHash string                  `json:"content_hash"`
+	Origin      UserMessageOrigin       `json:"origin,omitempty"`
+	Sources     []ContextLedgerEventRef `json:"sources"`
+}
+
+type contextLedgerV1Snapshot struct {
+	Version              uint32                      `json:"version"`
+	SessionID            string                      `json:"session_id,omitempty"`
+	SessionRevision      uint64                      `json:"session_revision,omitempty"`
+	SourceEventCount     int                         `json:"source_event_count"`
+	SourceHash           string                      `json:"source_hash"`
+	Digest               string                      `json:"digest"`
+	Sources              []ContextLedgerSource       `json:"sources"`
+	CheckpointReferences []ContextLedgerReference    `json:"checkpoint_references"`
+	Artifacts            []ArtifactLedgerEntry       `json:"artifacts"`
+	Executions           []ExecutionLedgerEntry      `json:"executions"`
+	Constraints          []contextLedgerV1Constraint `json:"constraints"`
+	Policies             []PolicyLedgerEntry         `json:"policies"`
+	Tasks                []TaskLedgerEntry           `json:"tasks"`
+}
+
+func contextLedgerReferenceForVersion(ledger ContextLedger, version uint32) (ContextLedgerReference, error) {
+	switch version {
+	case ContextLedgerVersion:
+		return ledger.Reference(), nil
+	case 1:
+		for _, checkpoint := range ledger.CheckpointReferences {
+			if checkpoint.Version != 1 {
+				return ContextLedgerReference{}, errors.New("Context Ledger contains a non-v1 Checkpoint reference")
+			}
+		}
+		constraints := make([]contextLedgerV1Constraint, len(ledger.Constraints))
+		for index, entry := range ledger.Constraints {
+			if entry.State != FactActive || len(entry.Sources) != 1 || len(entry.Supersedes) != 0 || entry.SupersededBy != "" {
+				return ContextLedgerReference{}, fmt.Errorf("Constraint Fact %q has no v1-compatible lifecycle", entry.ID)
+			}
+			constraints[index] = contextLedgerV1Constraint{
+				ID:          entry.ID,
+				Kind:        entry.Kind,
+				Text:        entry.Text,
+				ContentHash: entry.ContentHash,
+				Origin:      entry.Origin,
+				Sources:     append([]ContextLedgerEventRef(nil), entry.Sources[:1]...),
+			}
+		}
+		legacy := contextLedgerV1Snapshot{
+			Version:              1,
+			SessionID:            ledger.SessionID,
+			SessionRevision:      ledger.SessionRevision,
+			SourceEventCount:     ledger.SourceEventCount,
+			SourceHash:           ledger.SourceHash,
+			Sources:              ledger.Sources,
+			CheckpointReferences: ledger.CheckpointReferences,
+			Artifacts:            ledger.Artifacts,
+			Executions:           ledger.Executions,
+			Constraints:          constraints,
+			Policies:             ledger.Policies,
+			Tasks:                ledger.Tasks,
+		}
+		encoded, err := json.Marshal(legacy)
+		if err != nil {
+			return ContextLedgerReference{}, fmt.Errorf("encode Context Ledger v1 compatibility snapshot: %w", err)
+		}
+		return ContextLedgerReference{
+			Version:          1,
+			Digest:           contextLedgerJSONDigest(contextLedgerV1DigestDomain, json.RawMessage(encoded)),
+			SourceEventCount: ledger.SourceEventCount,
+			SourceHash:       ledger.SourceHash,
+			SessionRevision:  ledger.SessionRevision,
+		}, nil
+	default:
+		return ContextLedgerReference{}, fmt.Errorf("unsupported Context Ledger reference version %d", version)
+	}
 }
 
 func contextLedgerJSONDigest(domain string, value any) string {
@@ -1194,6 +1510,7 @@ func cloneContextLedgerPointer(ledger *ContextLedger) *ContextLedger {
 	cloned.Constraints = make([]ConstraintLedgerEntry, len(ledger.Constraints))
 	for index := range ledger.Constraints {
 		cloned.Constraints[index] = ledger.Constraints[index]
+		cloned.Constraints[index].Supersedes = append([]string(nil), ledger.Constraints[index].Supersedes...)
 		cloned.Constraints[index].Sources = append([]ContextLedgerEventRef(nil), ledger.Constraints[index].Sources...)
 	}
 	cloned.Policies = make([]PolicyLedgerEntry, len(ledger.Policies))

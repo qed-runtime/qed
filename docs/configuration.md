@@ -515,6 +515,12 @@ Event is the durable Session boundary. Steering that has not emitted that Event
 may be discarded by cancellation, deadline expiry, or terminal Run
 failure
 
+Fact lifecycle uses the same append-only boundary. Runtime moves an explicit
+input `Message.FactDirective` to `Event.FactDirective`; Session messages and
+Provider requests retain only the user text. Memory and JSONL Stores preserve
+the directive Event, so replay reconstructs the same active, superseded, and
+resolved Constraint Facts. The Ledger is derived and is not stored separately
+
 A follow-up is a new Run started with the same Session ID only after the
 previous handle reaches a terminal result. It replays the Session but receives
 a new Run ID and new Runtime-local Provider and Tool limits. Session Stores do

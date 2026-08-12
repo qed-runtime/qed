@@ -497,6 +497,74 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 	}
 }
 
+func TestSessionStoresReplayFactLifecycleDirectives(t *testing.T) {
+	t.Parallel()
+
+	stores := map[string]func(*testing.T) agent.SessionStore{
+		"memory": func(*testing.T) agent.SessionStore { return session.NewMemoryStore() },
+		"jsonl": func(t *testing.T) agent.SessionStore {
+			store, err := session.NewJSONLStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	for name, construct := range stores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			target, err := agent.ConstraintFactID(agent.ContextLedgerEventRef{RunID: "run-old", Sequence: 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			directive := &agent.FactLifecycleDirective{
+				Action: agent.FactLifecycleSupersede, Targets: []string{target},
+			}
+			events := []agent.Event{
+				{RunID: "run-old", Sequence: 1, Type: agent.EventRunStarted},
+				{RunID: "run-old", Sequence: 2, Type: agent.EventUserMessageAdded, Message: &agent.Message{Role: agent.RoleUser, Text: "old"}},
+				{RunID: "run-old", Sequence: 3, Type: agent.EventRunCompleted},
+				{RunID: "run-new", Sequence: 1, Type: agent.EventRunStarted},
+				{
+					RunID: "run-new", Sequence: 2, Type: agent.EventUserMessageAdded,
+					Message: &agent.Message{Role: agent.RoleUser, Text: "new"}, FactDirective: directive,
+				},
+				{RunID: "run-new", Sequence: 3, Type: agent.EventRunCompleted},
+			}
+			store := construct(t)
+			if _, err := store.Append(context.Background(), "fact-replay", 0, events); err != nil {
+				t.Fatal(err)
+			}
+			directive.Targets[0] = "constraint_" + strings.Repeat("f", 64)
+			snapshot, err := store.Load(context.Background(), "fact-replay")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshot.Messages) != 2 || snapshot.Messages[1].FactDirective != nil ||
+				len(snapshot.Events) != len(events) || snapshot.Events[4].FactDirective == nil ||
+				snapshot.Events[4].FactDirective.Targets[0] != target {
+				t.Fatalf("Session Snapshot = %#v", snapshot)
+			}
+			ledger, err := agent.BuildContextLedger(context.Background(), snapshot.Events)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ledger.Constraints) != 2 || ledger.Constraints[0].State != agent.FactSuperseded ||
+				ledger.Constraints[1].State != agent.FactActive {
+				t.Fatalf("Context Ledger = %#v", ledger.Constraints)
+			}
+			snapshot.Events[4].FactDirective.Targets[0] = "constraint_" + strings.Repeat("e", 64)
+			reloaded, err := store.Load(context.Background(), "fact-replay")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.Events[4].FactDirective.Targets[0] != target {
+				t.Fatal("loaded Fact lifecycle target aliased Session Store state")
+			}
+		})
+	}
+}
+
 func TestJSONLStoreUsesDeltaPrefixManifestRecords(t *testing.T) {
 	t.Parallel()
 

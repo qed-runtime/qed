@@ -21,8 +21,8 @@ executable today
 - non-overwriting Go Extension scaffolds with lifecycle contract tests
 - fork-free, application-owned `extensions.lock` catalogs with live manifest validation
 - host-owned Evidence Bundles
-- deterministic Artifact, Execution, Constraint, Policy, and Task Ledgers
-  rebuilt from ordered Session Events
+- deterministic Artifact, Execution, Constraint, Policy, and Task Ledgers with
+  explicit Fact lifecycle, rebuilt from ordered Session Events
 - Evidence-preserving Context compression, Prefix Manifests, prompt-cache Plans,
   and normalized cache Usage
 - Nagi-based CLI and multi-turn TUI
@@ -299,6 +299,13 @@ Session state. Cancellation, deadline expiry, or terminal Run failure may
 discard steering that has not reached that Event. Follow-ups get a new Run ID
 and local limits; without a Session Store the caller must provide prior context
 itself. Reuse the same `*agent.Budget` explicitly when limits must span Runs
+
+Hosts can attach `FactLifecycleDirective` to a user Message to supersede or
+resolve earlier active Constraint Fact IDs. Runtime moves the directive to the
+committed `user.message.added` Event, keeps it out of Provider conversation
+history, and deterministically rebuilds active, superseded, and resolved state
+without interpreting natural language. See
+[Context and caching](docs/context-caching.md) for the lifecycle contract
 
 The experimental TUI maps Enter to active-Run steering and, after the current
 Run reaches its terminal result, to a follow-up Run. A configured `--session-id`

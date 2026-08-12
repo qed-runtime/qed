@@ -145,6 +145,38 @@ terminal `RunResult.ContextLedger`は受理済みEvent履歴から作るdetermin
 Constraint entryが正確なuser textを保持するためLedgerはcontent-bearingであり、Session Eventと同等に保護して保存および転送する必要があります
 custom Context Compilerは`ContextCompileRequest.Ledger`から進行中Ledgerのisolated copyを受け取ります
 
+Constraint Factは自然言語推論ではなく明示的なlifecycle controlを使います
+directiveがないuser Messageはactive Factを作ります
+後続Runで置換または解決する場合は`ContextLedger.Constraints`のIDを使うか、source Eventから`agent.ConstraintFactID`でIDを生成します
+
+```go
+targetID := previous.ContextLedger.Constraints[0].ID
+
+handle, err := runtime.Run(ctx, agent.RunRequest{
+    SessionID: previous.SessionID,
+    Input: []agent.Message{{
+        Role: agent.RoleUser,
+        Text: "Use PostgreSQL instead",
+        FactDirective: &agent.FactLifecycleDirective{
+            Action:  agent.FactLifecycleSupersede,
+            Targets: []string{targetID},
+        },
+    }},
+})
+```
+
+`supersede`は指定した全active targetを失効させ、現在のMessageから1つのactive Factを作ります
+`resolve`はtargetを解決済みにし、解決を伝えるMessageからFactを作りません
+targetは過去の一意なactive Factである必要があり、`agent.MaxFactLifecycleTargets`を上限とします
+shapeが不正な場合は`agent.ErrInvalidFactDirective`を返し、`Steer`は`agent.ErrInvalidSteeringMessage`にも分類します
+RuntimeはHookと永続化より前に現在のEvent prefixでtarget stateを検証し、安全なsteering境界でactiveではなくなったtargetはEventをcommitせずRunを失敗させます
+
+Runtimeはinputの`Message.FactDirective`を`Event.FactDirective`へ移します
+保存MessageとProvider向けMessageにhost lifecycle metadataは残りません
+publish済み`user.message.added` Eventがtransitionのcommit pointです
+
+target IDはsource Eventを識別するため、RunをまたぐtransitionにはSession Storeが必要であり、過去Messageだけのreplayではidentityを維持できません
+
 別requestやworkerがhandleを保持する場合、Eventを独立してstreamする場合、後からRunをresumeする場合は`Host.Start`を利用します
 `Start`のcallerがEvent drainと`Wait`を所有し、完了後に`Host.SaveRunEvidence`を呼べます
 
@@ -177,13 +209,16 @@ follow-upはEventをdrainして`Wait`を呼んだ後、設定済みSession Store
 follow-upは永続Sessionをreplayしつつ新しいRun IDとRuntime local上限を持ちます
 Session Storeがない場合はcallerが過去contextを渡し、両方のRunで1つの共有上限が必要な場合だけ同じ`*agent.Budget`を明示的に再利用します
 
-互換性に関する注意として、steeringはEvent JSONへ任意fieldの`user_message_origin`を追加し、既存の`user.message.added` Hookもsteering Messageを観測します
-外部decoderはこの任意fieldを受理する必要があります
-Goの`agent.Event` structにはexported fieldが増えるため、外部のcomposite literalはfield名を指定してください
+互換性に関する注意として、steeringはEvent JSONへ任意fieldの`user_message_origin`、Fact lifecycleは任意fieldの`fact_directive`を追加します
+既存の`user.message.added` HookもこれらのEventを観測します
+外部decoderは任意fieldを受理する必要があります
+Goの`agent.Message`と`agent.Event` structにはexported fieldが増え、Ledger v2は`agent.ConstraintLedgerEntry`を拡張するため、外部のcomposite literalはfield名を指定してください
 
 Deterministic LedgerによりTool resultへ任意の`policy` metadata、terminal Run resultへ`context_ledger`、新しいCheckpointへ`ledger`参照が追加されます
 host Policyのraw reasonは含めず、Policy metadataをmodel向けTool Messageへコピーしません
 strictな外部JSON decoderはこれらの追加fieldを受理する必要があります
+Ledger schema v2はFact stateとtransition provenanceを追加し、replayではLedger v1が作成したCheckpoint参照も引き続き検証します
+`ValidateContextLedger`は現在schemaと比較するため、standaloneなv1 Ledger snapshotは検証前にEventから再構築する必要があります
 
 shutdown時は新規workの受付を停止し、active Runをcancelまたは完了させてから`Host.CloseContext`で所有する全Extension processをdrainして停止します
 

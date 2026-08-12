@@ -159,7 +159,10 @@ Store failure because Extension RPC and Store append are not one transaction
 Active-Run steering retains the `user.message.added` Event type and sets the
 optional `user_message_origin` field to `steering`. A Hook subscribed to that
 type receives both Run input and steering Messages, so strict protocol decoders
-must include the optional field
+must include the optional field. Explicit Fact lifecycle transitions use the
+same Event type and add optional `fact_directive` metadata after Runtime has
+validated the target Event prefix. The nested Message does not retain that
+host-only directive
 
 ### Commands
 

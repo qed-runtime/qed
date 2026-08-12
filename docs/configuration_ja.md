@@ -484,6 +484,11 @@ active Runのsteeringは既存の`user.message.added` Event typeを維持し、`
 queue受理はprocess localであり、このEventが永続Sessionへの反映境界です
 cancel、Deadline切れ、terminal Run failureでは、Event未発行のsteeringを破棄する場合があります
 
+Fact lifecycleも同じappend-only境界を使います
+Runtimeは明示的なinput `Message.FactDirective`を`Event.FactDirective`へ移し、Session messageとProvider requestにはuser textだけを残します
+MemoryとJSONL Storeはdirective Eventを保持するため、replayで同じactive、superseded、resolved Constraint Factを再構築します
+Ledgerはderived stateであり別に保存しません
+
 follow-upは前のhandleがterminal resultへ達した後、同じSession IDで開始する新しいRunです
 Sessionをreplayしますが、新しいRun IDとRuntime localのProvider、Tool上限を持ちます
 Session Storeは`agent.Budget`を永続化しないため、複数follow-up Runで1つのbudgetを使う場合だけ同じ`*agent.Budget`を明示的に再利用します
