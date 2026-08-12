@@ -533,9 +533,15 @@ qed evidence inspect <run-id> --store .qed/evidence
 qed evidence export <run-id> --store .qed/evidence
 qed evidence fetch sha256:<digest> --store .qed/evidence
 qed cache status [run-id] --store .qed/evidence
+qed context inspect <run-id> --store .qed/evidence
+qed context explain RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
+qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
 ```
 
 `qed cache status`はRun ID省略時に最新Bundleを選び、effective Plan、normalized cache Usage、任意のforecastとUsage cost estimate、最初のPrefix divergence、最新compaction recordを表示します
+
+Context commandは同じ保存済みpublic Eventから本文を含まないtimeline、集計metrics、before-to-after変更を導出します
+message、path、command、Evidence object digest、object contentは出力しません
 
 ## Extension State Store
 

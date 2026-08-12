@@ -69,6 +69,14 @@ validated previous Checkpoint plus raw tail when it fits, records the rollback
 before the next model request, or stops before Provider I/O. Event replay checks
 the report counts, candidate generation, and rollback transition
 
+`agent.BuildContextReport` projects the persisted public Event stream into a
+content-free timeline and aggregate metrics. The projection keeps stable reason
+codes, byte and item counts, ratios, generations, and validation outcomes, but
+does not copy messages, paths, commands, object digests, or object content.
+`ContextReport.Snapshot` selects an exact Run Event sequence and
+`agent.DiffContextSnapshots` compares two projections, which lets the CLI and
+embedded hosts share the same observability contract
+
 `agent.ToolResult.ContextOperation` carries a validated, content-free
 classification for mutation, verification, commit, or subagent work. It never
 enters the model-facing Tool Message and does not grant authority or prove a

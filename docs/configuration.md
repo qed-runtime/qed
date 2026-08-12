@@ -574,11 +574,18 @@ qed evidence inspect <run-id> --store .qed/evidence
 qed evidence export <run-id> --store .qed/evidence
 qed evidence fetch sha256:<digest> --store .qed/evidence
 qed cache status [run-id] --store .qed/evidence
+qed context inspect <run-id> --store .qed/evidence
+qed context explain RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
+qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
 ```
 
 `qed cache status` defaults to the newest Bundle and reports the effective
 Plan, normalized cache Usage, optional forecast and usage-cost estimate, first
 Prefix divergence, and latest compaction record
+
+The Context commands derive content-free timelines, aggregate metrics, and
+before-to-after changes from the same stored public Events. They do not print
+messages, paths, commands, Evidence object digests, or object content
 
 ## Extension State Store
 

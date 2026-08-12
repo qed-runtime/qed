@@ -205,6 +205,44 @@ Eventsを省略するdirect callerは従来のTool Callとresultだけを保護�
 `ToolResult.ContextOperation`は`mutation`、`verification`、`commit`、`subagent`のhost-only metadataです
 authorizationやoperation成功の証明ではなくcut分類であり、未知のkindはTool境界で拒否します
 
+## 本文を含まないContext report
+
+設定済みRunはpublic `context.compacted` EventをEvidence Bundleへ保存します
+QEDはembedding hostと同じexported read modelでEventをprojectします
+
+```sh
+qed context inspect <run-id> --store .qed/evidence
+qed context explain RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
+qed context diff \
+  --before RUN_ID[@EVENT_SEQUENCE] \
+  --after RUN_ID[@EVENT_SEQUENCE] \
+  --store .qed/evidence
+```
+
+3つのcommandはすべて`--output text|json`に対応します
+`inspect`はRun内のContext timeline全体とpublish済みCheckpoint generation数、full Rebase数、rollback数、custom strategy fallback数、validation failure数、externalized object、validation preservation countの集計を表示します
+compression ratioはcompiled byte総数をoriginal byte総数で割った値です
+preservation rateはaggregate preserved countをaggregate required countで割った値で、required itemが0件ならunavailableのままです
+
+`explain`は既定で最新Context Eventを選びます
+正確なRun Event sequenceを追加すると過去の判断を選択できます
+`diff`も両側で同じselectorを使います
+失敗candidateはrollback後に同じcandidate generationを再試行できるため、selector identityにはEvent sequenceを使います
+selectorは同じSessionのterminal follow-upを含む異なるRun Bundleも参照できます
+
+projectionはstable reasonとfailure code、byteとitem count、ratio、generation番号、validation outcomeを含みます
+message、path、command、object digest、object contentはcopyしません
+このcontent-free出力はEvidence Bundleのsecurity境界を変えず、Bundle内のpublic Eventは通常のmessageとTool payloadを引き続き含む場合があります
+QEDのstable allowlistにないcompaction reasonとfallback labelは`unrecognized`へ変換します
+
+candidate validation reportがないEventはunreported validation countとして表示されます
+対象にはdeterministic validation以前のEventと現在のEvidence-only compaction Eventの両方が含まれます
+選択Bundleが以前のRunから継承したgenerationを確定できない場合もunavailableとして表示します
+現在のpublic Event schemaはretrievalを記録しないため、compaction後のmodel rereadは0ではなくunavailableとして表示します
+Stage 4のretrieval auditによりvalidation時のobject checkから推測せず、このmetricを記録できるようになります
+
+embedding hostは`agent.BuildContextReport`で同じJSON互換構造を構築し、`ContextReport.Snapshot`で選択し、`agent.DiffContextSnapshots`で比較できます
+
 `max_input_bytes`はProvider-neutralなcanonical byte上限であり、tokenizerやmodelの公開context windowではありません
 選択modelに対して安全側に調整してください
 cache planningのtoken estimateだけはcanonical byteを4で割った決定的な近似を使い、実行後はProvider Usageを正とします

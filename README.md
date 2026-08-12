@@ -28,6 +28,7 @@ executable today
 - Evidence-preserving Context compression with approval, subagent,
   edit-verification, commit, and Tool-transaction safe cuts, deterministic
   preservation reports, and pre-Provider rollback
+- content-free Context inspect, explain, diff, and aggregate quality metrics
 - Prefix Manifests, prompt-cache Plans, and normalized cache Usage
 - Nagi-based CLI and multi-turn TUI
 - safe structured diagnostics propagated to the final Extension process
@@ -70,6 +71,7 @@ Evidence Stores also retain exact compacted context objects
 
 ```sh
 qed cache status --store .qed/evidence
+qed context inspect <run-id> --store .qed/evidence
 qed evidence fetch sha256:<digest> --store .qed/evidence
 ```
 
@@ -340,10 +342,14 @@ save a separate Evidence Bundle when an Evidence Store is configured
 ```sh
 go run ./cmd/qed run inspect <run-id> --store .qed/evidence
 go run ./cmd/qed run export <run-id> --store .qed/evidence
+go run ./cmd/qed context inspect <run-id> --store .qed/evidence
+go run ./cmd/qed context explain <run-id> --store .qed/evidence
 ```
 
 The equivalent `qed evidence inspect` and `qed evidence export` commands are
-also available
+also available. `qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after
+RUN_ID[@EVENT_SEQUENCE]` compares two compaction decisions without printing
+message, path, command, or Evidence object content
 
 ## Experimental TUI
 

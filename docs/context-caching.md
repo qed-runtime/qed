@@ -277,6 +277,55 @@ metadata with `mutation`, `verification`, `commit`, or `subagent` kind. It is a
 cut classification, not authorization or proof that an operation succeeded.
 Unknown kinds are rejected at the Tool boundary
 
+## Content-free Context reports
+
+Configured Runs store public `context.compacted` Events in their Evidence
+Bundles. QED projects those Events through the same exported read model used by
+embedding hosts
+
+```sh
+qed context inspect <run-id> --store .qed/evidence
+qed context explain RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
+qed context diff \
+  --before RUN_ID[@EVENT_SEQUENCE] \
+  --after RUN_ID[@EVENT_SEQUENCE] \
+  --store .qed/evidence
+```
+
+All three commands accept `--output text|json`. `inspect` reports the complete
+Context timeline for the Run and aggregates the number of published Checkpoint
+generations, full Rebases, rollbacks, custom-strategy fallbacks, validation failures,
+externalized objects, and validation preservation counts. Its compression
+ratio is the aggregate compiled byte total divided by the aggregate original
+byte total. Preservation rates are aggregate preserved counts divided by
+aggregate required counts and remain unavailable when no item was required
+
+`explain` selects the latest Context Event by default. Appending an exact Run
+Event sequence selects an earlier decision. `diff` uses the same selector for
+each side. Event sequence is the selector identity because a failed candidate
+may roll back and later retry the same candidate generation. Selectors may
+refer to different Run Bundles, including terminal follow-ups in one Session
+
+The projection includes stable reason and failure codes, byte and item counts,
+ratios, generation numbers, and validation outcomes. It does not copy messages,
+paths, commands, object digests, or object content. This content-free output
+does not change the Evidence Bundle security boundary: its public Events may
+still contain normal message and Tool payloads. Compaction reason and fallback
+labels outside QED's stable allowlist are projected as `unrecognized`
+
+Events without a candidate validation report remain visible with an unreported
+validation count. This includes both older Events and current Evidence-only
+compaction Events. A generation inherited from an earlier Run is also
+unavailable when the selected Bundle does not establish it. Post-compaction
+model rereads are reported as unavailable, not zero, because the current public
+Event schema does not record retrieval.
+Stage 4 retrieval auditing can populate that metric without guessing from
+validation-time object checks
+
+Embedding hosts can build the same JSON-compatible structures with
+`agent.BuildContextReport`, select with `ContextReport.Snapshot`, and compare
+with `agent.DiffContextSnapshots`
+
 `max_input_bytes` is a provider-neutral canonical byte limit, not a tokenizer or
 the model's advertised context window. It is deliberately deterministic but
 must be calibrated conservatively for the selected model. QED currently uses
