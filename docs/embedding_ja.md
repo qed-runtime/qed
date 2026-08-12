@@ -140,6 +140,11 @@ outcome, err := host.Run(request.Context(), agent.RunRequest{
 handler errorはRunをcancelします
 handlerはlow-level handleを受け取るため、process内のapproval Adapterからwaiting Runをresumeしたり、Event drainを止めずにsteeringをqueueしたりできます
 
+terminal `RunResult.ContextLedger`は受理済みEvent履歴から作るdeterministicな5 Ledger viewです
+`agent.BuildContextLedger`はordered Eventから同じviewを再構築し、`agent.ValidateContextLedger`はderived stateの改ざんを拒否します
+Constraint entryが正確なuser textを保持するためLedgerはcontent-bearingであり、Session Eventと同等に保護して保存および転送する必要があります
+custom Context Compilerは`ContextCompileRequest.Ledger`から進行中Ledgerのisolated copyを受け取ります
+
 別requestやworkerがhandleを保持する場合、Eventを独立してstreamする場合、後からRunをresumeする場合は`Host.Start`を利用します
 `Start`のcallerがEvent drainと`Wait`を所有し、完了後に`Host.SaveRunEvidence`を呼べます
 
@@ -175,6 +180,10 @@ Session Storeがない場合はcallerが過去contextを渡し、両方のRunで
 互換性に関する注意として、steeringはEvent JSONへ任意fieldの`user_message_origin`を追加し、既存の`user.message.added` Hookもsteering Messageを観測します
 外部decoderはこの任意fieldを受理する必要があります
 Goの`agent.Event` structにはexported fieldが増えるため、外部のcomposite literalはfield名を指定してください
+
+Deterministic LedgerによりTool resultへ任意の`policy` metadata、terminal Run resultへ`context_ledger`、新しいCheckpointへ`ledger`参照が追加されます
+host Policyのraw reasonは含めず、Policy metadataをmodel向けTool Messageへコピーしません
+strictな外部JSON decoderはこれらの追加fieldを受理する必要があります
 
 shutdown時は新規workの受付を停止し、active Runをcancelまたは完了させてから`Host.CloseContext`で所有する全Extension processをdrainして停止します
 

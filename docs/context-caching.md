@@ -6,7 +6,9 @@ content-free Prefix observability, an optional semantic Checkpoint, and a
 Provider-neutral Cache Plan
 
 ```text
-immutable Session messages + Run input + pinned Tools
+immutable Session Events + Run input + pinned Tools
+  -> Deterministic Ledgers
+     -> Artifact + Execution + Constraint + Policy + Task
   -> Context Compiler
      -> canonical ModelRequest
      -> optional Checkpoint + recent raw tail
@@ -54,6 +56,53 @@ A terminal follow-up is a new Run whose configured same-Session replay supplies
 the previous append-only messages. Its new input becomes another raw tail
 Segment; no previous Segment is rewritten. Without a Session Store, the caller
 must provide prior context explicitly
+
+## Deterministic Ledgers
+
+Before each Context Compiler call, Runtime rebuilds `agent.ContextLedger` from
+the complete ordered Event prefix. The terminal `agent.RunResult` contains the
+Ledger after the terminal Event. A custom Compiler receives an isolated copy in
+`ContextCompileRequest.Ledger`; changing it cannot alter Runtime state
+
+The v1 Reducer produces five typed ledgers without calling a model or reading a
+live workspace
+
+| Ledger | Runtime-observable contents |
+| --- | --- |
+| Artifact | exact digests of Tool output and externalized Evidence Objects |
+| Execution | Provider attempts and Tool calls with pending, succeeded, failed, or canceled state |
+| Constraint | exact user input retained as uninterpreted data, including steering origin |
+| Policy | host Tool authorization metadata and human approval decisions |
+| Task | each Run's latest running, waiting, completed, failed, or canceled state |
+
+`BuildContextLedger` treats Event order as authoritative, verifies contiguous
+Session revisions and per-Run sequences, pairs Provider and Tool transactions,
+and creates domain-separated source and snapshot digests. It preserves the
+exact byte identity of malformed Tool JSON without trying to execute or repair
+it. `ValidateContextLedger` rebuilds the snapshot and rejects changed derived
+state
+
+The Ledger is derived state and is not stored as a second source of truth
+Memory and JSONL Session Stores replay the same Events into the same digest
+New Checkpoints contain a content-free `ContextLedgerReference`; replay of the
+subsequent `context.compacted` Event verifies that reference against the exact
+preceding Event prefix
+
+Constraint entries are not yet claims that every user message remains active
+Fact lifecycle will add active, superseded, and resolved relationships in the
+next stage. Artifact entries do not yet represent current file or Git state
+Current World State will obtain those facts from their canonical sources
+
+For compatibility, Runtime emits one `user.message.added` Event for every
+`RunRequest.Input` entry, including caller-supplied assistant or Tool history
+The Reducer retains all of those Events as sources but creates Constraint
+entries only for Messages whose role is `user`. Steering remains restricted to
+plain, non-empty user Messages
+
+Ledgers are content-bearing private data because Constraint entries retain user
+text. Tool arguments, Tool output, terminal errors, and Policy reasons are kept
+as digests inside the corresponding entries, while their source Events remain
+subject to the Session and Evidence storage policy
 
 ## Evidence-preserving compression
 
@@ -195,8 +244,11 @@ reported a complete breakdown. Per-message Usage keeps each individual result
 
 ## Current limits
 
-- Checkpoints contain a deterministic compact semantic model, not full domain
-  ledgers or model-based semantic verification
+- deterministic Ledgers cover Runtime-observable state, but Fact lifecycle,
+  canonical workspace reconstruction, and model-based semantic verification do
+  not exist yet
+- Runtime currently rebuilds a Ledger from the complete Event prefix before
+  every Compiler call; no incremental reducer index exists yet
 - no tokenizer-backed context limit or predictive output reserve exists
 - Evidence retrieval is CLI/API based and is not automatically exposed as a
   model Tool

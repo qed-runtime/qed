@@ -90,6 +90,15 @@ func (proxy *ToolProxy) Execute(ctx context.Context, call agent.ToolCall) (resul
 	var err error
 	decision := capability.Decision{}
 	defer func() {
+		if decision.Outcome != "" {
+			result.Policy = &agent.ToolPolicyDecision{
+				Outcome:      string(decision.Outcome),
+				Capabilities: namesAsStrings(capabilities),
+			}
+			if decision.Reason != "" {
+				result.Policy.ReasonDigest = digest([]byte(decision.Reason))
+			}
+		}
 		invocation := evidence.ToolInvocation{
 			CallID:              call.ID,
 			Tool:                call.Name,

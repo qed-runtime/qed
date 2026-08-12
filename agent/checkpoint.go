@@ -65,6 +65,8 @@ type ContextCheckpoint struct {
 	SourceMessageCount int `json:"source_message_count"`
 	// SourceHash identifies the exact ordered raw message prefix
 	SourceHash string `json:"source_hash"`
+	// Ledger references the deterministic Event-derived state observed at creation
+	Ledger *ContextLedgerReference `json:"ledger,omitempty"`
 	// Goal contains the latest compacted user request when available
 	Goal *CheckpointFact `json:"goal,omitempty"`
 	// Facts contain recent compacted user statements in source order
@@ -125,6 +127,8 @@ type CheckpointRequest struct {
 	SessionRevision uint64
 	// SourceHash identifies Messages
 	SourceHash string
+	// Ledger contains deterministic Event-derived state observed during compilation
+	Ledger *ContextLedger
 	// Evidence references exact raw messages and externalized content
 	Evidence []EvidenceObjectRef
 	// MaxBytes bounds the encoded candidate
@@ -171,6 +175,10 @@ func (DeterministicCheckpointStrategy) BuildCheckpoint(
 		SourceMessageCount: len(request.Messages),
 		SourceHash:         request.SourceHash,
 		Evidence:           uniqueEvidenceRefs(request.Evidence),
+	}
+	if request.Ledger != nil {
+		reference := request.Ledger.Reference()
+		checkpoint.Ledger = &reference
 	}
 	for index, message := range request.Messages {
 		digest, err := checkpointMessageHash(message)
@@ -273,7 +281,7 @@ func (compiler *CompactingContextCompiler) Compile(
 	}
 	originalBytes := contextSegmentBytes(originalSegments)
 	if request.Checkpoint != nil {
-		if err := validateCheckpoint(*request.Checkpoint, canonical.Messages, compiler.policy.CheckpointMaxBytes); err != nil {
+		if err := validateCheckpoint(*request.Checkpoint, canonical.Messages, request.Ledger, compiler.policy.CheckpointMaxBytes); err != nil {
 			return CompiledContext{}, fmt.Errorf("validate active Context Checkpoint: %w", err)
 		}
 		if err := compiler.validateCheckpointEvidence(ctx, *request.Checkpoint, canonical.Messages); err != nil {
@@ -396,6 +404,7 @@ func (compiler *CompactingContextCompiler) buildCheckpoint(
 		Messages:        source,
 		SessionRevision: request.SessionRevision,
 		SourceHash:      checkpointSourceHash(source),
+		Ledger:          cloneContextLedgerPointer(request.Ledger),
 		Evidence:        uniqueEvidenceRefs(evidence),
 		MaxBytes:        compiler.policy.CheckpointMaxBytes,
 	}
@@ -404,7 +413,7 @@ func (compiler *CompactingContextCompiler) buildCheckpoint(
 		expectedGeneration = request.Checkpoint.Generation + 1
 	}
 	validateCandidate := func(checkpoint ContextCheckpoint) error {
-		if err := validateCheckpoint(checkpoint, messages, compiler.policy.CheckpointMaxBytes); err != nil {
+		if err := validateCheckpoint(checkpoint, messages, request.Ledger, compiler.policy.CheckpointMaxBytes); err != nil {
 			return err
 		}
 		if checkpoint.Generation != expectedGeneration {
@@ -420,6 +429,10 @@ func (compiler *CompactingContextCompiler) buildCheckpoint(
 		return compiler.validateCheckpointEvidence(ctx, checkpoint, messages)
 	}
 	checkpoint, err := compiler.strategy.BuildCheckpoint(ctx, checkpointRequest)
+	if err == nil && request.Ledger != nil {
+		reference := request.Ledger.Reference()
+		checkpoint.Ledger = &reference
+	}
 	fallback := ""
 	if err != nil {
 		fallback = "checkpoint_strategy_build_failed"
@@ -428,6 +441,10 @@ func (compiler *CompactingContextCompiler) buildCheckpoint(
 	}
 	if err != nil {
 		checkpoint, err = compiler.fallback.BuildCheckpoint(ctx, checkpointRequest)
+		if err == nil && request.Ledger != nil {
+			reference := request.Ledger.Reference()
+			checkpoint.Ledger = &reference
+		}
 		if err == nil {
 			err = validateCandidate(checkpoint)
 		}
@@ -537,7 +554,7 @@ func normalizeCompressionPolicy(policy ContextCompressionPolicy) (ContextCompres
 	return policy, nil
 }
 
-func validateCheckpoint(checkpoint ContextCheckpoint, messages []Message, maxBytes int) error {
+func validateCheckpoint(checkpoint ContextCheckpoint, messages []Message, ledger *ContextLedger, maxBytes int) error {
 	if checkpoint.Version != contextCheckpointVersion {
 		return fmt.Errorf("Checkpoint version = %d, want %d", checkpoint.Version, contextCheckpointVersion)
 	}
@@ -550,6 +567,11 @@ func validateCheckpoint(checkpoint ContextCheckpoint, messages []Message, maxByt
 	wantHash := checkpointSourceHash(messages[:checkpoint.SourceMessageCount])
 	if checkpoint.SourceHash != wantHash {
 		return errors.New("Checkpoint source hash does not match raw Session messages")
+	}
+	if checkpoint.Ledger != nil {
+		if err := validateContextLedgerReference(*checkpoint.Ledger, ledger); err != nil {
+			return fmt.Errorf("Checkpoint Context Ledger reference: %w", err)
+		}
 	}
 	if len(checkpoint.Evidence) == 0 {
 		return errors.New("Checkpoint requires exact source Evidence")
@@ -853,6 +875,10 @@ func cloneContextCheckpointPointer(checkpoint *ContextCheckpoint) *ContextCheckp
 		return nil
 	}
 	cloned := *checkpoint
+	if checkpoint.Ledger != nil {
+		ledger := *checkpoint.Ledger
+		cloned.Ledger = &ledger
+	}
 	if checkpoint.Goal != nil {
 		goal := *checkpoint.Goal
 		cloned.Goal = &goal

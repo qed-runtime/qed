@@ -153,6 +153,14 @@ the Run. The handler receives the low-level handle so an in-process approval
 adapter can resume a waiting Run or queue steering without blocking Event
 drain
 
+The terminal `RunResult.ContextLedger` is the deterministic five-Ledger view of
+the accepted Event history. `agent.BuildContextLedger` rebuilds the same view
+from ordered Events, while `agent.ValidateContextLedger` rejects changed
+derived state. The Ledger is content-bearing because its Constraint entries
+retain exact user text; store and transmit it with the same protection as
+Session Events. A custom Context Compiler receives an isolated in-progress copy
+through `ContextCompileRequest.Ledger`
+
 Use `Host.Start` instead when another request or worker must retain the handle,
 stream Events independently, or resume the Run later. A `Start` caller owns
 Event draining and `Wait`, and may call `Host.SaveRunEvidence` after completion
@@ -201,6 +209,12 @@ Event JSON, and existing Hooks subscribed to `user.message.added` also observe
 steering Messages. External decoders must accept that optional field. The Go
 `agent.Event` struct gained an exported field, so external composite literals
 should use field names
+
+Deterministic Ledgers add optional `policy` metadata to Tool results,
+`context_ledger` to terminal Run results, and `ledger` references to new
+Checkpoints. The raw host Policy reason is not included, and Policy metadata is
+not copied into the model-facing Tool Message. Strict external JSON decoders
+must accept these additive fields
 
 At shutdown, stop accepting new work, cancel or finish active Runs, and then
 call `Host.CloseContext` to drain and stop every owned Extension process

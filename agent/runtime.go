@@ -419,6 +419,7 @@ func (runtime *Runtime) execute(
 	defer releaseSession()
 	messages := loaded.messages
 	sessionRevision := loaded.revision
+	ledgerEvents := cloneEvents(loaded.events)
 	activeCheckpoint := cloneContextCheckpointPointer(loaded.checkpoint)
 	knownEvidence := make(map[string]struct{}, len(loaded.evidenceObjects))
 	for _, reference := range loaded.evidenceObjects {
@@ -501,6 +502,7 @@ func (runtime *Runtime) execute(
 			event.SessionRevision = revision
 		}
 		sequence = event.Sequence
+		ledgerEvents = append(ledgerEvents, cloneEvent(event))
 		handle.events <- cloneEvent(event)
 		runtime.debug("run.event.emitted",
 			"run_id", runID,
@@ -577,6 +579,16 @@ func (runtime *Runtime) execute(
 			event.Error = runErr.Error()
 			handle.events <- cloneEvent(event)
 		}
+		finalLedger, ledgerErr := BuildContextLedger(context.WithoutCancel(ctx), ledgerEvents)
+		var terminalLedger *ContextLedger
+		if ledgerErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("build terminal Context Ledger: %w", ledgerErr))
+			if status == RunStatusCompleted {
+				status = RunStatusFailed
+			}
+		} else {
+			terminalLedger = &finalLedger
+		}
 		release()
 		var budgetSnapshot *BudgetSnapshot
 		if request.Budget != nil {
@@ -606,6 +618,7 @@ func (runtime *Runtime) execute(
 			Budget:            budgetSnapshot,
 			SessionRevision:   sessionRevision,
 			ContextCheckpoint: cloneContextCheckpointPointer(activeCheckpoint),
+			ContextLedger:     cloneContextLedgerPointer(terminalLedger),
 			ContextCompaction: cloneContextCompactionReport(latestCompaction),
 			CachePlan:         cloneCachePlanPointer(latestCachePlan),
 		}, runErr)
@@ -697,12 +710,18 @@ func (runtime *Runtime) execute(
 			Tools:        cloneToolDefinitions(toolSet.definitions),
 		}
 		compileStartedAt := time.Now()
+		activeLedger, err := BuildContextLedger(ctx, ledgerEvents)
+		if err != nil {
+			fail(fmt.Errorf("build Context Ledger: %w", err))
+			return
+		}
 		compiled, manifest, err := runtime.compileContext(
 			ctx,
 			runID,
 			modelRequest,
 			sessionRevision,
 			activeCheckpoint,
+			&activeLedger,
 		)
 		if err != nil {
 			runtime.debug("context.compile.failed",
@@ -1060,6 +1079,7 @@ func (runtime *Runtime) compileContext(
 	request ModelRequest,
 	sessionRevision uint64,
 	checkpoint *ContextCheckpoint,
+	ledger *ContextLedger,
 ) (CompiledContext, PrefixManifest, error) {
 	model := ""
 	if provider, ok := runtime.provider.(ModelIDProvider); ok {
@@ -1071,6 +1091,7 @@ func (runtime *Runtime) compileContext(
 		ModelRequest:    cloneModelRequest(request),
 		SessionRevision: sessionRevision,
 		Checkpoint:      cloneContextCheckpointPointer(checkpoint),
+		Ledger:          cloneContextLedgerPointer(ledger),
 	})
 	if err != nil {
 		return CompiledContext{}, PrefixManifest{}, err
@@ -1250,6 +1271,7 @@ func errorType(err error) string {
 
 type loadedSession struct {
 	messages        []Message
+	events          []Event
 	revision        uint64
 	checkpoint      *ContextCheckpoint
 	evidenceObjects []EvidenceObjectRef
@@ -1291,6 +1313,7 @@ func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (lo
 		tool := cloneToolCall(*snapshot.PendingTool)
 		return loadedSession{
 			messages:        cloneMessages(snapshot.Messages),
+			events:          cloneEvents(snapshot.Events),
 			revision:        snapshot.Revision,
 			checkpoint:      cloneContextCheckpointPointer(snapshot.Checkpoint),
 			evidenceObjects: append([]EvidenceObjectRef(nil), snapshot.EvidenceObjects...),
@@ -1306,6 +1329,7 @@ func (runtime *Runtime) loadSession(ctx context.Context, request RunRequest) (lo
 	messages = append(messages, cloneMessages(request.Input)...)
 	return loadedSession{
 		messages:        messages,
+		events:          cloneEvents(snapshot.Events),
 		revision:        snapshot.Revision,
 		checkpoint:      cloneContextCheckpointPointer(snapshot.Checkpoint),
 		evidenceObjects: append([]EvidenceObjectRef(nil), snapshot.EvidenceObjects...),
@@ -1366,6 +1390,7 @@ func (runtime *Runtime) executeTool(ctx context.Context, toolSet runtimeToolSet,
 
 	call.Arguments = arguments
 	toolResult, err := tool.Execute(ctx, call)
+	result.Policy = cloneToolPolicyDecision(toolResult.Policy)
 	if err != nil {
 		result.Output = err.Error()
 		result.IsError = true
@@ -1578,7 +1603,21 @@ func cloneToolResults(results []ToolResult) []ToolResult {
 	if results == nil {
 		return nil
 	}
-	return append([]ToolResult(nil), results...)
+	cloned := make([]ToolResult, len(results))
+	for index := range results {
+		cloned[index] = results[index]
+		cloned[index].Policy = cloneToolPolicyDecision(results[index].Policy)
+	}
+	return cloned
+}
+
+func cloneToolPolicyDecision(decision *ToolPolicyDecision) *ToolPolicyDecision {
+	if decision == nil {
+		return nil
+	}
+	cloned := *decision
+	cloned.Capabilities = append([]string(nil), decision.Capabilities...)
+	return &cloned
 }
 
 func cloneEvent(event Event) Event {
@@ -1611,6 +1650,7 @@ func cloneEvent(event Event) Event {
 	}
 	if event.ToolResult != nil {
 		result := *event.ToolResult
+		result.Policy = cloneToolPolicyDecision(event.ToolResult.Policy)
 		event.ToolResult = &result
 	}
 	if event.WaitRequest != nil {
@@ -1625,6 +1665,17 @@ func cloneEvent(event Event) Event {
 	return event
 }
 
+func cloneEvents(events []Event) []Event {
+	if events == nil {
+		return nil
+	}
+	cloned := make([]Event, len(events))
+	for index := range events {
+		cloned[index] = cloneEvent(events[index])
+	}
+	return cloned
+}
+
 func cloneRunResult(result RunResult) RunResult {
 	result.Messages = cloneMessages(result.Messages)
 	result.ToolResults = cloneToolResults(result.ToolResults)
@@ -1633,6 +1684,7 @@ func cloneRunResult(result RunResult) RunResult {
 		result.Budget = &budget
 	}
 	result.ContextCheckpoint = cloneContextCheckpointPointer(result.ContextCheckpoint)
+	result.ContextLedger = cloneContextLedgerPointer(result.ContextLedger)
 	result.ContextCompaction = cloneContextCompactionReport(result.ContextCompaction)
 	result.CachePlan = cloneCachePlanPointer(result.CachePlan)
 	return result

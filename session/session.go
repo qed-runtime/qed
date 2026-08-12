@@ -517,6 +517,11 @@ func cloneEvent(event agent.Event) agent.Event {
 	}
 	if event.ToolResult != nil {
 		result := *event.ToolResult
+		if event.ToolResult.Policy != nil {
+			policy := *event.ToolResult.Policy
+			policy.Capabilities = append([]string(nil), event.ToolResult.Policy.Capabilities...)
+			result.Policy = &policy
+		}
 		event.ToolResult = &result
 	}
 	if event.WaitRequest != nil {
@@ -580,6 +585,10 @@ func cloneContextCheckpoint(checkpoint *agent.ContextCheckpoint) *agent.ContextC
 		return nil
 	}
 	cloned := *checkpoint
+	if checkpoint.Ledger != nil {
+		ledger := *checkpoint.Ledger
+		cloned.Ledger = &ledger
+	}
 	if checkpoint.Goal != nil {
 		goal := *checkpoint.Goal
 		cloned.Goal = &goal

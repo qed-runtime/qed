@@ -141,6 +141,8 @@ type ContextCompileRequest struct {
 	SessionRevision uint64
 	// Checkpoint is the latest validated Checkpoint for this Session
 	Checkpoint *ContextCheckpoint
+	// Ledger is the deterministic state reconstructed from ordered Run Events
+	Ledger *ContextLedger
 }
 
 // CompiledContext contains a canonical model request and its logical Segments

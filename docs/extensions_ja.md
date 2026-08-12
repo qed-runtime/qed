@@ -122,6 +122,9 @@ custom host validatorはprocess-localであり、process分離Extensionは自身
 
 Tool definitionはRuntimeへ入る前にExtension IDとgeneration metadataを受け取ります
 Evidenceはそのoriginとargumentおよびoutputのhashを記録します
+Host proxyは最終authorization outcome、sort済みcapability name、Policy reasonのdigestも`ToolResult.Policy`へ追加します
+raw reasonはpublic Eventへ入れず、Runtimeはこのmetadataをmodel向けTool Messageへコピーしません
+これによりSession replayは別のmutable state storeを信頼せずPolicy Ledgerを再構築できます
 
 ### Hook
 

@@ -21,6 +21,8 @@ executable today
 - non-overwriting Go Extension scaffolds with lifecycle contract tests
 - fork-free, application-owned `extensions.lock` catalogs with live manifest validation
 - host-owned Evidence Bundles
+- deterministic Artifact, Execution, Constraint, Policy, and Task Ledgers
+  rebuilt from ordered Session Events
 - Evidence-preserving Context compression, Prefix Manifests, prompt-cache Plans,
   and normalized cache Usage
 - Nagi-based CLI and multi-turn TUI

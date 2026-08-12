@@ -4,7 +4,9 @@ QEDは永続Session messageをimmutableな正本として扱い、Provider call�
 同じcompile処理から本文を含まないPrefix observability、任意のsemantic Checkpoint、Provider-neutralなCache Planを生成します
 
 ```text
-immutable Session messages + Run input + pinned Tools
+immutable Session Events + Run input + pinned Tools
+  -> Deterministic Ledgers
+     -> Artifact + Execution + Constraint + Policy + Task
   -> Context Compiler
      -> canonical ModelRequest
      -> optional Checkpoint + recent raw tail
@@ -47,6 +49,41 @@ steeringがすでにqueueされている場合、end-turn responseもRunを完�
 terminal後のfollow-upは設定済みSession Storeから同じSessionをreplayする新しいRunです
 新しいinputはraw tail Segmentとして追加され、以前のSegmentを書き換えません
 Session Storeがない場合はcallerが過去contextを明示的に渡す必要があります
+
+## Deterministic Ledger
+
+RuntimeはContext Compiler callの前に完全なordered Event prefixから`agent.ContextLedger`を再構築します
+terminal `agent.RunResult`にはterminal Event反映後のLedgerが入ります
+custom Compilerは`ContextCompileRequest.Ledger`からisolated copyを受け取り、変更してもRuntime stateには影響しません
+
+v1 Reducerはmodel callやlive workspace readを行わず5つのtyped Ledgerを生成します
+
+| Ledger | Runtimeから観測できる内容 |
+| --- | --- |
+| Artifact | Tool outputと外部化したEvidence Objectの正確なdigest |
+| Execution | pending、succeeded、failed、canceledを持つProvider attemptとTool call |
+| Constraint | steering originを含む解釈前の正確なuser input |
+| Policy | host Tool authorization metadataとhuman approval decision |
+| Task | Runごとのrunning、waiting、completed、failed、canceled state |
+
+`BuildContextLedger`はEvent順を正本とし、連続するSession revisionとRun内sequence、ProviderとTool transactionの対応を検証し、domain-separatedなsource digestとsnapshot digestを生成します
+malformedなTool JSONも実行や修復を行わず正確なbyte identityを保持します
+`ValidateContextLedger`はsnapshotを再構築してderived stateの改ざんを拒否します
+
+Ledgerはderived stateであり2つ目の正本として保存しません
+MemoryとJSONL Session Storeは同じEventを同じdigestへreplayします
+新しいCheckpointは本文を含まない`ContextLedgerReference`を持ち、後続`context.compacted` Eventのreplay時に直前の正確なEvent prefixと照合します
+
+Constraint entryはすべてのuser messageがactiveだと判断するものではありません
+次のstageでFact lifecycleとしてactive、superseded、resolvedの関係を追加します
+Artifact entryも現在のfileやGit stateではなく、Current World Stateで正規sourceから取得する予定です
+
+互換性のためRuntimeはcallerが渡したassistantまたはTool履歴を含む全`RunRequest.Input` entryを`user.message.added` Eventとしてemitします
+Reducerはすべてをsourceとして保持し、roleが`user`のMessageだけをConstraint entryにします
+steeringは引き続きplainかつnon-emptyなuser Messageだけを受理します
+
+Constraint entryはuser本文を保持するためLedgerはprivateなcontent-bearing dataです
+対応entryではTool argument、Tool output、terminal error、Policy reasonをdigestとして保持し、source Event自体にはSessionとEvidenceのstorage policyを適用します
 
 ## Evidence-preserving compression
 
@@ -167,7 +204,8 @@ messageごとのUsageは個別resultを保持します
 
 ## 現在の制限
 
-- Checkpointはdeterministicなcompact semantic modelであり、完全なdomain ledgerやmodel-based semantic verificationではない
+- deterministic LedgerはRuntimeから観測できるstateを扱うが、Fact lifecycle、canonical workspace再構築、model-based semantic verificationは未実装
+- RuntimeはCompiler call前に完全なEvent prefixからLedgerを再構築し、incremental reducer indexは未実装
 - tokenizer-backed context limitとpredictive output reserveは未実装
 - Evidence retrievalはCLIとAPI経由でありmodel Toolへ自動公開しない
 - Cache Planは複数stability layer breakpointではなく1つのuser-message breakpointを選ぶ

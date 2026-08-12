@@ -138,6 +138,11 @@ Tool decoders remain required as defense in depth
 
 Tool definitions receive Extension ID and generation metadata before entering
 Runtime. Evidence records that origin plus hashes of arguments and output
+The Host proxy also attaches the final authorization outcome, sorted capability
+names, and a digest of the Policy reason to `ToolResult.Policy`. It never places
+the raw reason in public Events, and Runtime does not copy this metadata into
+the model-facing Tool Message. These fields let Session replay reconstruct the
+Policy Ledger without trusting a second mutable state store
 
 ### Hooks
 

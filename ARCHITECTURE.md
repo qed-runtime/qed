@@ -48,6 +48,15 @@ optional compacting compiler keeps raw Session messages immutable, stores exact
 compacted prefixes and large Tool output in a content-addressed Evidence Object
 Store, and publishes a validated typed Checkpoint plus recent raw tail
 
+Before each Context Compiler call, Runtime reduces the complete ordered Session
+and active-Run Event prefix into an `agent.ContextLedger`. Its five typed
+ledgers describe only Runtime-observable artifacts, executions, uninterpreted
+user constraints, authorization decisions, and Run tasks. The reducer neither
+calls a model nor reads live filesystem or Git state. A custom Compiler receives
+an isolated Ledger copy, the terminal `RunResult` exposes the final generation,
+and a compacted Checkpoint retains a content-free reference that replay verifies
+against its exact preceding Event prefix
+
 `agent.CachePlanner` combines host policy with Provider capabilities after
 compilation. QED cache controls are disabled by default. An enabled Plan carries
 a hashed Cache Family, optional TTL and breakpoint, and optional host-priced

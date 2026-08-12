@@ -138,6 +138,24 @@ type ToolResult struct {
 	Output string `json:"output,omitempty"`
 	// IsError reports whether execution failed without terminating the Run
 	IsError bool `json:"is_error,omitempty"`
+	// Policy contains content-free host authorization metadata when a host proxy
+	// enforced capabilities for this invocation
+	//
+	// Policy is not copied into the model-facing Tool Message
+	Policy *ToolPolicyDecision `json:"policy,omitempty"`
+}
+
+// ToolPolicyDecision contains safe authorization metadata retained by Run Events
+//
+// ReasonDigest identifies the complete host reason without exposing its text
+// through Session or public Event output
+type ToolPolicyDecision struct {
+	// Outcome is the host Policy outcome after any human approval
+	Outcome string `json:"outcome"`
+	// Capabilities contains the sorted capabilities evaluated for this invocation
+	Capabilities []string `json:"capabilities,omitempty"`
+	// ReasonDigest identifies the complete Policy reason when one was supplied
+	ReasonDigest string `json:"reason_digest,omitempty"`
 }
 
 // Tool executes a capability exposed to a Provider
@@ -447,6 +465,8 @@ type RunResult struct {
 	SessionRevision uint64 `json:"session_revision,omitempty"`
 	// ContextCheckpoint is the latest validated Checkpoint used by this Run
 	ContextCheckpoint *ContextCheckpoint `json:"context_checkpoint,omitempty"`
+	// ContextLedger is the terminal deterministic view over this Run's Event history
+	ContextLedger *ContextLedger `json:"context_ledger,omitempty"`
 	// ContextCompaction is the latest context reduction published by this Run
 	ContextCompaction *ContextCompactionReport `json:"context_compaction,omitempty"`
 	// CachePlan is the latest Provider cache decision used by this Run

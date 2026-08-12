@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -561,6 +562,14 @@ func TestRuntimeExecutesToolAndContinues(t *testing.T) {
 	if len(result.ToolResults) != 1 || result.ToolResults[0].Output != "HELLO" {
 		t.Fatalf("ToolResults = %#v, want one HELLO result", result.ToolResults)
 	}
+	if result.ContextLedger == nil || len(result.ContextLedger.Tasks) != 1 ||
+		result.ContextLedger.Tasks[0].State != agent.TaskLedgerCompleted ||
+		len(result.ContextLedger.Artifacts) != 1 || len(result.ContextLedger.Executions) != 3 {
+		t.Fatalf("Context Ledger = %#v", result.ContextLedger)
+	}
+	if err := agent.ValidateContextLedger(context.Background(), *result.ContextLedger, events); err != nil {
+		t.Fatalf("validate terminal Context Ledger: %v", err)
+	}
 
 	requests := provider.Requests()
 	if len(requests) != 2 {
@@ -926,6 +935,45 @@ func TestRuntimeFailsBeforeProviderCallWhenContextCompilationFails(t *testing.T)
 	}
 }
 
+func TestRuntimeSuppliesIsolatedContextLedgerToCompiler(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{{message: agent.Message{Role: agent.RoleAssistant, Text: "done"}}}}
+	var observed agent.ContextLedgerReference
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		ContextCompiler: contextCompilerFunc(func(ctx context.Context, request agent.ContextCompileRequest) (agent.CompiledContext, error) {
+			if request.Ledger == nil || len(request.Ledger.Tasks) != 1 || request.Ledger.Tasks[0].State != agent.TaskLedgerRunning {
+				return agent.CompiledContext{}, fmt.Errorf("compiler Context Ledger = %#v", request.Ledger)
+			}
+			observed = request.Ledger.Reference()
+			request.Ledger.Tasks[0].State = agent.TaskLedgerFailed
+			return (agent.DefaultContextCompiler{}).Compile(ctx, request)
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, err := collectRun(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.SourceEventCount != 2 || result.ContextLedger == nil ||
+		result.ContextLedger.Tasks[0].State != agent.TaskLedgerCompleted ||
+		result.ContextLedger.SourceEventCount <= observed.SourceEventCount {
+		t.Fatalf("compiler/terminal Context Ledger = %#v / %#v", observed, result.ContextLedger)
+	}
+	if err := agent.ValidateContextLedger(context.Background(), *result.ContextLedger, events); err != nil {
+		t.Fatalf("validate terminal Context Ledger: %v", err)
+	}
+}
+
 func TestRuntimeReturnsToolErrorsToProvider(t *testing.T) {
 	t.Parallel()
 
@@ -1232,6 +1280,30 @@ func TestRuntimePublishesAndReusesContextCheckpoint(t *testing.T) {
 	}
 	if contextIndex < 0 || modelIndex < 0 || contextIndex >= modelIndex || result.ContextCheckpoint == nil {
 		t.Fatalf("Context event/model/result = %d/%d/%#v", contextIndex, modelIndex, result.ContextCheckpoint)
+	}
+	if result.ContextCheckpoint.Ledger == nil || result.ContextLedger == nil ||
+		result.ContextCheckpoint.Ledger.SourceEventCount >= result.ContextLedger.SourceEventCount ||
+		len(result.ContextLedger.CheckpointReferences) == 0 ||
+		result.ContextLedger.CheckpointReferences[0] != *result.ContextCheckpoint.Ledger {
+		t.Fatalf("Checkpoint/Ledger provenance = %#v / %#v", result.ContextCheckpoint.Ledger, result.ContextLedger)
+	}
+	encodedEvents, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tamperedEvents []agent.Event
+	if err := json.Unmarshal(encodedEvents, &tamperedEvents); err != nil {
+		t.Fatal(err)
+	}
+	for index := range tamperedEvents {
+		if tamperedEvents[index].ContextCheckpoint != nil && tamperedEvents[index].ContextCheckpoint.Ledger != nil {
+			tamperedEvents[index].ContextCheckpoint.Ledger.Digest = "sha256:" + strings.Repeat("f", 64)
+			break
+		}
+	}
+	if _, err := agent.BuildContextLedger(context.Background(), tamperedEvents); err == nil ||
+		!strings.Contains(err.Error(), "does not match its Event prefix") {
+		t.Fatalf("tampered Checkpoint Ledger error = %v", err)
 	}
 
 	handle, err = runtime.Run(context.Background(), agent.RunRequest{
