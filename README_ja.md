@@ -15,6 +15,7 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - process分離Extension内のcapability制御されたCoding Tool
 - 複数のRun固定Extension generation、Hook、Command、host所有state
 - manifest discovery、開発時のatomic reload、bounded crash restart
+- lifecycle contract test付きで既存fileを上書きしないGo Extension scaffold
 - fork不要でapplicationが所有する`extensions.lock` catalogとlive manifest validation
 - host所有Evidence Bundle
 - Evidence preservingなContext圧縮、Prefix Manifest、prompt cache Plan、正規化cache Usage
@@ -319,6 +320,19 @@ TUIは最近のuserとassistant messageを保持し、assistant textをstream表
 Tool引数、Tool出力、raw wait payload、raw Run errorはrendering用の表示状態へ保持しません
 
 ## 外部Extensionの開発
+
+既存Go module内へGo reference scaffoldを作成できます
+parent directoryは既に存在し、destinationは新規である必要があります
+
+```sh
+mkdir -p ./extensions
+go run ./cmd/qed extension scaffold \
+  ./extensions/my-extension \
+  --id example.my-extension
+```
+
+commandはexternal manifestとexecutable、self-exec向けにimport可能な`ServerOptions` implementation、process-level lifecycle contract testを生成します
+`go.mod`、`go.sum`、`extensions.lock`は変更せず、空directoryを含む既存destinationへの上書きを拒否します
 
 外部Extension directoryには`qed-extension.json`を配置します
 sourceから直接development hostを開始できます

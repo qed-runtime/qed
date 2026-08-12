@@ -123,8 +123,10 @@ authentication, and inbound client or tenant rate limiting remain
 responsibilities of the embedding application. Outbound Provider concurrency
 and observed cooldowns remain Runtime controls
 
-`cmd/qed` and `internal/tuiapp` are adapters. `cmd/qed-extension-gen` is the
-dependency-light downstream catalog generator. Nagi remains inside the QED CLI
+`cmd/qed` and `internal/tuiapp` are adapters. `internal/extensionscaffold`
+creates non-overwriting Go reference layouts without changing module or lock
+files. `cmd/qed-extension-gen` is the dependency-light downstream catalog
+generator. Nagi remains inside the QED CLI
 frontend packages and no Nagi type crosses into Runtime, Provider, Extension,
 or Host APIs. The TUI chat controller maps composer submissions to active-Run
 steering or terminal follow-up Runs, keeps approval resume and Run cancellation

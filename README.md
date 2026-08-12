@@ -18,6 +18,7 @@ executable today
 - capability-controlled Coding Tools behind process-isolated Extensions
 - multiple Run-pinned Extension generations, Hooks, Commands, and host-owned state
 - manifest discovery, atomic development reload, and bounded crash restart
+- non-overwriting Go Extension scaffolds with lifecycle contract tests
 - fork-free, application-owned `extensions.lock` catalogs with live manifest validation
 - host-owned Evidence Bundles
 - Evidence-preserving Context compression, Prefix Manifests, prompt-cache Plans,
@@ -349,6 +350,21 @@ capability metadata. Tool arguments, Tool output, raw wait payloads, and raw
 Run errors are not copied into the rendered view state
 
 ## Develop an external Extension
+
+Create a Go reference scaffold inside an existing Go module. The parent
+directory must already exist and the destination must be new
+
+```sh
+mkdir -p ./extensions
+go run ./cmd/qed extension scaffold \
+  ./extensions/my-extension \
+  --id example.my-extension
+```
+
+The command generates an external manifest and executable, an importable
+`ServerOptions` implementation for self-exec, and a process-level lifecycle
+contract test. It never modifies `go.mod`, `go.sum`, or `extensions.lock`, and
+it refuses to overwrite even an empty destination directory
 
 An external Extension directory contains `qed-extension.json`. Start a
 development host directly from source

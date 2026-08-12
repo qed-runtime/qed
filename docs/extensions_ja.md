@@ -23,6 +23,49 @@ Host Policy + approval + Evidence
 process分離はlifecycleとcrashを隔離しますがsecurity sandboxではありません
 Extensionと起動したprogramはchild process accountの権限を保持します
 
+## Go Extension scaffold
+
+既存Go module内へ最初のGo layoutを作成します
+
+```sh
+mkdir -p ./extensions
+qed extension scaffold \
+  ./extensions/example-extension \
+  --id example.extension
+```
+
+destinationより上にある最も近い`go.mod`から生成import pathを決定します
+parent directoryは既に存在し、destination自体は存在しない必要があります
+IDはASCII letterまたはdigitで始まり、以降はletter、digit、dot、underscore、hyphenを利用でき、上限は256 byteです
+implementation versionもASCII letterまたはdigitで始まり、同じ文字に加えて先頭以外で`+`を利用でき、上限は128 byteです
+既定値は`0.1.0`で、`--extension-version`から指定できます
+生成import path要素は[Go Modules Reference](https://go.dev/ref/mod)に従います
+通常のbuild可能package layoutにならないhidden、underscore prefix、`testdata`のdestination要素は拒否します
+module discoveryはregularかつnon-symlinkの`go.mod`から最大1 MiBを読みます
+
+commandは次のlayoutを作成します
+
+```text
+example-extension/
+  .gitignore
+  README.md
+  extension/
+    extension.go
+  main.go
+  main_test.go
+  qed-extension.json
+```
+
+`main.go`はexternal process entrypointです
+nested `extension` packageは`Declaration`と`ServerOptions`をexportするため、同じimplementationをapplication所有`extensions.lock`からself-exec向けに選択できます
+生成testはactual test processに対して`contracttest.RunLifecycle`を実行します
+Tool、Hook、Commandを追加する場合はcomponent behavior testも追加します
+
+scaffoldは新規directoryだけを作成します
+空directoryを含む既存destinationを拒否し、生成失敗時は自身が作成したfileをrollbackします
+Go dependency commandを実行せず、`go.mod`、`go.sum`、`extensions.lock`を変更しません
+所有moduleは通常のdependency workflowでQED dependencyを追加する必要があります
+
 ## Protocol v1
 
 各messageは4-byte unsigned big-endian payload lengthを前置したUTF-8 JSON objectです

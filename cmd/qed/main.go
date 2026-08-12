@@ -32,6 +32,7 @@ import (
 	"github.com/qed-runtime/qed/internal/chatauth"
 	"github.com/qed-runtime/qed/internal/cliapproval"
 	"github.com/qed-runtime/qed/internal/extensionregistry"
+	"github.com/qed-runtime/qed/internal/extensionscaffold"
 	"github.com/qed-runtime/qed/internal/tuiapp"
 	"github.com/qed-runtime/qed/provider/anthropic"
 	"github.com/qed-runtime/qed/provider/echo"
@@ -72,6 +73,9 @@ const (
 	extensionPackageValueID  = "extension-package"
 	extensionVariableValueID = "extension-variable"
 	checkGeneratedValueID    = "check-generated"
+	scaffoldDirectoryID      = "scaffold-directory"
+	scaffoldExtensionID      = "scaffold-extension-id"
+	scaffoldVersionValueID   = "scaffold-version"
 
 	providerEcho            = "echo"
 	providerOpenAIResponses = "openai-responses"
@@ -496,12 +500,70 @@ func openBrowserURL(ctx context.Context, value string) error {
 
 func extensionCommand() *cli.Command {
 	return cli.NewCommand("extension").
-		About("Generate, develop, reload, and inspect Extensions").
+		About("Scaffold, generate, develop, reload, and inspect Extensions").
 		RequireSubcommand().
+		Subcommand(scaffoldExtensionCommand()).
 		Subcommand(generateExtensionCommand()).
 		Subcommand(devExtensionCommand()).
 		Subcommand(reloadExtensionCommand()).
 		Subcommand(inspectExtensionCommand())
+}
+
+func scaffoldExtensionCommand() *cli.Command {
+	return cli.NewCommand("scaffold").
+		About("Create a Go Extension manifest, server, and contract test").
+		Argument(
+			cli.Positional(scaffoldDirectoryID).
+				Parser(cli.StringParser()).
+				Required().
+				Help("New Extension directory inside an existing Go module"),
+		).
+		Option(
+			cli.ValueOption(scaffoldExtensionID).
+				Long("id").
+				Parser(cli.StringParser()).
+				Required().
+				Help("Stable Extension identifier"),
+		).
+		Option(
+			cli.ValueOption(scaffoldVersionValueID).
+				Long("extension-version").
+				Parser(cli.StringParser()).
+				Default(extensionscaffold.DefaultVersion).
+				Help("Initial Extension implementation version"),
+		).
+		Example("Go Extension", "qed extension scaffold ./extensions/example --id example.extension").
+		Handle(func(commandContext *cli.Context, invocation *cli.Invocation) (cli.Outcome, error) {
+			directory, diagnostic := requiredString(invocation, scaffoldDirectoryID)
+			if diagnostic != nil {
+				return cli.Outcome{}, diagnostic
+			}
+			extensionID, diagnostic := requiredString(invocation, scaffoldExtensionID)
+			if diagnostic != nil {
+				return cli.Outcome{}, diagnostic
+			}
+			version, diagnostic := requiredString(invocation, scaffoldVersionValueID)
+			if diagnostic != nil {
+				return cli.Outcome{}, diagnostic
+			}
+			result, err := extensionscaffold.Create(extensionscaffold.Options{
+				Directory: resolveCLIPath(commandContext, directory),
+				ID:        extensionID,
+				Version:   version,
+			})
+			if err != nil {
+				return cli.Outcome{}, cli.NewDiagnostic(cli.CodeHandlerError, fmt.Sprintf("scaffold Extension: %v", err))
+			}
+			if _, err := fmt.Fprintf(
+				commandContext.Stdout(),
+				"Created Go Extension scaffold %s\nImplementation package: %s\n",
+				directory,
+				result.GoPackage,
+			); err != nil {
+				return cli.Outcome{}, cli.NewDiagnostic(cli.CodeIOError, fmt.Sprintf("write Extension scaffold status: %v", err))
+			}
+			return cli.Success(), nil
+		})
 }
 
 func generateExtensionCommand() *cli.Command {

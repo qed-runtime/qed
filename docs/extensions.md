@@ -25,6 +25,54 @@ Process separation provides lifecycle and crash isolation. It is not a security
 sandbox: an Extension and programs it starts retain their child-process account
 authority
 
+## Go Extension scaffold
+
+Create the initial Go layout inside an existing Go module
+
+```sh
+mkdir -p ./extensions
+qed extension scaffold \
+  ./extensions/example-extension \
+  --id example.extension
+```
+
+The nearest `go.mod` above the destination supplies the generated import path.
+The parent directory must already exist, while the destination itself must not
+exist. IDs must start with an ASCII letter or digit and then use letters,
+digits, dots, underscores, or hyphens, with a 256-byte limit. The implementation
+version uses the same starting rule and character set, additionally permits `+`
+after its first character, has a 128-byte limit, defaults to `0.1.0`, and can be
+selected with `--extension-version`. Generated import path
+elements follow the [Go Modules Reference](https://go.dev/ref/mod); hidden,
+underscore-prefixed, and `testdata` destination elements are rejected because
+they do not form a normal buildable package layout. Module discovery reads at
+most 1 MiB from a regular non-symlink `go.mod`
+
+The command creates this layout
+
+```text
+example-extension/
+  .gitignore
+  README.md
+  extension/
+    extension.go
+  main.go
+  main_test.go
+  qed-extension.json
+```
+
+`main.go` is the external process entrypoint. The nested `extension` package
+exports `Declaration` and `ServerOptions`, so the same implementation can be
+selected by an application-owned `extensions.lock` for self-exec. The generated
+test runs `contracttest.RunLifecycle` against the actual test process. Add
+component behavior tests when adding Tools, Hooks, or Commands
+
+Scaffolding creates only a new directory. It rejects an existing destination,
+including an empty directory, and rolls back files it created if generation
+fails. It does not run Go dependency commands or modify `go.mod`, `go.sum`, or
+`extensions.lock`. The owning module must add its QED dependency through its
+normal dependency workflow
+
 ## Protocol v1
 
 Each message is one UTF-8 JSON object prefixed by a 4-byte unsigned big-endian
