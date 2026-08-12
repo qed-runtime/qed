@@ -22,7 +22,8 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - relevant file hash、Git state、観測済みcheck freshnessを持つcanonical Current World State snapshot
 - approval、subagent、edit-verification、commit、Tool transactionを分断しないsafe cut、決定的なpreservation report、Provider call前rollbackを持つEvidence preservingなContext圧縮
 - 本文を含まないContext inspect、explain、diff、品質metrics集計
-- opt-inでboundedなContext search、scope付きEvidence fetch、Session timeline、Ledger history Tool
+- opt-inでboundedかつ説明可能なrelevance rankingを持つContext search、scope付きEvidence fetch、Session timeline、Ledger history Tool
+- hostまたはProvider注入のToken Estimator、決定的なbyte fallback、本文を含まないProvider Usage比較
 - Prefix Manifest、prompt cache Plan、正規化cache Usage
 - NagiベースのCLIとmulti-turn TUI
 - 末端のExtension processまで伝搬する安全な構造化diagnostics
@@ -57,6 +58,8 @@ go run ./cmd/qed run --prompt "hello" --output jsonl
 echo Providerは`run.started`、userとmodelのEvent、text delta、`run.completed`を含む完全なlifecycleを出力します
 
 `model.request.started`は本文を含まないPrefix ManifestとCache Planを出力します
+解決済みToken Estimateのkindとcountも含み、Provider Usageを正として`qed cache status`で最新estimateとの差を確認できます
+
 QED側のcache制御は設定するまで無効ですが、Provider側のimplicit behaviorは適用される場合があります
 prompt cache usageを返すProviderではcache read、write、uncached inputの正規化された内訳も記録します
 設定済みJSON Evidence Storeはcompactされたcontextの正確なobjectも保持します

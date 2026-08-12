@@ -49,6 +49,10 @@ type HostLoadOptions struct {
 	Recorder evidence.Recorder
 	// ToolInputValidator compiles Tool schemas for Runtime and Extension boundaries
 	ToolInputValidator agent.ToolInputValidator
+	// ContextSemanticScorer optionally augments relevance-ordered Context search
+	ContextSemanticScorer agent.ContextSemanticScorer
+	// TokenEstimator overrides Provider and canonical fallback token estimation
+	TokenEstimator agent.TokenEstimator
 	// Verbose enables safe structured Runtime and Extension diagnostics
 	Verbose bool
 	// DebugWriter receives JSON diagnostics when Logger is nil
@@ -117,18 +121,20 @@ func NewHost(registry *orchestration.AgentRegistry, defaultAgent string) (*Host,
 // LoadHost loads a declarative Agent graph and starts its configured Extensions
 func LoadHost(path string, options HostLoadOptions) (*Host, error) {
 	configured, err := agentconfig.Load(path, agentconfig.LoadOptions{
-		LookupEnv:          agentconfig.LookupEnv(options.LookupEnv),
-		WorkspaceRoot:      options.WorkspaceRoot,
-		AuthStorePath:      options.AuthStorePath,
-		SelfExecutable:     options.SelfExecutable,
-		SelfExecCatalog:    options.SelfExecCatalog,
-		Context:            options.Context,
-		Approver:           options.Approver,
-		Recorder:           options.Recorder,
-		ToolInputValidator: options.ToolInputValidator,
-		Verbose:            options.Verbose,
-		DebugWriter:        options.DebugWriter,
-		Logger:             options.Logger,
+		LookupEnv:             agentconfig.LookupEnv(options.LookupEnv),
+		WorkspaceRoot:         options.WorkspaceRoot,
+		AuthStorePath:         options.AuthStorePath,
+		SelfExecutable:        options.SelfExecutable,
+		SelfExecCatalog:       options.SelfExecCatalog,
+		Context:               options.Context,
+		Approver:              options.Approver,
+		Recorder:              options.Recorder,
+		ToolInputValidator:    options.ToolInputValidator,
+		ContextSemanticScorer: options.ContextSemanticScorer,
+		TokenEstimator:        options.TokenEstimator,
+		Verbose:               options.Verbose,
+		DebugWriter:           options.DebugWriter,
+		Logger:                options.Logger,
 	})
 	if err != nil {
 		return nil, err

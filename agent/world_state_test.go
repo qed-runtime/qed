@@ -119,7 +119,8 @@ func TestRuntimeCapturesCurrentWorldStateAtProviderBoundaries(t *testing.T) {
 
 func hasWorldStateSegment(segments []agent.SegmentFingerprint) bool {
 	for _, segment := range segments {
-		if segment.Kind == agent.SegmentKindCurrentWorldState && segment.Stability == agent.StabilityVolatile {
+		if segment.Kind == agent.SegmentKindCurrentWorldState && segment.Stability == agent.StabilityVolatile &&
+			segment.TokenEstimateKind == agent.CanonicalByteTokenEstimateKind && segment.TokenEstimate > 0 {
 			return true
 		}
 	}

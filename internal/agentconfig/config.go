@@ -73,6 +73,10 @@ type LoadOptions struct {
 	Recorder evidence.Recorder
 	// ToolInputValidator compiles Tool schemas for Runtime and Extension boundaries
 	ToolInputValidator agent.ToolInputValidator
+	// ContextSemanticScorer optionally augments relevance-ordered Context search
+	ContextSemanticScorer agent.ContextSemanticScorer
+	// TokenEstimator overrides Provider and canonical fallback token estimation
+	TokenEstimator agent.TokenEstimator
 	// Verbose enables safe structured Runtime and Extension diagnostics
 	Verbose bool
 	// DebugWriter receives JSON diagnostics when Logger is nil
@@ -444,6 +448,8 @@ func build(document fileConfig, options LoadOptions, configurationDirectory stri
 		states:         make(map[string]buildState, len(document.Agents)),
 		logger:         options.Logger,
 		toolValidator:  options.ToolInputValidator,
+		semanticScorer: options.ContextSemanticScorer,
+		tokenEstimator: options.TokenEstimator,
 	}
 	for _, agentID := range sortedKeys(document.Agents) {
 		if err := validateID("agent ID", agentID); err != nil {
@@ -1083,6 +1089,8 @@ type graphBuilder struct {
 	stack          []string
 	logger         *slog.Logger
 	toolValidator  agent.ToolInputValidator
+	semanticScorer agent.ContextSemanticScorer
+	tokenEstimator agent.TokenEstimator
 }
 
 func (builder *graphBuilder) buildAgent(agentID string) error {
@@ -1154,7 +1162,8 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 			}
 			retrieval := specification.Context.Retrieval
 			contextRetrieval = &agent.ContextRetrievalOptions{
-				ObjectStore: scopedStore,
+				ObjectStore:    scopedStore,
+				SemanticScorer: builder.semanticScorer,
 				Limits: agent.ContextRetrievalLimits{
 					MaxCallsPerRun:        retrieval.MaxCallsPerRun,
 					MaxItemsPerCall:       retrieval.MaxItemsPerCall,
@@ -1246,6 +1255,7 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 		MaxToolCalls:            specification.MaxToolCalls,
 		SessionStore:            builder.sessions,
 		ContextCompiler:         contextCompiler,
+		TokenEstimator:          builder.tokenEstimator,
 		EvidenceAccess:          runtimeEvidenceAccess,
 		ContextRetrieval:        contextRetrieval,
 		CurrentWorldStateSource: currentWorldStateSource,

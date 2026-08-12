@@ -572,12 +572,19 @@ func TestCacheStatusReadsPlanUsageAndCost(t *testing.T) {
 			Model: "gpt-5.6-luna",
 		}},
 		Usage: usage,
-	}, evidence.BundleOptions{Events: []agent.Event{{
-		Type:           agent.EventModelRequest,
-		RunID:          "run_cache_status",
-		PrefixManifest: &manifest,
-		CachePlan:      &plan,
-	}}})
+	}, evidence.BundleOptions{Events: []agent.Event{
+		{Type: agent.EventRunStarted, RunID: "run_cache_status", Sequence: 1},
+		{
+			Type: agent.EventModelRequest, RunID: "run_cache_status", Sequence: 2,
+			ProviderCall: 1, ProviderAttempt: 1,
+			PrefixManifest: &manifest, CachePlan: &plan,
+		},
+		{
+			Type: agent.EventMessageCompleted, RunID: "run_cache_status", Sequence: 3,
+			Message: &agent.Message{Role: agent.RoleAssistant, Usage: &usage},
+		},
+		{Type: agent.EventRunCompleted, RunID: "run_cache_status", Sequence: 4},
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -598,6 +605,7 @@ func TestCacheStatusReadsPlanUsageAndCost(t *testing.T) {
 		"cache_read_ratio=70.00%",
 		"Forecast: currency=USD",
 		"Estimated actual cost: currency=USD",
+		"Input estimate comparison: estimated=2000 actual=100 difference=-1900 kind=canonical_bytes_div_4",
 		"First divergence: none",
 	} {
 		if !strings.Contains(stdout.String(), want) {

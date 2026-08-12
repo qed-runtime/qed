@@ -333,7 +333,23 @@ func NewCompactingContextCompiler(
 func (compiler *CompactingContextCompiler) Compile(
 	ctx context.Context,
 	request ContextCompileRequest,
-) (CompiledContext, error) {
+) (compiled CompiledContext, compileErr error) {
+	defer func() {
+		if compileErr != nil || len(compiled.Segments) == 0 {
+			return
+		}
+		compiled.Segments, compileErr = estimateContextSegments(
+			ctx,
+			request.TokenEstimator,
+			request.Provider,
+			request.Model,
+			compiled.ModelRequest,
+			compiled.Segments,
+		)
+		if compileErr != nil {
+			compileErr = fmt.Errorf("estimate Context Segments: %w", compileErr)
+		}
+	}()
 	if compiler == nil {
 		return CompiledContext{}, errors.New("Context Compiler must not be nil")
 	}

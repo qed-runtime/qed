@@ -351,6 +351,8 @@ func TestSessionStoresPreservePrefixManifest(t *testing.T) {
 	}
 	wantEpoch := manifest.Epoch
 	wantHash := manifest.Segments[0].ContentHash
+	wantTokenEstimate := manifest.Segments[0].TokenEstimate
+	wantTokenEstimateKind := manifest.Segments[0].TokenEstimateKind
 
 	stores := map[string]func(*testing.T) agent.SessionStore{
 		"memory": func(*testing.T) agent.SessionStore { return session.NewMemoryStore() },
@@ -376,6 +378,8 @@ func TestSessionStoresPreservePrefixManifest(t *testing.T) {
 			}
 			eventManifest.Epoch = "changed"
 			eventManifest.Segments[0].ContentHash = "changed"
+			eventManifest.Segments[0].TokenEstimate = 999
+			eventManifest.Segments[0].TokenEstimateKind = "changed"
 
 			snapshot, err := store.Load(context.Background(), "manifest")
 			if err != nil {
@@ -385,7 +389,9 @@ func TestSessionStoresPreservePrefixManifest(t *testing.T) {
 				t.Fatalf("Snapshot Events = %#v", snapshot.Events)
 			}
 			stored := snapshot.Events[0].PrefixManifest
-			if stored.Epoch != wantEpoch || stored.Segments[0].ContentHash != wantHash {
+			if stored.Epoch != wantEpoch || stored.Segments[0].ContentHash != wantHash ||
+				stored.Segments[0].TokenEstimate != wantTokenEstimate ||
+				stored.Segments[0].TokenEstimateKind != wantTokenEstimateKind {
 				t.Fatalf("stored Prefix Manifest = %#v", stored)
 			}
 		})

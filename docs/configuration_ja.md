@@ -427,9 +427,33 @@ Context圧縮と同じscope付きJSON Evidence Storeが必要です
 Run単位の上限はterminal follow-up Runでresetされます
 Runtimeの通常の`max_tool_calls`もretrieval上限とは別に適用されます
 
+`context_search`は`order`を省略するか`recency`を指定した場合、exactなcase-insensitive一致を新しい順で返します
+`order`を`relevance`にするとtask、file、symbol、active Constraint、unresolved error、recency、過去の参照頻度、解決済みtoken costによる説明可能でboundedなrankingを行います
+最初のranking responseは`snapshot_event_count`と`snapshot_query_digest`を返します
+後続pageでは同じquery、返却された2つのsnapshot値、`next_cursor`を渡します
+Runtimeはsnapshot bindingの欠落と不一致を拒否するため、新しいEventが追記されてもresult setは移動しません
+`candidate_pool_truncated: true`の場合はboundedなrecent candidate poolが不完全なためqueryを狭めます
+`constraint_pool_truncated`と`reference_history_truncated`はactive Constraintまたは過去search参照のsignal poolが不完全であることを示します
+いずれも返却済みranking pageの安定性は変えません
+
+宣言設定は常に決定的なrelevance factorを提供し、embedding serviceを選択しません
+組み込みapplicationは`qed.HostLoadOptions.ContextSemanticScorer`または`agent.ContextRetrievalOptions.SemanticScorer`で正規化済みsemantic factorを1つ追加できます
+外部dataの開示、credential、cost、scorerの決定性はhostが所有します
+
+宣言設定はtokenizerも選択しません
+組み込みhostは`qed.HostLoadOptions.TokenEstimator`、programmatic Runtimeは`agent.Options.TokenEstimator`を設定できます
+明示的なhost値は`agent.TokenEstimator`を実装するProviderより優先され、どちらもない場合は決定的な`canonical_bytes_div_4` fallbackを使います
+Context Segment fingerprint、Cache Plan、relevance resultはstableなestimator kindとcountを記録します
+kindは`[a-z0-9][a-z0-9._/:-]{0,127}`に一致する必要があります
+
+設定済みestimator callはProvider attemptではなくRuntimeもretryしません
+Context compileのestimate failureはProvider call前に停止し、relevance estimate failureはboundedな通常Tool errorになります
+外部開示、credential、rate limit、cost、決定性はhostが所有します
+
 `max_input_bytes`は決定的なProvider neutral値でありtokenizer basedなmodel context limitではありません
 QEDはraw Session messageを書き換えません
 検証済みCheckpointとrecent raw tailをcompileし、Tool、approval、subagent、edit-verification、commitの安全なtransaction境界でhard limit内に収まらなければProvider call前に停止します
+predictive budget policyが将来有効になるまではToken Estimateをobservationalに扱います
 
 最初のCheckpointと設定間隔ごとのRaw Event Rebaseは前回semantic Checkpointを使わず再構築します
 明示的なFact lifecycle変更とcurrent Ledgerで失効したCheckpoint FactもRebase triggerになります
@@ -573,7 +597,8 @@ qed context explain RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
 qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after RUN_ID[@EVENT_SEQUENCE] --store .qed/evidence
 ```
 
-`qed cache status`はRun ID省略時に最新Bundleを選び、effective Plan、normalized cache Usage、任意のforecastとUsage cost estimate、最初のPrefix divergence、最新compaction recordを表示します
+`qed cache status`はRun ID省略時に最新Bundleを選び、effective Plan、最新input estimate比較、normalized cache Usage、任意のforecastとUsage cost estimate、最初のPrefix divergence、最新compaction recordを表示します
+`agent.BuildTokenUsageReport`はprompt本文なしで全Provider attempt比較を組み込みapplicationへ提供します
 
 Context commandは同じ保存済みpublic Eventから本文を含まないtimeline、集計metrics、before-to-after変更を導出します
 message、path、command、Evidence object digest、object contentは出力しません

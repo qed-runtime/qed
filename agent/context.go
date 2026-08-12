@@ -73,7 +73,7 @@ const (
 // ContextSegment describes one logical portion of a compiled model request
 //
 // ContentHash fingerprints canonical content without exposing that content.
-// TokenEstimate remains zero when no tokenizer-backed estimate is available.
+// Token estimates are observational and never affect a Segment content hash.
 type ContextSegment struct {
 	// ID is stable for the same logical position within a compiled request
 	ID string `json:"id"`
@@ -91,8 +91,10 @@ type ContextSegment struct {
 	ContentHash string `json:"content_hash"`
 	// Bytes is the size of canonical content before hashing
 	Bytes int64 `json:"bytes"`
-	// TokenEstimate is an optional tokenizer-backed size estimate
+	// TokenEstimate is the configured or canonical fallback size estimate
 	TokenEstimate int64 `json:"token_estimate,omitempty"`
+	// TokenEstimateKind identifies the tokenizer or canonical fallback
+	TokenEstimateKind string `json:"token_estimate_kind,omitempty"`
 }
 
 // SegmentFingerprint is the content-free representation persisted in a Prefix Manifest
@@ -107,8 +109,10 @@ type SegmentFingerprint struct {
 	ContentHash string `json:"content_hash"`
 	// Bytes is the size of canonical content before hashing
 	Bytes int64 `json:"bytes"`
-	// TokenEstimate is an optional tokenizer-backed size estimate
+	// TokenEstimate is the configured or canonical fallback size estimate
 	TokenEstimate int64 `json:"token_estimate,omitempty"`
+	// TokenEstimateKind identifies the tokenizer or canonical fallback
+	TokenEstimateKind string `json:"token_estimate_kind,omitempty"`
 	// Stability describes the expected lifetime of the Segment
 	Stability StabilityClass `json:"stability"`
 }
@@ -166,6 +170,10 @@ type ContextCompileRequest struct {
 	//
 	// The zero value selects EvidenceSensitivityPrivate when EvidenceAccess is set.
 	EvidenceSensitivity EvidenceSensitivity
+	// TokenEstimator estimates canonical Context Segments
+	//
+	// A nil value selects CanonicalByteTokenEstimator
+	TokenEstimator TokenEstimator
 }
 
 // CompiledContext contains a canonical model request and its logical Segments
@@ -210,6 +218,17 @@ func (DefaultContextCompiler) Compile(ctx context.Context, request ContextCompil
 	if err != nil {
 		return CompiledContext{}, err
 	}
+	segments, err = estimateContextSegments(
+		ctx,
+		request.TokenEstimator,
+		request.Provider,
+		request.Model,
+		modelRequest,
+		segments,
+	)
+	if err != nil {
+		return CompiledContext{}, fmt.Errorf("estimate Context Segments: %w", err)
+	}
 	return CompiledContext{ModelRequest: modelRequest, Segments: segments}, nil
 }
 
@@ -252,13 +271,14 @@ func BuildPrefixManifest(
 		}
 		identifiers[segment.ID] = struct{}{}
 		fingerprints = append(fingerprints, SegmentFingerprint{
-			ID:            segment.ID,
-			Kind:          segment.Kind,
-			Version:       segment.Version,
-			ContentHash:   segment.ContentHash,
-			Bytes:         segment.Bytes,
-			TokenEstimate: segment.TokenEstimate,
-			Stability:     segment.Stability,
+			ID:                segment.ID,
+			Kind:              segment.Kind,
+			Version:           segment.Version,
+			ContentHash:       segment.ContentHash,
+			Bytes:             segment.Bytes,
+			TokenEstimate:     segment.TokenEstimate,
+			TokenEstimateKind: segment.TokenEstimateKind,
+			Stability:         segment.Stability,
 		})
 	}
 
@@ -621,6 +641,13 @@ func validateContextSegment(segment ContextSegment) error {
 	}
 	if segment.TokenEstimate < 0 {
 		return errors.New("Context Segment token estimate must not be negative")
+	}
+	if segment.TokenEstimateKind != "" && !validTokenEstimateKind(segment.TokenEstimateKind) {
+		return errors.New("Context Segment token estimate kind is invalid")
+	}
+	if segment.TokenEstimateKind == CanonicalByteTokenEstimateKind &&
+		segment.TokenEstimate != estimateBytes(segment.Bytes) {
+		return errors.New("Context Segment canonical token estimate does not match its byte count")
 	}
 	if !validSHA256Digest(segment.ContentHash) {
 		return errors.New("Context Segment Content Hash must be a sha256 digest")

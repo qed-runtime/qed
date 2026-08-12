@@ -66,6 +66,75 @@ func TestLoadHostRunsDefaultAgentAndSavesEvidence(t *testing.T) {
 	}
 }
 
+func TestLoadHostAcceptsContextScoringDependencies(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	configurationPath := filepath.Join(directory, "qed.json")
+	if err := os.WriteFile(configurationPath, []byte(`{
+		"version":1,
+		"default_agent":"main",
+		"providers":{"local":{"protocol":"echo"}},
+		"agents":{"main":{"provider":"local","context":{
+			"max_input_bytes":4096,
+			"checkpoint_max_bytes":512,
+			"retrieval":{}
+		}}},
+		"evidence":{"store":"json","path":"evidence"}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	host, err := qed.LoadHost(configurationPath, qed.HostLoadOptions{
+		ContextSemanticScorer: hostSemanticScorer{},
+		TokenEstimator:        hostTokenEstimator{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := host.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "hello"}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := false
+	for _, event := range outcome.Events {
+		if event.Type == agent.EventModelRequest {
+			observed = event.CachePlan != nil && event.CachePlan.TokenEstimateKind == "host_tokenizer"
+		}
+	}
+	if !observed {
+		t.Fatalf("Host Token Estimator was not applied: %#v", outcome.Events)
+	}
+	if err := host.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type hostSemanticScorer struct{}
+
+func (hostSemanticScorer) Score(
+	context.Context,
+	agent.ContextSemanticScoreRequest,
+) ([]int, error) {
+	return nil, nil
+}
+
+var _ agent.ContextSemanticScorer = hostSemanticScorer{}
+
+type hostTokenEstimator struct{}
+
+func (hostTokenEstimator) EstimateTokens(
+	_ context.Context,
+	request agent.TokenEstimateRequest,
+) (agent.TokenEstimateResult, error) {
+	return agent.TokenEstimateResult{
+		Kind: "host_tokenizer", Tokens: make([]int64, len(request.Items)),
+	}, nil
+}
+
+var _ agent.TokenEstimator = hostTokenEstimator{}
+
 func TestProgrammaticHostResolvesAgentsWithoutOwningEvidence(t *testing.T) {
 	t.Parallel()
 

@@ -246,7 +246,18 @@ embedding hostは`agent.BuildContextReport`で同じJSON互換構造を構築し
 
 `max_input_bytes`はProvider-neutralなcanonical byte上限であり、tokenizerやmodelの公開context windowではありません
 選択modelに対して安全側に調整してください
-cache planningのtoken estimateだけはcanonical byteを4で割った決定的な近似を使い、実行後はProvider Usageを正とします
+Token Estimationは現在observationalであり、このhard byte境界を置き換えません
+
+RuntimeはContext Segmentとrelevance snippetに1つの`TokenEstimator`を解決します
+`agent.Options.TokenEstimator`は同じinterfaceを実装するProviderより優先され、どちらもない場合はbyte数を4で割って切り上げる`CanonicalByteTokenEstimator`を使います
+1 batchは`[a-z0-9][a-z0-9._/:-]{0,127}`に一致する本文を含まないstable kindとisolated itemごとの非負countを返します
+built-in compilerは両方をSegment fingerprintへ保存しますがPrefix epochとcontent hashは影響を受けません
+cache planningは全Segmentで共通の設定済みkindを使い、利用できなければcanonical近似へfallbackします
+
+call完了後はProvider Usageを正とします
+publicな`agent.BuildTokenUsageReport`はestimate付き`model.request.started` Eventをcompletion、retry、failure、cancelと対応付け、Provider inputからestimateを引いた差を返します
+Usage欠落時はestimateで置換せず欠落として明示します
+完全なRun Event streamがあれば`qed cache status`は最新比較を表示します
 
 Evidence Objectはprivate contentです
 設定済みContext Compilerは新規参照をtenant、Sessionまたはephemeral Run、execution Profileのopaque digest、required retrieval Capability、sensitivityへbindingします
@@ -278,16 +289,28 @@ retrievalは`agent.Options.ContextRetrieval`または宣言的Agentの`context.r
 
 | Tool | bounded result |
 | --- | --- |
-| `context_search` | 以前のuser、assistant、Tool Event本文をexactなcase-insensitive一致で検索し、source参照とbounded snippetを返す |
+| `context_search` | 既定ではexactな新しい順の一致を返し、明示時は固定されたbounded Event prefixを説明可能なrelevance順にしてsource参照とbounded snippetを返す |
 | `context_fetch` | 現在のRunまたはSessionで参照済みのscope付きEvidence Objectから1つのUTF-8 chunkを返す |
 | `session_timeline` | 本文を含まないEvent identityとactivity metadataを新しい順で返す |
 | `artifact_history` | immutable Artifact Ledger entryを新しい順で返す |
 | `execution_history` | 引数と出力本文を含まないProviderとTool execution Ledger entryを新しい順で返す |
 
-listとsearchは現在のEventまたはLedger snapshotに対するnumeric `cursor`を使い、`next_cursor`を返します
+listと既定searchは現在のEventまたはLedger snapshotに対するnumeric `cursor`を使い、`next_cursor`を返します
+relevance searchは最初のpageでaccepted Event prefixを固定して`snapshot_event_count`を返し、ranking内のoffsetとして`next_cursor`を使います
+後続pageでは同じsnapshot、`snapshot_query_digest`、queryを繰り返します
+Runtimeはbindingの欠落と不一致を拒否するため、途中でretrieval Tool Eventが追記されてもresult setは移動しません
 fetchはbyte `offset`を使い、UTF-8境界に制限された`next_offset`を返します
 raw snippetと取得contentは`untrusted: true`を持ち、実行対象の命令ではなく過去dataとして扱います
-searchはrelevance scoringやembedding lookupを行いません
+
+relevance resultはtask、file、symbol、active Constraint、unresolved error、recency、過去の参照頻度、任意のsemantic、token costの正規化済みfactorと決定的なweighted totalを公開します
+各resultはsnippetの正確なbyte数、token estimate、estimator kindを含みます
+Runtimeは新しい順で最大`512`件の検索可能Eventだけを対象にし、さらに存在する場合は`candidate_pool_truncated`を返し、1 Event当たり最大`16384` bytesを解析します
+active Constraint本文は新しい順で最大`128`件をranking signalに使います
+過去の参照頻度は直近`64`件の成功search resultだけを解析し、1 resultが`262144` bytesを超える場合はskipします
+signal poolが不完全な場合は`constraint_pool_truncated`または`reference_history_truncated`を返します
+hostは`ContextSemanticScorer`を注入できます
+Runtimeは最大`512`件のboundedなuntrusted excerptを渡し、itemごとに`0..1000`のscoreを検証します
+embeddingは必須ではなく、宣言設定では選択せず、既定exact searchでは呼び出しません
 
 各Runは全試行call数、成功時の返却item数、成功JSON出力全体のbyte数を独立して制限します
 call単位のitemと出力byte上限もRun全体の上限内で適用され、Runtimeの通常Tool call上限も適用されます
@@ -371,7 +394,7 @@ v0 forecastの対象は再利用可能と推定したprefixだけです
 output、volatile suffix、retry、task成功率、retrieval costは予測しません
 explicit cacheのsavingが0以下ならrequired policy以外ではfallbackします
 
-`qed cache status [run-id] --store .qed/evidence`は保存済みPlan、normalized Usage、cache read ratio、forecast、pricingから求めたactual estimate、最初のPrefix divergence、最新compaction reportを表示します
+`qed cache status [run-id] --store .qed/evidence`は保存済みPlan、最新input estimate比較、normalized Usage、cache read ratio、forecast、pricingから求めたactual estimate、最初のPrefix divergence、最新compaction reportを表示します
 Run IDを省略すると最新Evidence Bundleを選びます
 
 ## Usage normalization
@@ -396,9 +419,9 @@ messageごとのUsageは個別resultを保持します
 
 - deterministic Ledgerは明示的なFact lifecycleとRuntimeから観測できるstateを扱うが、canonical workspace再構築とmodel-based semantic verificationは未実装
 - RuntimeはCompiler call前に完全なEvent prefixからLedgerを再構築し、incremental reducer indexは未実装
-- tokenizer-backed context limitとpredictive output reserveは未実装
-- Context retrievalはdeterministic lexical searchのみであり、relevance scoring、embedding、自動retrieval policyは未実装
-- `context_search`はaccepted Event本文をlinear scanし、retrieval indexは未実装
+- Token Estimationはobservationalであり`max_input_bytes`はcanonical byteのhard上限のままでpredictive output reserveは未実装
+- `context_search`のexact modeはaccepted Event prefixをscanし、relevance modeは固定された完全なprefixからLedgerを再構築して新しいcandidateとsignal解析poolだけを制限し、retrieval indexと自動retrieval policyは未実装
+- built-inのtokenizer-backed estimatorとembedding実装は存在せず、canonical byteを4で割った値を依存なしのtoken fallbackとして使う
 - `context_fetch`はbounded chunkを返す前にscope付きObject全体を検証し、現在のStore contractはrange readを持たない
 - Cache Planは複数stability layer breakpointではなく1つのuser-message breakpointを選ぶ
 - rendered-wire Prefix Manifest、cache compareまたはexplain、keepalive、singleflight warmup、fleet coordinationは未実装

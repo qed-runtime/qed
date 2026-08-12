@@ -79,6 +79,11 @@ type Options struct {
 	//
 	// A nil Compiler uses DefaultContextCompiler
 	ContextCompiler ContextCompiler
+	// TokenEstimator estimates Context Segments and relevance retrieval snippets
+	//
+	// An explicit host estimator takes precedence over a Provider that implements
+	// TokenEstimator. If neither exists, Runtime uses CanonicalByteTokenEstimator
+	TokenEstimator TokenEstimator
 	// EvidenceAccess configures tenant-scoped Evidence used by ContextCompiler
 	//
 	// A nil value preserves legacy unscoped compilation unless a parent context
@@ -123,6 +128,7 @@ type Runtime struct {
 	maxToolCalls            int
 	sessionStore            SessionStore
 	contextCompiler         ContextCompiler
+	tokenEstimator          TokenEstimator
 	evidenceAccess          *RuntimeEvidenceAccess
 	contextRetrieval        *normalizedContextRetrievalOptions
 	currentWorldStateSource CurrentWorldStateSource
@@ -173,9 +179,22 @@ func NewRuntime(options Options) (*Runtime, error) {
 		return nil, errors.New("max tool calls must be positive")
 	}
 
+	tokenEstimator, err := resolveTokenEstimator(options.Provider, options.TokenEstimator)
+	if err != nil {
+		return nil, fmt.Errorf("configure Token Estimator: %w", err)
+	}
 	contextRetrieval, err := normalizeContextRetrievalOptions(options.ContextRetrieval)
 	if err != nil {
 		return nil, fmt.Errorf("configure Context retrieval: %w", err)
+	}
+	model := ""
+	if modelProvider, ok := options.Provider.(ModelIDProvider); ok {
+		model = modelProvider.ModelID()
+	}
+	if contextRetrieval != nil {
+		contextRetrieval.tokenEstimator = tokenEstimator
+		contextRetrieval.provider = options.Provider.Name()
+		contextRetrieval.model = model
 	}
 	configuredTools := append([]Tool(nil), options.Tools...)
 	configuredTools = append(configuredTools, newContextRetrievalTools(contextRetrieval)...)
@@ -233,6 +252,7 @@ func NewRuntime(options Options) (*Runtime, error) {
 		maxToolCalls:            maxToolCalls,
 		sessionStore:            options.SessionStore,
 		contextCompiler:         contextCompiler,
+		tokenEstimator:          tokenEstimator,
 		evidenceAccess:          evidenceAccess,
 		contextRetrieval:        contextRetrieval,
 		currentWorldStateSource: options.CurrentWorldStateSource,
@@ -1085,6 +1105,8 @@ func (runtime *Runtime) execute(
 			"duration_ms", time.Since(compileStartedAt).Milliseconds(),
 			"segment_count", len(manifest.Segments),
 			"prefix_epoch", manifest.Epoch,
+			"input_token_estimate", compiled.ModelRequest.CachePlan.InputTokenEstimate,
+			"token_estimate_kind", compiled.ModelRequest.CachePlan.TokenEstimateKind,
 			"compaction_reason", compactionReason,
 			"rebased", rebased,
 			"rebase_reason", rebaseReason,
@@ -1457,6 +1479,7 @@ func (runtime *Runtime) compileContext(
 		CurrentWorldState:   cloneCurrentWorldStatePointer(worldState),
 		EvidenceAccess:      cloneEvidenceAccessPointer(evidenceAccess),
 		EvidenceSensitivity: evidenceSensitivity,
+		TokenEstimator:      runtime.tokenEstimator,
 	})
 	if err != nil {
 		return CompiledContext{}, PrefixManifest{}, err
@@ -1488,7 +1511,14 @@ func (runtime *Runtime) compileContext(
 	if len(compiled.ModelRequest.Messages) == 0 && compiled.ModelRequest.Instructions == "" {
 		return CompiledContext{}, PrefixManifest{}, errors.New("Context Compiler returned an empty model request")
 	}
-	if err := appendCurrentWorldState(&compiled, worldState); err != nil {
+	if err := appendCurrentWorldState(
+		ctx,
+		&compiled,
+		worldState,
+		runtime.tokenEstimator,
+		runtime.provider.Name(),
+		model,
+	); err != nil {
 		return CompiledContext{}, PrefixManifest{}, err
 	}
 	toolNames := make(map[string]struct{}, len(compiled.ModelRequest.Tools))

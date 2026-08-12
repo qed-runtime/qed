@@ -112,6 +112,8 @@ func TestLoadEnablesContextRetrievalTools(t *testing.T) {
 	t.Parallel()
 
 	validator := &countingToolInputValidator{}
+	semanticScorer := &configContextSemanticScorer{}
+	tokenEstimator := &configTokenEstimator{}
 	path := writeConfig(t, `{
 		"version": 1,
 		"providers": {"local": {"protocol": "echo"}},
@@ -131,7 +133,10 @@ func TestLoadEnablesContextRetrievalTools(t *testing.T) {
 			}
 		}}
 	}`)
-	configuration, err := agentconfig.Load(path, agentconfig.LoadOptions{ToolInputValidator: validator})
+	configuration, err := agentconfig.Load(path, agentconfig.LoadOptions{
+		ToolInputValidator: validator, ContextSemanticScorer: semanticScorer,
+		TokenEstimator: tokenEstimator,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,6 +149,12 @@ func TestLoadEnablesContextRetrievalTools(t *testing.T) {
 	})
 	if err != nil || result.Status != agent.RunStatusCompleted {
 		t.Fatalf("configured Run = %#v, %v", result, err)
+	}
+	if semanticScorer.Calls() != 0 {
+		t.Fatalf("Echo Run unexpectedly invoked semantic scorer %d times", semanticScorer.Calls())
+	}
+	if tokenEstimator.Calls() == 0 {
+		t.Fatal("Echo Run did not invoke configured Token Estimator")
 	}
 }
 
@@ -953,3 +964,51 @@ func (validator *countingToolInputValidator) Count() int {
 	defer validator.mu.Unlock()
 	return validator.count
 }
+
+type configContextSemanticScorer struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (scorer *configContextSemanticScorer) Score(
+	context.Context,
+	agent.ContextSemanticScoreRequest,
+) ([]int, error) {
+	scorer.mu.Lock()
+	scorer.calls++
+	scorer.mu.Unlock()
+	return nil, nil
+}
+
+func (scorer *configContextSemanticScorer) Calls() int {
+	scorer.mu.Lock()
+	defer scorer.mu.Unlock()
+	return scorer.calls
+}
+
+var _ agent.ContextSemanticScorer = (*configContextSemanticScorer)(nil)
+
+type configTokenEstimator struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (estimator *configTokenEstimator) EstimateTokens(
+	_ context.Context,
+	request agent.TokenEstimateRequest,
+) (agent.TokenEstimateResult, error) {
+	estimator.mu.Lock()
+	estimator.calls++
+	estimator.mu.Unlock()
+	return agent.TokenEstimateResult{
+		Kind: "config_tokenizer", Tokens: make([]int64, len(request.Items)),
+	}, nil
+}
+
+func (estimator *configTokenEstimator) Calls() int {
+	estimator.mu.Lock()
+	defer estimator.mu.Unlock()
+	return estimator.calls
+}
+
+var _ agent.TokenEstimator = (*configTokenEstimator)(nil)

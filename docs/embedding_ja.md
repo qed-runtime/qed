@@ -209,15 +209,64 @@ trusted local operatorはoptionalな`EvidenceObjectAdminStore`を利用でき、
 
 `ContextRetrieval`は`context_search`、`context_fetch`、`session_timeline`、`artifact_history`、`execution_history`を明示的に登録します
 nilの場合はどのToolも登録しません
-searchは以前のEvent本文を決定的なcase-insensitive一致で検索します
+searchは既定で以前のEvent本文を決定的なcase-insensitive一致により新しい順で検索します
+`order: "relevance"`ではboundedかつ固定されたEvent prefixをrankingし、各snippetのfactor内訳を返します
 timelineとLedger historyは本文を含まないmetadataを返します
 fetchはcontent digestをlocatorとしてだけ受け取り、現在のRunまたはSession Event履歴から完全な参照を解決し、一致するscope付きaccessを要求してからUTF-8 textを読みます
 Runtimeは返却byte長とSHA-256 digestを完全な参照と照合します
 
 成功resultは完全なJSONとしてcall単位とRun単位のitem数、出力byte数で制限されます
 call回数もRun単位で制限され、通常のRuntime Tool call budgetも消費します
-listとsearchは新しい順で`next_cursor`を返し、fetchはUTF-8境界の`next_offset`を返します
+listと既定searchは新しい順のcursorを使います
+relevance searchは`snapshot_event_count`と`snapshot_query_digest`を返し、後続pageで同じqueryと両方の値を要求し、その固定ranking内のoffsetとして`next_cursor`を使います
+fetchはUTF-8境界の`next_offset`を返します
 返却snippetとEvidence contentは`untrusted: true`を持ち、命令として解釈してはいけません
+
+組み込みhostはembeddingをRuntimeの依存にせず、決定的なrelevance scoreを拡張できます
+
+```go
+runtime, err := agent.NewRuntime(agent.Options{
+    Provider: provider,
+    ContextRetrieval: &agent.ContextRetrievalOptions{
+        ObjectStore:    objectStore,
+        SemanticScorer: scorer,
+    },
+})
+```
+
+`agent.ContextSemanticScorer`はexact query、boundedな最新task prefix、最大`agent.MaxContextSemanticCandidates`件のuntrusted excerptを受け取ります
+各excerptは最大`agent.MaxContextSemanticCandidateBytes`です
+scorerはcandidate順を維持し、各candidateに`0..1000`の整数を1つ返し、cancelを尊重して並行callに対応する必要があります
+不正outputはboundedな通常Tool errorになります
+scorer failure時にrankingへ暗黙fallbackせず、modelは`recency`で再試行できます
+Session本文を外部scorerへ開示できるか、credential、cost、決定性はhostが所有します
+`qed.HostLoadOptions.ContextSemanticScorer`は同じscorerを宣言設定のretrieval有効Agentへ接続します
+scorer callはTool context内で実行されますがProvider attemptではなくRuntimeもretryしないため、必要な外部call rate limitとusage accountingはhostが適用します
+
+組み込みhostはQEDの依存なしtoken近似も置き換えられます
+
+```go
+runtime, err := agent.NewRuntime(agent.Options{
+    Provider:       provider,
+    TokenEstimator: estimator,
+})
+```
+
+`agent.TokenEstimator`はpurpose付きbatchとしてisolated byte itemを受け取り、itemごとの非負countとstableかつsecretを含まないkindを返します
+実装は順序を維持し、cancelを尊重し、並行callに対応し、contentを保持せず命令として扱わず、同じProvider、Model、Purpose、Contentから同じresultを返す必要があります
+kindは`[a-z0-9][a-z0-9._/:-]{0,127}`に一致する必要があります
+Runtimeは明示的な`agent.Options.TokenEstimator`、interfaceを実装するProvider、`agent.CanonicalByteTokenEstimator`の順で選択します
+fallbackは各non-empty itemを`ceil(bytes / 4)`で予測し、依存を必要としません
+
+built-in Context compilerはcanonical logical Segmentへ契約を適用し、relevance searchはboundedなuntrusted snippetへ適用します
+custom Context compilerは`ContextCompileRequest`から解決済みestimatorを受け取ります
+estimator failureはretryや暗黙fallbackを行わず、compileではProvider call前に停止し、retrievalでは通常Tool errorを返します
+外部estimatorには外部semantic scorerと同じ開示、credential、rate limit、cost、決定性の考慮が必要です
+`qed.HostLoadOptions.TokenEstimator`はhost値を宣言設定の全Agentへ接続します
+
+`agent.BuildTokenUsageReport`はpublic Run EventからProvider attemptごとの本文なしreportを再構築します
+Cache Plan estimateをProvider Usageと対応付けて`actual - estimate`を返し、Usage欠落はunreportedとして維持します
+Token Estimateはobservationalであり、predictive budget policyが設定されるまでは`max_input_bytes`が決定的なcanonical byte hard境界です
 
 Runtimeは本文を含まない`ToolResult.ContextRetrieval` metadataを`tool.completed` EventとSession replayへ保持します
 metadataはoperation、outcome、item数、出力byte数、truncation、任意のobject digest、call以前にcompactionがあったかを含みます

@@ -452,11 +452,45 @@ compression. Omitting `retrieval` registers none of these Tools
 The per-Run limits reset for a terminal follow-up Run. Runtime's ordinary
 `max_tool_calls` limit still applies in addition to these retrieval limits
 
+`context_search` preserves exact case-insensitive, newest-first matching when
+`order` is omitted or is `recency`. Set `order` to `relevance` for an
+explainable bounded ranking over task, file, symbol, active Constraint,
+unresolved error, recency, prior-reference frequency, and resolved token-cost
+signals. The first ranked response returns `snapshot_event_count` and
+`snapshot_query_digest`. Repeat both values, the same query, and `next_cursor`
+for every later page. Runtime rejects a missing or mismatched snapshot binding,
+so newly appended Events cannot move the result set.
+`candidate_pool_truncated: true` means the bounded recent candidate pool was
+incomplete and the query should be narrowed. `constraint_pool_truncated` and
+`reference_history_truncated` report incomplete active-Constraint and prior
+search-reference signal pools; they do not make the returned ranking page
+unstable
+
+Declarative configuration always provides deterministic relevance factors and
+does not select an embedding service. An embedding application may add one
+normalized semantic factor with `qed.HostLoadOptions.ContextSemanticScorer` or
+`agent.ContextRetrievalOptions.SemanticScorer`. The host owns external data
+disclosure, credentials, cost, and scorer determinism
+
+Declarative configuration also does not select a tokenizer. An embedding host
+may set `qed.HostLoadOptions.TokenEstimator`; programmatic Runtime users set
+`agent.Options.TokenEstimator`. The explicit host value takes precedence over a
+Provider that implements `agent.TokenEstimator`. With neither, QED uses the
+deterministic `canonical_bytes_div_4` fallback. Context Segment fingerprints,
+Cache Plans, and relevance results record the stable estimator kind and count.
+The kind must match `[a-z0-9][a-z0-9._/:-]{0,127}`.
+
+Configured estimator calls are not Provider attempts and Runtime does not retry
+them. A Context compilation estimate failure stops before the Provider call; a
+relevance estimate failure becomes a normal bounded Tool error. The host owns
+external disclosure, credentials, rate limits, cost, and determinism
+
 `max_input_bytes` is deterministic and Provider-neutral, not a tokenizer-backed
 model context limit. QED never rewrites raw Session messages. It compiles a
 validated Checkpoint followed by a recent raw tail, and stops before a Provider
 call when no safe Tool, approval, subagent, edit-verification, or commit
-transaction boundary fits the hard limit
+transaction boundary fits the hard limit. Token estimates are observational
+until predictive budgeting is enabled by a later policy
 
 The first Checkpoint and every configured Raw Event Rebase are rebuilt without
 the previous semantic Checkpoint. Explicit Fact lifecycle changes and a
@@ -617,8 +651,10 @@ qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after RUN_ID[@EVENT_SEQUENCE
 ```
 
 `qed cache status` defaults to the newest Bundle and reports the effective
-Plan, normalized cache Usage, optional forecast and usage-cost estimate, first
-Prefix divergence, and latest compaction record
+Plan, latest input-estimate comparison, normalized cache Usage, optional
+forecast and usage-cost estimate, first Prefix divergence, and latest
+compaction record. `agent.BuildTokenUsageReport` provides all per-attempt
+comparisons to embedding applications without prompt content
 
 The Context commands derive content-free timelines, aggregate metrics, and
 before-to-after changes from the same stored public Events. They do not print

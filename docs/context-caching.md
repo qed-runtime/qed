@@ -328,9 +328,24 @@ with `agent.DiffContextSnapshots`
 
 `max_input_bytes` is a provider-neutral canonical byte limit, not a tokenizer or
 the model's advertised context window. It is deliberately deterministic but
-must be calibrated conservatively for the selected model. QED currently uses
-canonical bytes divided by four only for cache-planning token estimates;
-Provider Usage remains authoritative
+must be calibrated conservatively for the selected model. Token estimation is
+currently observational and does not replace that hard byte boundary
+
+Runtime resolves one `TokenEstimator` for Context Segments and relevance
+snippets. `agent.Options.TokenEstimator` wins over a Provider that implements
+the same interface; otherwise QED uses `CanonicalByteTokenEstimator`, which
+returns the ceiling of bytes divided by four. One batch returns a stable
+content-free kind matching `[a-z0-9][a-z0-9._/:-]{0,127}` and one non-negative
+count per isolated item. Built-in compilers store both on Segment fingerprints,
+while Prefix epochs and content hashes deliberately ignore them. Cache planning
+uses one common configured kind or falls back to the canonical approximation
+
+Provider Usage remains authoritative after a call. Public
+`agent.BuildTokenUsageReport` pairs each estimated `model.request.started`
+Event with completion, retry, failure, or cancellation and reports the signed
+Provider-input-minus-estimate difference. Missing Usage remains explicit rather
+than being replaced by an estimate. `qed cache status` displays the latest
+comparison when a complete Run Event stream is available
 
 Evidence Objects are private content. Configured Context compilers bind each
 new reference to an opaque digest of tenant, Session or ephemeral Run, and
@@ -371,17 +386,36 @@ Provider-facing Tool names
 
 | Tool | Bounded result |
 | --- | --- |
-| `context_search` | Exact case-insensitive matches over prior user, assistant, and Tool Event text with source references and bounded snippets |
+| `context_search` | Exact newest-first matching by default, or explainable relevance ranking over a frozen bounded Event prefix, with source references and bounded snippets |
 | `context_fetch` | One UTF-8 chunk from a scoped Evidence Object already referenced by the current Run or Session |
 | `session_timeline` | Content-free Event identities and activity metadata, newest first |
 | `artifact_history` | Immutable Artifact Ledger entries, newest first |
 | `execution_history` | Provider and Tool execution Ledger entries without argument or output text, newest first |
 
-List and search calls use an opaque numeric `cursor` over their current Event or
-Ledger snapshot and return `next_cursor`. Fetch uses byte `offset` and returns
-`next_offset`, both restricted to UTF-8 boundaries. Raw snippets and fetched
-content are marked `untrusted: true`; they are historical data, not executable
-instructions. Search does not perform relevance scoring or embedding lookup
+Lists and default search use a numeric `cursor` over their current Event or
+Ledger snapshot and return `next_cursor`. Relevance search freezes the accepted
+Event prefix on its first page, returns `snapshot_event_count`, and uses
+`next_cursor` as the ranking offset. Later pages must repeat that snapshot,
+`snapshot_query_digest`, and the same query. Runtime rejects a missing or
+mismatched binding, so retrieval Tool Events appended in between cannot shift
+the result set. Fetch uses byte `offset` and returns `next_offset`, both
+restricted to UTF-8 boundaries. Raw snippets and fetched content are marked
+`untrusted: true`; they are historical data, not executable instructions
+
+Relevance results expose normalized task, file, symbol, active Constraint,
+unresolved error, recency, prior-reference frequency, optional semantic, and
+token-cost factors plus a deterministic weighted total. Each result includes
+the exact snippet byte count, estimated token count, and estimator kind. Runtime
+considers at most the most recent `512` searchable Events, reports
+`candidate_pool_truncated` when more exist, and analyzes at most `16384` bytes
+per Event. Active Constraint text is limited to the newest `128` Facts, while
+reference-frequency analysis inspects at most `64` prior successful search
+results and skips an individual result larger than `262144` bytes. The response
+reports `constraint_pool_truncated` or `reference_history_truncated` when those
+signal pools are incomplete. A host may inject `ContextSemanticScorer`; Runtime
+passes at most `512` bounded untrusted excerpts and validates one `0..1000`
+score per item. Embedding is not required, selected by declarative
+configuration, or called by default exact search
 
 Each Run independently bounds attempted calls, successful returned items, and
 complete successful JSON output bytes. Per-call item and output-byte limits
@@ -488,9 +522,9 @@ output, volatile suffix, retries, task success, or retrieval cost. A non-positiv
 explicit-cache saving falls back unless the cache policy is required
 
 `qed cache status [run-id] --store .qed/evidence` reads the latest stored Plan,
-normalized Usage, cache-read ratio, forecast, pricing-derived actual estimate,
-first Prefix divergence, and latest compaction report. Omitting the Run ID
-selects the newest Evidence Bundle
+latest input-estimate comparison, normalized Usage, cache-read ratio, forecast,
+pricing-derived actual estimate, first Prefix divergence, and latest compaction
+report. Omitting the Run ID selects the newest Evidence Bundle
 
 ## Usage normalization
 
@@ -517,10 +551,14 @@ reported a complete breakdown. Per-message Usage keeps each individual result
   model-based semantic verification do not exist yet
 - Runtime currently rebuilds a Ledger from the complete Event prefix before
   every Compiler call; no incremental reducer index exists yet
-- no tokenizer-backed context limit or predictive output reserve exists
-- Context retrieval uses deterministic lexical search only; relevance scoring,
-  embeddings, and automatic retrieval policy are not implemented
-- `context_search` linearly scans accepted Event text; no retrieval index exists
+- Token Estimation is observational; `max_input_bytes` remains the hard
+  canonical byte limit and predictive output reserve does not exist yet
+- `context_search` exact mode scans the accepted Event prefix; relevance mode
+  rebuilds its Ledger from the fixed complete prefix and bounds only the newest
+  candidate and signal-analysis pools; no retrieval index or automatic
+  retrieval policy exists
+- QED has no built-in tokenizer-backed estimator or embedding implementation;
+  canonical bytes divided by four is the dependency-free token fallback
 - `context_fetch` verifies the complete scoped Object before returning a bounded
   chunk; the current Store contract has no ranged-read operation
 - Cache Plans select one user-message breakpoint rather than multiple

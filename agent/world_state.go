@@ -533,7 +533,14 @@ func currentWorldStateContextMessage(state *CurrentWorldState) (Message, Context
 	return message, segment, nil
 }
 
-func appendCurrentWorldState(compiled *CompiledContext, state *CurrentWorldState) error {
+func appendCurrentWorldState(
+	ctx context.Context,
+	compiled *CompiledContext,
+	state *CurrentWorldState,
+	estimator TokenEstimator,
+	provider string,
+	model string,
+) error {
 	if state == nil {
 		return nil
 	}
@@ -541,6 +548,24 @@ func appendCurrentWorldState(compiled *CompiledContext, state *CurrentWorldState
 	if err != nil {
 		return err
 	}
+	content, err := contextMessageContent(message)
+	if err != nil {
+		return err
+	}
+	estimate, err := EstimateTokenItems(ctx, estimator, TokenEstimateRequest{
+		Provider: provider,
+		Model:    model,
+		Purpose:  TokenEstimateContextSegments,
+		Items: []TokenEstimateItem{{
+			ID:      "segment/current-world-state",
+			Content: content,
+		}},
+	})
+	if err != nil {
+		return fmt.Errorf("estimate Current World State Context Segment: %w", err)
+	}
+	segment.TokenEstimate = estimate.Tokens[0]
+	segment.TokenEstimateKind = estimate.Kind
 	messageInsert := len(compiled.ModelRequest.Messages)
 	if messageInsert > 0 && compiled.ModelRequest.Messages[messageInsert-1].Role == RoleUser {
 		messageInsert--

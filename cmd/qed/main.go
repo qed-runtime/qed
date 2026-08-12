@@ -1564,6 +1564,33 @@ func writeCacheStatus(commandContext *cli.Context, store *evidence.JSONStore, bu
 	); err != nil {
 		return err
 	}
+	if report, reportErr := agent.BuildTokenUsageReport(
+		commandContext.Cancellation(),
+		bundle.Run.ID,
+		bundle.Events,
+	); reportErr == nil {
+		if observation, ok := report.Latest(); ok {
+			if observation.ProviderInputTokens == nil {
+				if _, err := fmt.Fprintf(
+					commandContext.Stdout(),
+					"Input estimate comparison: estimated=%d actual=unreported kind=%s\n",
+					observation.EstimatedInputTokens,
+					observation.TokenEstimateKind,
+				); err != nil {
+					return err
+				}
+			} else if _, err := fmt.Fprintf(
+				commandContext.Stdout(),
+				"Input estimate comparison: estimated=%d actual=%d difference=%d kind=%s\n",
+				observation.EstimatedInputTokens,
+				*observation.ProviderInputTokens,
+				*observation.DifferenceTokens,
+				observation.TokenEstimateKind,
+			); err != nil {
+				return err
+			}
+		}
+	}
 	if plan.FallbackReason != "" {
 		if _, err := fmt.Fprintf(commandContext.Stdout(), "Fallback: %s\n", plan.FallbackReason); err != nil {
 			return err

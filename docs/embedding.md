@@ -232,19 +232,85 @@ optional `EvidenceObjectAdminStore`; that bypass is also audited
 
 `ContextRetrieval` explicitly registers `context_search`, `context_fetch`,
 `session_timeline`, `artifact_history`, and `execution_history`. A nil option
-registers none of them. Search reads exact earlier Event text with deterministic
-case-insensitive matching. Timeline and Ledger history return content-free
-metadata. Fetch accepts a content digest only as a locator, resolves the full
-reference from the current Run or Session Event history, and then requires the
-matching scoped access before reading UTF-8 text. Runtime verifies the returned
-byte length and SHA-256 digest against that complete reference
+registers none of them. Search defaults to exact earlier Event text with
+deterministic case-insensitive matching, newest first. `order: "relevance"`
+ranks a bounded frozen Event prefix and returns the factor breakdown for every
+snippet. Timeline and Ledger history return content-free metadata. Fetch
+accepts a content digest only as a locator, resolves the full reference from
+the current Run or Session Event history, and then requires the matching scoped
+access before reading UTF-8 text. Runtime verifies the returned byte length and
+SHA-256 digest against that complete reference
 
 Every successful result is complete JSON bounded by per-call and per-Run item
 and output-byte limits. Calls are also bounded per Run and still consume the
-ordinary Runtime Tool-call budget. List and search results are newest first and
-use `next_cursor`; fetch uses a UTF-8-boundary `next_offset`. Returned snippets
-and Evidence content carry `untrusted: true` and must not be interpreted as
-instructions
+ordinary Runtime Tool-call budget. Lists and default search use newest-first
+cursors. Relevance search returns `snapshot_event_count` and
+`snapshot_query_digest`, requires both with the same query on later pages, and
+uses `next_cursor` as an offset in that frozen ranking. Fetch uses a
+UTF-8-boundary `next_offset`. Returned snippets and Evidence content carry
+`untrusted: true` and must not be interpreted as instructions
+
+An embedding host can augment the deterministic relevance score without
+making embeddings a Runtime dependency
+
+```go
+runtime, err := agent.NewRuntime(agent.Options{
+    Provider: provider,
+    ContextRetrieval: &agent.ContextRetrievalOptions{
+        ObjectStore:    objectStore,
+        SemanticScorer: scorer,
+    },
+})
+```
+
+`agent.ContextSemanticScorer` receives the exact query, a bounded latest-task
+prefix, and at most `agent.MaxContextSemanticCandidates` untrusted excerpts of
+at most `agent.MaxContextSemanticCandidateBytes` each. It must return one
+integer in the inclusive `0..1000` range per candidate, preserve order, honor
+cancellation, and be safe for concurrent calls. Invalid output produces a
+normal bounded Tool error. A scorer failure does not silently change ranking;
+the model can retry with `recency`. The host must decide whether Session text
+may be disclosed to an external scorer and owns its credentials, cost, and
+determinism. `qed.HostLoadOptions.ContextSemanticScorer` wires the same scorer
+into declaratively configured retrieval-enabled Agents. A scorer call runs
+inside the Tool context but is not a Provider attempt and is not retried by
+Runtime, so the host must also apply any external-call rate limit and usage
+accounting it requires
+
+An embedding host may also replace QED's dependency-free token approximation
+
+```go
+runtime, err := agent.NewRuntime(agent.Options{
+    Provider:       provider,
+    TokenEstimator: estimator,
+})
+```
+
+`agent.TokenEstimator` receives one purpose-tagged batch of isolated byte
+items and returns one non-negative count per item plus a stable, non-secret
+kind. Implementations must preserve order, honor cancellation, be safe for
+concurrent calls, not retain content or treat it as instructions, and return
+the same result for the same Provider, Model, Purpose, and Content. Kind must
+match `[a-z0-9][a-z0-9._/:-]{0,127}`. Runtime uses an
+explicit `agent.Options.TokenEstimator` first, then a Provider that implements
+the interface, then `agent.CanonicalByteTokenEstimator`. The fallback estimates
+each non-empty item as `ceil(bytes / 4)` and requires no dependency
+
+Built-in Context compilers apply the contract to canonical logical Segments;
+relevance search applies it to bounded untrusted snippets. Custom Context
+compilers receive the resolved estimator in `ContextCompileRequest`. Estimator
+failures are not retried or silently replaced: compilation stops before the
+Provider call, while retrieval returns a normal Tool error. An external
+estimator has the same disclosure, credential, rate-limit, cost, and
+determinism concerns as an external semantic scorer.
+`qed.HostLoadOptions.TokenEstimator` wires the
+host value into every declaratively configured Agent
+
+`agent.BuildTokenUsageReport` reconstructs a content-free per-attempt report
+from public Run Events. It pairs the Cache Plan estimate with Provider Usage,
+reports `actual - estimate`, and preserves missing Usage as unreported. Token
+estimates remain observational: `max_input_bytes` is still the deterministic
+hard canonical-byte boundary until a predictive budget policy is configured
 
 Runtime retains content-free `ToolResult.ContextRetrieval` metadata in
 `tool.completed` Events and Session replay. It contains operation, outcome,

@@ -90,6 +90,24 @@ owns authorization and audited access. `ToolResult.ContextRetrieval` records
 content-free completion metadata in the existing `tool.completed` Event and is
 never copied into the model-facing Tool Message
 
+`context_search` keeps exact newest-first matching as its default. Its explicit
+relevance order freezes an Event prefix, ranks a bounded candidate pool with
+explainable task, file, symbol, active-constraint, unresolved-error, recency,
+reference-frequency, and token-cost signals, and uses an optional host semantic
+score only as one bounded factor. The frozen prefix makes pagination stable
+while later Tool Events append to the Session. Runtime Core owns deterministic
+weights and validation; the embedding host owns semantic scorer disclosure,
+cost, and determinism
+
+Runtime resolves one `TokenEstimator` per Agent: an explicit host estimator
+wins, otherwise a Provider that implements the interface is used, and the
+dependency-free canonical-byte estimator is the fallback. Built-in Context
+compilers estimate isolated canonical Segments as one batch; relevance search
+uses the same contract for bounded snippets. Counts and their stable estimator
+kind enter Prefix Manifests and Cache Plans but not Prefix epochs or content
+hashes. Provider Usage remains authoritative, and `BuildTokenUsageReport`
+reconstructs per-attempt differences from public Events without prompt content
+
 `agent.ToolResult.ContextOperation` carries a validated, content-free
 classification for mutation, verification, commit, or subagent work. It never
 enters the model-facing Tool Message and does not grant authority or prove a

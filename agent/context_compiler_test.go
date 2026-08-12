@@ -167,6 +167,7 @@ func TestPrefixEpochIgnoresObservationalTokenEstimate(t *testing.T) {
 		t.Fatal(err)
 	}
 	compiled.Segments[0].TokenEstimate = 42
+	compiled.Segments[0].TokenEstimateKind = "other_tokenizer"
 	after, err := agent.BuildPrefixManifest(options, compiled.Segments)
 	if err != nil {
 		t.Fatal(err)

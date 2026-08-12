@@ -11,9 +11,8 @@ import (
 )
 
 const (
-	cachePlanVersion       = 1
-	cacheFamilyHashDomain  = "qed.cache.family.v1"
-	cacheTokenEstimateKind = "canonical_bytes_div_4"
+	cachePlanVersion      = 1
+	cacheFamilyHashDomain = "qed.cache.family.v1"
 )
 
 // CacheMode selects how a Provider prompt cache is used
@@ -125,7 +124,7 @@ type CacheBreakpoint struct {
 	Write bool `json:"write"`
 	// Reason explains why the Planner selected this boundary
 	Reason string `json:"reason"`
-	// PrefixTokenEstimate is the deterministic approximate prefix size
+	// PrefixTokenEstimate is the approximate prefix size
 	PrefixTokenEstimate int64 `json:"prefix_token_estimate"`
 }
 
@@ -161,7 +160,7 @@ type CachePlan struct {
 	ExpectedReuse int `json:"expected_reuse"`
 	// InputTokenEstimate is the approximate complete logical input size
 	InputTokenEstimate int64 `json:"input_token_estimate"`
-	// TokenEstimateKind identifies the deterministic estimator
+	// TokenEstimateKind identifies the tokenizer or canonical fallback
 	TokenEstimateKind string `json:"token_estimate_kind"`
 	// FallbackReason explains why the requested mode was not used
 	FallbackReason string `json:"fallback_reason,omitempty"`
@@ -196,8 +195,9 @@ type CachePlanner interface {
 
 // DefaultCachePlanner selects safe routing, one longest eligible breakpoint, and optional admission
 //
-// Token estimates use canonical logical bytes divided by four. Provider Usage
-// remains authoritative after a request completes.
+// Token estimates use the compiled Segment estimates when they share one
+// validated Kind, otherwise canonical logical bytes divided by four. Provider
+// Usage remains authoritative after a request completes.
 type DefaultCachePlanner struct{}
 
 // Plan creates a deterministic Cache Plan from configured capabilities and policy
@@ -222,12 +222,13 @@ func (DefaultCachePlanner) Plan(ctx context.Context, request CachePlanRequest) (
 	if err != nil {
 		return CachePlan{}, err
 	}
+	inputTokenEstimate, tokenEstimateKind := estimateSegmentsWithKind(request.Segments)
 	plan := CachePlan{
 		Version:            cachePlanVersion,
 		Mode:               policy.Mode,
 		ExpectedReuse:      policy.ExpectedReuse,
-		InputTokenEstimate: estimateSegments(request.Segments),
-		TokenEstimateKind:  cacheTokenEstimateKind,
+		InputTokenEstimate: inputTokenEstimate,
+		TokenEstimateKind:  tokenEstimateKind,
 		Pricing:            cloneCachePricing(policy.Pricing),
 	}
 	if plan.Mode == "" {
@@ -278,7 +279,7 @@ func (DefaultCachePlanner) Plan(ctx context.Context, request CachePlanRequest) (
 		plan.FallbackReason = ttlFallback
 	}
 	if plan.Mode == CacheModeExplicit {
-		breakpoint, ok := selectCacheBreakpoint(request, capabilities, selectedTTL)
+		breakpoint, ok := selectCacheBreakpoint(request, capabilities, selectedTTL, plan.TokenEstimateKind)
 		if !ok {
 			if policy.Required {
 				return CachePlan{}, errors.New("explicit Provider cache has no eligible message breakpoint")
@@ -507,7 +508,8 @@ func validateCachePlan(
 			return errors.New("Cache Plan family is not a QED cache digest")
 		}
 	}
-	if plan.InputTokenEstimate != estimateSegments(segments) || plan.TokenEstimateKind != cacheTokenEstimateKind {
+	wantEstimate, wantKind := estimateSegmentsWithKind(segments)
+	if plan.InputTokenEstimate != wantEstimate || plan.TokenEstimateKind != wantKind {
 		return errors.New("Cache Plan token estimate does not match the compiled Context Segments")
 	}
 	if plan.TTL != "" {
@@ -532,7 +534,10 @@ func validateCachePlan(
 			return errors.New("Cache breakpoints must be in strictly increasing message order")
 		}
 		segment := segments[breakpoint.MessageIndex+2]
-		prefixEstimate := estimateSegments(segments[:breakpoint.MessageIndex+3])
+		prefixEstimate := estimateSegmentsForKind(
+			segments[:breakpoint.MessageIndex+3],
+			plan.TokenEstimateKind,
+		)
 		if breakpoint.AfterSegmentID != segment.ID || request.Messages[breakpoint.MessageIndex].Role != RoleUser ||
 			!breakpoint.Write || strings.TrimSpace(breakpoint.Reason) != breakpoint.Reason || breakpoint.Reason == "" ||
 			breakpoint.PrefixTokenEstimate != prefixEstimate ||
@@ -636,13 +641,10 @@ func selectCacheBreakpoint(
 	request CachePlanRequest,
 	capabilities CacheCapabilities,
 	ttl CacheTTL,
+	tokenEstimateKind string,
 ) (CacheBreakpoint, bool) {
 	if capabilities.MaxWriteBreakpoints < 1 || len(request.Segments) < 3 {
 		return CacheBreakpoint{}, false
-	}
-	var cumulativeBytes int64
-	for _, segment := range request.Segments[:2] {
-		cumulativeBytes += segment.Bytes
 	}
 	var selected CacheBreakpoint
 	found := false
@@ -652,12 +654,11 @@ func selectCacheBreakpoint(
 			break
 		}
 		segment := request.Segments[segmentIndex]
-		cumulativeBytes += segment.Bytes
 		if message.Role != RoleUser || message.Text == "" ||
 			(segment.Kind != SegmentKindMessage && segment.Kind != SegmentKindCheckpoint) {
 			continue
 		}
-		estimate := estimateBytes(cumulativeBytes)
+		estimate := estimateSegmentsForKind(request.Segments[:segmentIndex+1], tokenEstimateKind)
 		if estimate < capabilities.MinimumPrefixTokens {
 			continue
 		}
@@ -675,14 +676,61 @@ func selectCacheBreakpoint(
 }
 
 func estimateSegments(segments []ContextSegment) int64 {
+	estimate, _ := estimateSegmentsWithKind(segments)
+	return estimate
+}
+
+func estimateSegmentsWithKind(segments []ContextSegment) (int64, string) {
+	kind := ""
+	if len(segments) > 0 && validTokenEstimateKind(segments[0].TokenEstimateKind) {
+		kind = segments[0].TokenEstimateKind
+		for _, segment := range segments[1:] {
+			if segment.TokenEstimateKind != kind {
+				kind = ""
+				break
+			}
+		}
+	}
+	if kind != "" && kind != CanonicalByteTokenEstimateKind {
+		total := int64(0)
+		for _, segment := range segments {
+			if segment.TokenEstimate < 0 || segment.TokenEstimate > math.MaxInt64-total {
+				return math.MaxInt64, kind
+			}
+			total += segment.TokenEstimate
+		}
+		return total, kind
+	}
 	var bytes int64
 	for _, segment := range segments {
 		if segment.Bytes > math.MaxInt64-bytes {
-			return math.MaxInt64
+			return math.MaxInt64, CanonicalByteTokenEstimateKind
 		}
 		bytes += segment.Bytes
 	}
-	return estimateBytes(bytes)
+	return estimateBytes(bytes), CanonicalByteTokenEstimateKind
+}
+
+func estimateSegmentsForKind(segments []ContextSegment, kind string) int64 {
+	if kind == CanonicalByteTokenEstimateKind {
+		var bytes int64
+		for _, segment := range segments {
+			if segment.Bytes > math.MaxInt64-bytes {
+				return math.MaxInt64
+			}
+			bytes += segment.Bytes
+		}
+		return estimateBytes(bytes)
+	}
+	total := int64(0)
+	for _, segment := range segments {
+		if segment.TokenEstimateKind != kind || segment.TokenEstimate < 0 ||
+			segment.TokenEstimate > math.MaxInt64-total {
+			return math.MaxInt64
+		}
+		total += segment.TokenEstimate
+	}
+	return total
 }
 
 func estimateBytes(bytes int64) int64 {
