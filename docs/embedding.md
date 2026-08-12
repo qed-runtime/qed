@@ -161,6 +161,24 @@ retain exact user text; store and transmit it with the same protection as
 Session Events. A custom Context Compiler receives an isolated in-progress copy
 through `ContextCompileRequest.Ledger`
 
+An embedding host can inject canonical state independently of any Profile
+
+```go
+runtime, err := agent.NewRuntime(agent.Options{
+    Provider:                provider,
+    CurrentWorldStateSource: source,
+})
+```
+
+`agent.CurrentWorldStateSource` receives isolated Run Events and the matching
+Ledger immediately before a logical Provider request. A Source must perform
+read-only bounded work and return structured file, Git, and observed-check
+state. A Source error fails the Run before the Provider call. Runtime validates
+and publishes `current_world_state.captured`; callers can verify a captured
+value with `agent.ValidateCurrentWorldState`. When using `profile/coding`
+directly, pass `codingProfile.CurrentWorldStateSource()` as shown in the Coding
+Profile guide. Declarative `qed.Host` configuration wires it automatically
+
 Constraint Facts use explicit lifecycle control rather than natural-language
 inference. A user Message without a directive creates an active Fact. Use an ID
 from `ContextLedger.Constraints`, or derive one from its source Event with
@@ -248,6 +266,13 @@ decoders must accept the optional fields. The Go `agent.Message` and
 `agent.Event` structs gained exported fields, and Ledger v2 extends
 `agent.ConstraintLedgerEntry`, so external composite literals should use field
 names
+
+Current World State adds the `current_world_state.captured` Event type, the
+optional `current_world_state` field on Events, terminal Results, and Session
+snapshots, and the `current_world_state` Segment kind. Strict Event-type switches
+must accept or deliberately ignore the new Event. Paths and command arguments
+inside a snapshot are content-bearing metadata even though file, diff, stdout,
+and stderr content is absent
 
 Deterministic Ledgers add optional `policy` metadata to Tool results,
 `context_ledger` to terminal Run results, and `ledger` references to new

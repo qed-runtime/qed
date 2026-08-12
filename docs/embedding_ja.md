@@ -145,6 +145,22 @@ terminal `RunResult.ContextLedger`は受理済みEvent履歴から作るdetermin
 Constraint entryが正確なuser textを保持するためLedgerはcontent-bearingであり、Session Eventと同等に保護して保存および転送する必要があります
 custom Context Compilerは`ContextCompileRequest.Ledger`から進行中Ledgerのisolated copyを受け取ります
 
+embedding hostはProfileと独立してcanonical stateを注入できます
+
+```go
+runtime, err := agent.NewRuntime(agent.Options{
+    Provider:                provider,
+    CurrentWorldStateSource: source,
+})
+```
+
+`agent.CurrentWorldStateSource`はlogical Provider request直前のisolated Run Eventと対応Ledgerを受け取ります
+Sourceはread-onlyかつboundedな処理を行い、structuredなfile、Git、観測済みcheck stateを返す必要があります
+Source errorはProvider call前にRunを失敗させます
+Runtimeは`current_world_state.captured`を検証してpublishし、callerは`agent.ValidateCurrentWorldState`でcapture済みvalueを検証できます
+`profile/coding`を直接使う場合はCoding Profile guideのように`codingProfile.CurrentWorldStateSource()`を渡します
+宣言的`qed.Host`設定では自動接続します
+
 Constraint Factは自然言語推論ではなく明示的なlifecycle controlを使います
 directiveがないuser Messageはactive Factを作ります
 後続Runで置換または解決する場合は`ContextLedger.Constraints`のIDを使うか、source Eventから`agent.ConstraintFactID`でIDを生成します
@@ -213,6 +229,10 @@ Session Storeがない場合はcallerが過去contextを渡し、両方のRunで
 既存の`user.message.added` HookもこれらのEventを観測します
 外部decoderは任意fieldを受理する必要があります
 Goの`agent.Message`と`agent.Event` structにはexported fieldが増え、Ledger v2は`agent.ConstraintLedgerEntry`を拡張するため、外部のcomposite literalはfield名を指定してください
+
+Current World Stateは`current_world_state.captured` Event type、Event、terminal Result、Session snapshotのoptional `current_world_state` field、`current_world_state` Segment kindを追加します
+strictなEvent type switchは新しいEventを受理または明示的に無視する必要があります
+snapshot内のpathとcommand argumentはfile、diff、stdout、stderr contentを含まなくてもcontent-bearing metadataです
 
 Deterministic LedgerによりTool resultへ任意の`policy` metadata、terminal Run resultへ`context_ledger`、新しいCheckpointへ`ledger`参照が追加されます
 host Policyのraw reasonは含めず、Policy metadataをmodel向けTool Messageへコピーしません

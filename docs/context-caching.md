@@ -124,14 +124,47 @@ Checkpoint strategy omits superseded and resolved Constraint Facts from a new
 model-facing Checkpoint. When reusing an earlier Checkpoint, the Compiler also
 filters its transient model view against the current Ledger without mutating
 the persisted Checkpoint. Its Ledger reference commits the complete lifecycle
-snapshot. Artifact entries still do not represent current file or Git state.
-Current World State will obtain those facts from their canonical sources
+snapshot. Artifact entries do not represent current file or Git state because
+those values belong to Current World State
+
+## Current World State
+
+When `agent.Options.CurrentWorldStateSource` is configured, Runtime calls it at
+the safe boundary before compiling each logical Provider request. The request
+contains isolated copies of the complete Event prefix and its deterministic
+Ledger. The Source must be concurrency-safe, honor cancellation, avoid
+mutation, and return a canonical snapshot no larger than
+`agent.MaxCurrentWorldStateBytes`
+
+Runtime normalizes the snapshot, binds it to the exact preceding
+`ContextLedgerReference`, computes a domain-separated digest, and emits
+`current_world_state.captured` before the next model request. Ledger replay
+validates the source generation, digest, and every referenced Tool completion
+`ValidateCurrentWorldState` performs the same check for an external caller
+Memory and JSONL Session Stores expose the latest captured Event value through
+`SessionSnapshot.CurrentWorldState`
+
+The snapshot becomes one required, volatile `current_world_state` Context
+Segment and a host context Message. It is not appended to Session messages or
+`RunResult.Messages`. Runtime places it without splitting a Tool transaction
+and keeps an actual user Message last when that Message was already the raw
+tail. The compacting Compiler reserves the rendered bytes before selecting a
+safe cut; Current World State is regenerated and never copied into a
+Checkpoint
+
+File and Git observations carry only bounded identities and Tool provenance
+Check results carry command identity and the digest of exact structured Tool
+output, not stdout or stderr. Paths and arguments are untrusted content and are
+never interpreted as instructions. State capture changes the volatile suffix
+and therefore participates in Prefix Manifest and cache planning without
+rewriting stable earlier Segments
 
 `ContextLedgerVersion` and the snapshot digest domain changed from v1 to v2.
 Standalone v1 snapshots are derived data and should be rebuilt from their Event
 Log; `ValidateContextLedger` compares supplied state with the current v2
 reduction. Compatibility support is limited to v1 references already embedded
-in persisted Checkpoints
+in persisted Checkpoints whose Event prefix predates Current World State
+capture
 
 For compatibility, Runtime emits one `user.message.added` Event for every
 `RunRequest.Input` entry, including caller-supplied assistant or Tool history

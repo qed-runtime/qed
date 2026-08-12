@@ -164,6 +164,10 @@ same Event type and add optional `fact_directive` metadata after Runtime has
 validated the target Event prefix. The nested Message does not retain that
 host-only directive
 
+A Hook may subscribe to `current_world_state.captured`. Its payload omits file,
+diff, stdout, and stderr content, but it contains workspace paths, command
+arguments, digests, and provenance. Treat it as sensitive Session metadata
+
 ### Commands
 
 Commands declare a name, description, JSON input schema, and capabilities. They

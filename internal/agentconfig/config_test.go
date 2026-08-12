@@ -661,6 +661,19 @@ func TestLoadBuildsWorkspaceBoundCodingProfile(t *testing.T) {
 	if result.Messages[len(result.Messages)-1].Text != "hello" {
 		t.Fatalf("Run result = %#v", result)
 	}
+	if result.CurrentWorldState == nil || !result.CurrentWorldState.Snapshot.FilesAvailable {
+		t.Fatalf("declarative Coding Profile Current World State = %#v", result.CurrentWorldState)
+	}
+	foundInstructions := false
+	for _, file := range result.CurrentWorldState.Snapshot.Files {
+		if file.Path == "AGENTS.md" && file.Status == agent.CurrentWorldFilePresent {
+			foundInstructions = true
+			break
+		}
+	}
+	if !foundInstructions {
+		t.Fatalf("Current World State files = %#v", result.CurrentWorldState.Snapshot.Files)
+	}
 }
 
 func TestLoadBuildsExternalWorkspaceExtension(t *testing.T) {

@@ -328,6 +328,11 @@ capability nameは有効な形式であれば外部Extension由来でも利用�
 prompt diagnosticsはTool名とcapabilityだけを含み、raw Tool引数を含みません
 
 選択したenvironment名はすべて存在する必要があります
+
+宣言的Coding Profileは参照する各Agentへ既定Current World State Sourceも設定します
+canonical fileとGit readは同じProfile Policyとoptional Run capability restrictionに従います
+background captureは`ask` outcome用approvalを要求しません
+scopeとlimitは[Coding Profile](coding-profile_ja.md#current-world-state)を参照してください
 executable lookupは選択した`PATH`だけを使い、Host environmentへfallbackしません
 
 ## Agent定義とdelegation

@@ -72,6 +72,24 @@ type Options struct {
 	Edit                  edit.Options
 	Process               processextension.Options
 	Git                   gitextension.Options
+	// CurrentWorldState configures canonical workspace, Git, and check snapshots
+	CurrentWorldState CurrentWorldStateOptions
+}
+
+// CurrentWorldStateOptions bounds Coding Profile canonical state capture
+type CurrentWorldStateOptions struct {
+	// Disabled prevents the Profile from constructing a Current World State Source
+	Disabled bool
+	// MaxFiles bounds retained relevant workspace paths and defaults to 512
+	MaxFiles int
+	// MaxGitChanges bounds retained Git status entries and defaults to 1024
+	MaxGitChanges int
+	// MaxChecks bounds retained command identities and defaults to 64
+	MaxChecks int
+	// MaxFileBytes bounds hashing of one regular file and defaults to 16 MiB
+	MaxFileBytes int64
+	// MaxTotalFileBytes bounds file bytes hashed per capture and defaults to 64 MiB
+	MaxTotalFileBytes int64
 }
 
 // ExtensionOptions configures one process-isolated Extension in the Coding Profile
@@ -85,12 +103,13 @@ type ExtensionOptions struct {
 
 // Profile contains a reloadable Extension Generation Set and instructions for one Workspace
 type Profile struct {
-	workspace    *workspace.Workspace
-	toolSource   *host.GenerationSet
-	processes    map[string]host.ProcessOptions
-	instructions string
-	recorder     evidence.Recorder
-	memory       *evidence.MemoryRecorder
+	workspace               *workspace.Workspace
+	toolSource              *host.GenerationSet
+	currentWorldStateSource agent.CurrentWorldStateSource
+	processes               map[string]host.ProcessOptions
+	instructions            string
+	recorder                evidence.Recorder
+	memory                  *evidence.MemoryRecorder
 }
 
 // New validates options, starts every configured Extension, and assembles the Profile
@@ -201,13 +220,29 @@ func New(ctx context.Context, options Options) (*Profile, error) {
 		closeManagers()
 		return nil, err
 	}
+	var currentWorldStateSource agent.CurrentWorldStateSource
+	if !options.CurrentWorldState.Disabled {
+		configured, err := newCurrentWorldStateSource(
+			scoped,
+			options.Policy,
+			options.Git,
+			options.CommandEnvironment,
+			options.CurrentWorldState,
+		)
+		if err != nil {
+			_ = generationSet.Close()
+			return nil, fmt.Errorf("configure Current World State: %w", err)
+		}
+		currentWorldStateSource = configured
+	}
 	return &Profile{
-		workspace:    scoped,
-		toolSource:   generationSet,
-		processes:    processes,
-		instructions: instructions,
-		recorder:     recorder,
-		memory:       memory,
+		workspace:               scoped,
+		toolSource:              generationSet,
+		currentWorldStateSource: currentWorldStateSource,
+		processes:               processes,
+		instructions:            instructions,
+		recorder:                recorder,
+		memory:                  memory,
 	}, nil
 }
 
@@ -238,6 +273,11 @@ func (profile *Profile) ToolSource() agent.ToolSource {
 // ComponentSource returns the reloadable Tool and Hook Generation Set
 func (profile *Profile) ComponentSource() agent.ComponentSource {
 	return profile.toolSource
+}
+
+// CurrentWorldStateSource returns the read-only canonical state Source
+func (profile *Profile) CurrentWorldStateSource() agent.CurrentWorldStateSource {
+	return profile.currentWorldStateSource
 }
 
 // AcquireCommands pins the current custom Command generation set

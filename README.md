@@ -23,6 +23,8 @@ executable today
 - host-owned Evidence Bundles
 - deterministic Artifact, Execution, Constraint, Policy, and Task Ledgers with
   explicit Fact lifecycle, rebuilt from ordered Session Events
+- canonical Current World State snapshots for relevant file hashes, Git state,
+  and observed check freshness
 - Evidence-preserving Context compression, Prefix Manifests, prompt-cache Plans,
   and normalized cache Usage
 - Nagi-based CLI and multi-turn TUI

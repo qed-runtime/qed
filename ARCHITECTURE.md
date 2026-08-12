@@ -60,6 +60,16 @@ an isolated Ledger copy, the terminal `RunResult` exposes the final generation,
 and a compacted Checkpoint retains a content-free reference that replay verifies
 against its exact preceding Event prefix
 
+Runtime can also call an injected `agent.CurrentWorldStateSource` at each safe
+logical Provider boundary. The Source reads canonical host state without
+mutating it and returns a bounded snapshot tied to the exact preceding Ledger
+generation. Runtime validates and publishes `current_world_state.captured`,
+then supplies the snapshot as a required volatile Context Segment without
+adding it to replayable conversation Messages. The Coding Profile implements
+this host boundary with current workspace hashes, read-only Git status and
+diff, and exact prior `run_command` outcomes; Runtime Core retains no
+filesystem or Git implementation
+
 `agent.CachePlanner` combines host policy with Provider capabilities after
 compilation. QED cache controls are disabled by default. An enabled Plan carries
 a hashed Cache Family, optional TTL and breakpoint, and optional host-priced
@@ -93,7 +103,9 @@ delta form and the earlier full form
 `profile/coding` assembles bounded project context, one capability Policy, an
 Evidence recorder, and one or more process-isolated Extensions. The reusable
 `qed.workspace`, `qed.process`, and `qed.git` Extensions contribute its six
-standard Tools while keeping them outside Runtime Core
+standard Tools while keeping them outside Runtime Core. The Profile also owns
+the default read-only Current World State Source and applies the same Policy
+and Run capability restriction before canonical reads
 
 `extension.ToolProxy` and `extension.CommandProxy` are host enforcement points.
 Tool input is schema-validated before invocation-specific capability discovery,

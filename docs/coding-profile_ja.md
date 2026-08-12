@@ -30,6 +30,29 @@ QEDの`extensions.lock`はこの3つをself-exec向けに選択します
 同じProfileへ接続した追加の組み込みまたは外部ExtensionはToolとHookを提供できます
 Runはすべての設定Extensionを1つのgeneration setとして取得します
 
+## Current World State
+
+Profileは既定でread-onlyな`agent.CurrentWorldStateSource`を構築します
+宣言的Agent graphはProfileを参照する各Agentへ自動接続します
+各logical Provider requestの前に古い文章をmodelへ信頼させるのではなく、boundedな現在stateを再構築します
+
+- relevantなregular workspace fileを現在byte数とSHA-256 digestで表現し、project context file、file Toolが観測したpath、現在のGit changeを対象にする
+- size超過、並行変更、non-regular pathは`unsupported`、存在しないpathは`absent`として保持する
+- current worktree statusとbounded diff digestを公式Git Extensionと同じread-only Git implementationから取得
+- 過去のstructured `run_command` resultから正確なcommand identity、exit status、output digest、`current`、`stale`、`unverified` freshnessを保持
+- 後続の既知mutationは以前のcheckをstaleにし、未知のsuccessful Toolはunverifiedにする
+
+Sourceはcommandを再実行せず、file content、diff text、stdout、stderrをsnapshotへコピーしません
+pathとcommand argumentは引き続き観測可能なmetadataでありSession Eventと同様に保護する必要があります
+各canonical readはProfile Policyとoptional Run capability setで検査します
+`ask` outcomeはbackground capture用approval promptを開かず、そのscopeをunavailableとして扱います
+Policy evaluation errorはRunを失敗させます
+
+captureはboundedですが、external processを横断するatomicなOS snapshotではありません
+既定値は最大512 file、1,024 Git change、64 command identityを保持し、1 fileあたり16 MiB、1 captureあたり64 MiBまでhashした後、Runtimeのencoded snapshot上限256 KiBを適用します
+programmatic callerはProfile limitを変更でき、`CurrentWorldState.Disabled`で無効化できます
+宣言設定は現在この既定値を使います
+
 ## Declarative configuration
 
 ExtensionとProfileをProvider profileから独立して定義します
@@ -161,8 +184,9 @@ if err != nil {
 defer codingProfile.Close()
 
 runtime, err := agent.NewRuntime(agent.Options{
-	Provider:        modelProvider,
-	ComponentSource: codingProfile.ComponentSource(),
+	Provider:                modelProvider,
+	ComponentSource:         codingProfile.ComponentSource(),
+	CurrentWorldStateSource: codingProfile.CurrentWorldStateSource(),
 })
 if err != nil {
 	log.Fatal(err)
@@ -177,12 +201,13 @@ handle, err := runtime.Run(ctx, agent.RunRequest{
 })
 ```
 
-`coding.Options`はApprover、Evidence Recorder、Extension State Store、verbose logger、lifecycle timeout、project-context limit、各公式Tool implementationのlimitも受け取ります
+`coding.Options`はApprover、Evidence Recorder、Extension State Store、verbose logger、lifecycle timeout、project-context limit、Current World State limit、各公式Tool implementationのlimitも受け取ります
 すべての`host.Command.Path`はabsoluteである必要があります
 
 `ComponentSource`はすべてのExtensionのToolとHookをRun終了まで固定します
 Tool-only integration向けに`ToolSource`も利用できます
 host-invoked Commandには`AcquireCommands`を使います
+lower-level Runtimeは`CurrentWorldStateSource`を明示的に渡す必要があり、省略したRuntimeではcaptureが無効になります
 
 future Run向けに1つのExtensionをreloadできます
 

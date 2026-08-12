@@ -288,7 +288,11 @@ func (compiler *CompactingContextCompiler) Compile(
 	if err != nil {
 		return CompiledContext{}, err
 	}
-	originalBytes := contextSegmentBytes(originalSegments)
+	worldStateBytes, err := currentWorldStateContextBytes(request.CurrentWorldState)
+	if err != nil {
+		return CompiledContext{}, err
+	}
+	originalBytes := contextSegmentBytes(originalSegments) + worldStateBytes
 	if request.Checkpoint != nil {
 		if err := validateCheckpoint(*request.Checkpoint, canonical.Messages, request.Ledger, compiler.policy.CheckpointMaxBytes); err != nil {
 			return CompiledContext{}, fmt.Errorf("validate active Context Checkpoint: %w", err)
@@ -306,7 +310,7 @@ func (compiler *CompactingContextCompiler) Compile(
 	if err != nil {
 		return CompiledContext{}, err
 	}
-	baselineBytes := contextSegmentBytes(baselineSegments)
+	baselineBytes := contextSegmentBytes(baselineSegments) + worldStateBytes
 	if baselineBytes <= compiler.policy.MaxInputBytes {
 		var report *ContextCompactionReport
 		if request.Checkpoint != nil || len(baselineRefs) > 0 {
@@ -364,7 +368,7 @@ func (compiler *CompactingContextCompiler) Compile(
 		if segmentErr != nil {
 			return CompiledContext{}, segmentErr
 		}
-		compiledBytes := contextSegmentBytes(segments)
+		compiledBytes := contextSegmentBytes(segments) + worldStateBytes
 		if compiledBytes > compiler.policy.MaxInputBytes || compiledBytes >= originalBytes {
 			continue
 		}

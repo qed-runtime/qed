@@ -41,6 +41,38 @@ The QED `extensions.lock` selects these three for self-exec. Additional linked
 or external Extensions attached to the same Profile may contribute Tools and
 Hooks. A Run acquires all configured Extensions as one generation set
 
+## Current World State
+
+The Profile constructs a read-only `agent.CurrentWorldStateSource` by default
+Declarative Agent graphs connect it to every Agent that references the Profile
+Before each logical Provider request, it reconstructs bounded current state
+instead of asking the model to trust older prose
+
+- relevant regular workspace files are represented by current byte count and
+  SHA-256 digest, including project-context files, paths observed by file Tools,
+  and current Git changes; oversized, concurrently changed, or non-regular
+  paths are retained as `unsupported`, while missing paths are `absent`
+- current worktree status and a bounded diff digest come from the same
+  read-only Git implementation as the official Git Extension
+- prior structured `run_command` results retain exact command identity, exit
+  status, output digest, and `current`, `stale`, or `unverified` freshness
+- a later known mutation makes an earlier check stale; an unknown successful
+  Tool makes it unverified
+
+The Source never reruns a command or copies file content, diff text, stdout, or
+stderr into the snapshot. Paths and command arguments remain observable
+metadata and must be protected like Session Events. Each canonical read is
+checked against the Profile Policy and the optional Run capability set. An
+`ask` outcome does not open an approval prompt for background capture; that
+scope is reported unavailable. A Policy evaluation error fails the Run
+
+Capture is bounded and not an atomic operating-system snapshot across external
+processes. The defaults retain at most 512 files, 1,024 Git changes, and 64
+command identities, hash at most 16 MiB per file and 64 MiB per capture, and
+then enforce the Runtime's 256 KiB encoded snapshot limit. Programmatic callers
+can change the Profile limits or set `CurrentWorldState.Disabled`; declarative
+configuration currently uses these defaults
+
 ## Declarative configuration
 
 Define Extensions and the Profile independently from Provider profiles
@@ -174,8 +206,9 @@ if err != nil {
 defer codingProfile.Close()
 
 runtime, err := agent.NewRuntime(agent.Options{
-	Provider:        modelProvider,
-	ComponentSource: codingProfile.ComponentSource(),
+	Provider:                modelProvider,
+	ComponentSource:         codingProfile.ComponentSource(),
+	CurrentWorldStateSource: codingProfile.CurrentWorldStateSource(),
 })
 if err != nil {
 	log.Fatal(err)
@@ -191,13 +224,15 @@ handle, err := runtime.Run(ctx, agent.RunRequest{
 ```
 
 `coding.Options` also accepts an Approver, Evidence Recorder, Extension State
-Store, verbose logger, lifecycle timeouts, project-context limits, and limits
-for each official Tool implementation. Every `host.Command.Path` must be
-absolute
+Store, verbose logger, lifecycle timeouts, project-context limits, Current
+World State limits, and limits for each official Tool implementation. Every
+`host.Command.Path` must be absolute
 
 `ComponentSource` pins Tools and Hooks from every Extension until the Run ends.
 `ToolSource` remains available for Tool-only integrations. Use
-`AcquireCommands` for host-invoked Commands
+`AcquireCommands` for host-invoked Commands. A lower-level Runtime must pass
+`CurrentWorldStateSource` explicitly; omitting it disables capture for that
+Runtime
 
 Reload one Extension for future Runs
 

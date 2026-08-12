@@ -355,7 +355,9 @@ const (
 const (
 	EventRunStarted       EventType = "run.started"
 	EventUserMessageAdded EventType = "user.message.added"
-	EventContextCompacted EventType = "context.compacted"
+	// EventCurrentWorldStateCaptured commits one canonical state snapshot
+	EventCurrentWorldStateCaptured EventType = "current_world_state.captured"
+	EventContextCompacted          EventType = "context.compacted"
 	// EventProviderRateLimitWait reports a queued outbound Provider attempt
 	EventProviderRateLimitWait EventType = "provider.rate_limit.waiting"
 	EventModelRequest          EventType = "model.request.started"
@@ -462,6 +464,8 @@ type Event struct {
 	// Runtime moves this value from user Message input to the Event before
 	// persistence. Event.Message therefore remains provider-neutral history.
 	FactDirective *FactLifecycleDirective `json:"fact_directive,omitempty"`
+	// CurrentWorldState contains canonical host state for a capture Event
+	CurrentWorldState *CurrentWorldState `json:"current_world_state,omitempty"`
 	// Delta contains incremental assistant text for message.delta
 	Delta string `json:"delta,omitempty"`
 	// ToolCall is present for Tool events
@@ -506,6 +510,8 @@ type RunResult struct {
 	ContextCheckpoint *ContextCheckpoint `json:"context_checkpoint,omitempty"`
 	// ContextLedger is the terminal deterministic view over this Run's Event history
 	ContextLedger *ContextLedger `json:"context_ledger,omitempty"`
+	// CurrentWorldState is the latest canonical host snapshot used by this Run
+	CurrentWorldState *CurrentWorldState `json:"current_world_state,omitempty"`
 	// ContextCompaction is the latest context reduction published by this Run
 	ContextCompaction *ContextCompactionReport `json:"context_compaction,omitempty"`
 	// CachePlan is the latest Provider cache decision used by this Run

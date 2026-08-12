@@ -21,6 +21,7 @@ const (
 	prefixManifestHashDomain    = "qed.context.manifest.v1"
 	contextInstructionsPriority = 100
 	contextToolABIPriority      = 90
+	contextWorldStatePriority   = 80
 	contextMessagePriority      = 50
 	contextMetadataPriority     = 10
 )
@@ -50,8 +51,10 @@ const (
 	SegmentKindInstructions SegmentKind = "instructions"
 	SegmentKindToolABI      SegmentKind = "tool_abi"
 	SegmentKindCheckpoint   SegmentKind = "checkpoint"
-	SegmentKindMessage      SegmentKind = "message"
-	SegmentKindMetadata     SegmentKind = "metadata"
+	// SegmentKindCurrentWorldState identifies a host-captured canonical state suffix
+	SegmentKindCurrentWorldState SegmentKind = "current_world_state"
+	SegmentKindMessage           SegmentKind = "message"
+	SegmentKindMetadata          SegmentKind = "metadata"
 )
 
 // StabilityClass describes how frequently a Context Segment is expected to change
@@ -143,6 +146,11 @@ type ContextCompileRequest struct {
 	Checkpoint *ContextCheckpoint
 	// Ledger is the deterministic state reconstructed from ordered Run Events
 	Ledger *ContextLedger
+	// CurrentWorldState is the latest canonical host snapshot when configured
+	//
+	// Runtime appends its required volatile Context Segment after Compile returns.
+	// Compilers with input limits must reserve its rendered byte size.
+	CurrentWorldState *CurrentWorldState
 }
 
 // CompiledContext contains a canonical model request and its logical Segments

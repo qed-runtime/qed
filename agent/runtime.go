@@ -60,6 +60,10 @@ type Options struct {
 	//
 	// A nil Compiler uses DefaultContextCompiler
 	ContextCompiler ContextCompiler
+	// CurrentWorldStateSource reads canonical host state before each logical Provider request
+	//
+	// A nil Source disables Current World State capture
+	CurrentWorldStateSource CurrentWorldStateSource
 	// CachePlanner creates Provider-neutral cache routing and breakpoint decisions
 	//
 	// A nil Planner uses DefaultCachePlanner
@@ -81,23 +85,24 @@ type Options struct {
 //
 // Runtime is safe for concurrent use after construction
 type Runtime struct {
-	provider         Provider
-	staticTools      runtimeToolSet
-	toolValidator    ToolInputValidator
-	toolSource       ToolSource
-	componentSource  ComponentSource
-	staticHooks      []runtimeHook
-	maxProviderCalls int
-	maxToolCalls     int
-	sessionStore     SessionStore
-	contextCompiler  ContextCompiler
-	cachePlanner     CachePlanner
-	cachePolicy      CachePolicy
-	providerRetry    ProviderRetryPolicy
-	providerLimiter  ProviderRateLimitController
-	logger           *slog.Logger
-	sessionMu        sync.Mutex
-	sessionLocks     map[string]*runtimeSessionLock
+	provider                Provider
+	staticTools             runtimeToolSet
+	toolValidator           ToolInputValidator
+	toolSource              ToolSource
+	componentSource         ComponentSource
+	staticHooks             []runtimeHook
+	maxProviderCalls        int
+	maxToolCalls            int
+	sessionStore            SessionStore
+	contextCompiler         ContextCompiler
+	currentWorldStateSource CurrentWorldStateSource
+	cachePlanner            CachePlanner
+	cachePolicy             CachePolicy
+	providerRetry           ProviderRetryPolicy
+	providerLimiter         ProviderRateLimitController
+	logger                  *slog.Logger
+	sessionMu               sync.Mutex
+	sessionLocks            map[string]*runtimeSessionLock
 }
 
 type runtimeSessionLock struct {
@@ -178,22 +183,23 @@ func NewRuntime(options Options) (*Runtime, error) {
 	}
 
 	return &Runtime{
-		provider:         options.Provider,
-		staticTools:      staticTools,
-		toolValidator:    options.ToolInputValidator,
-		toolSource:       options.ToolSource,
-		componentSource:  options.ComponentSource,
-		staticHooks:      staticHooks,
-		maxProviderCalls: maxProviderCalls,
-		maxToolCalls:     maxToolCalls,
-		sessionStore:     options.SessionStore,
-		contextCompiler:  contextCompiler,
-		cachePlanner:     cachePlanner,
-		cachePolicy:      cachePolicy,
-		providerRetry:    providerRetry,
-		providerLimiter:  providerLimiter,
-		logger:           options.Logger,
-		sessionLocks:     make(map[string]*runtimeSessionLock),
+		provider:                options.Provider,
+		staticTools:             staticTools,
+		toolValidator:           options.ToolInputValidator,
+		toolSource:              options.ToolSource,
+		componentSource:         options.ComponentSource,
+		staticHooks:             staticHooks,
+		maxProviderCalls:        maxProviderCalls,
+		maxToolCalls:            maxToolCalls,
+		sessionStore:            options.SessionStore,
+		contextCompiler:         contextCompiler,
+		currentWorldStateSource: options.CurrentWorldStateSource,
+		cachePlanner:            cachePlanner,
+		cachePolicy:             cachePolicy,
+		providerRetry:           providerRetry,
+		providerLimiter:         providerLimiter,
+		logger:                  options.Logger,
+		sessionLocks:            make(map[string]*runtimeSessionLock),
 	}, nil
 }
 
@@ -432,6 +438,7 @@ func (runtime *Runtime) execute(
 	}
 	var latestCompaction *ContextCompactionReport
 	var latestCachePlan *CachePlan
+	var latestWorldState *CurrentWorldState
 
 	ctx = WithRunInfo(ctx, RunInfo{
 		RunID:        runID,
@@ -471,6 +478,21 @@ func (runtime *Runtime) execute(
 			previewEvents := append(cloneEvents(ledgerEvents), preview)
 			if _, err := BuildContextLedger(ctx, previewEvents); err != nil {
 				return fmt.Errorf("validate Fact lifecycle transition: %w", err)
+			}
+		}
+		if event.Type == EventCurrentWorldStateCaptured && event.CurrentWorldState == nil {
+			return errors.New("current_world_state.captured requires Current World State")
+		}
+		if event.Type != EventCurrentWorldStateCaptured && event.CurrentWorldState != nil {
+			return fmt.Errorf("Event %q must not contain Current World State", event.Type)
+		}
+		if event.CurrentWorldState != nil {
+			prefix, err := BuildContextLedger(ctx, ledgerEvents)
+			if err != nil {
+				return fmt.Errorf("build Current World State prefix: %w", err)
+			}
+			if err := validateCurrentWorldStateAgainstPrefix(*event.CurrentWorldState, prefix, ledgerEvents); err != nil {
+				return fmt.Errorf("validate Current World State: %w", err)
 			}
 		}
 		for _, configured := range hooks {
@@ -637,6 +659,7 @@ func (runtime *Runtime) execute(
 			SessionRevision:   sessionRevision,
 			ContextCheckpoint: cloneContextCheckpointPointer(activeCheckpoint),
 			ContextLedger:     cloneContextLedgerPointer(terminalLedger),
+			CurrentWorldState: cloneCurrentWorldStatePointer(latestWorldState),
 			ContextCompaction: cloneContextCompactionReport(latestCompaction),
 			CachePlan:         cloneCachePlanPointer(latestCachePlan),
 		}, runErr)
@@ -737,6 +760,70 @@ func (runtime *Runtime) execute(
 			fail(fmt.Errorf("build Context Ledger: %w", err))
 			return
 		}
+		if runtime.currentWorldStateSource != nil {
+			captureStartedAt := time.Now()
+			runtime.debug("current_world_state.capture.started",
+				"run_id", runID,
+				"provider", runtime.provider.Name(),
+			)
+			snapshot, snapshotErr := runtime.currentWorldStateSource.Snapshot(ctx, CurrentWorldStateRequest{
+				Run: RunInfo{
+					RunID: runID, ParentRunID: request.ParentRunID, AgentID: request.AgentID,
+					SessionID: request.SessionID, Capabilities: append([]string(nil), request.Capabilities...),
+				},
+				Events: cloneEvents(ledgerEvents),
+				Ledger: *cloneContextLedgerPointer(&activeLedger),
+			})
+			if snapshotErr != nil {
+				runtime.debug("current_world_state.capture.failed",
+					"run_id", runID,
+					"provider", runtime.provider.Name(),
+					"duration_ms", time.Since(captureStartedAt).Milliseconds(),
+					"error_type", fmt.Sprintf("%T", snapshotErr),
+				)
+				fail(fmt.Errorf("capture Current World State: %w", snapshotErr))
+				return
+			}
+			worldState, stateErr := buildCurrentWorldState(activeLedger.Reference(), snapshot, ledgerEvents)
+			if stateErr != nil {
+				runtime.debug("current_world_state.capture.failed",
+					"run_id", runID,
+					"provider", runtime.provider.Name(),
+					"duration_ms", time.Since(captureStartedAt).Milliseconds(),
+					"error_type", fmt.Sprintf("%T", stateErr),
+				)
+				fail(fmt.Errorf("build Current World State: %w", stateErr))
+				return
+			}
+			if err := emit(Event{Type: EventCurrentWorldStateCaptured, CurrentWorldState: &worldState}); err != nil {
+				fail(err)
+				return
+			}
+			latestWorldState = cloneCurrentWorldStatePointer(&worldState)
+			activeLedger, err = BuildContextLedger(ctx, ledgerEvents)
+			if err != nil {
+				fail(fmt.Errorf("rebuild Context Ledger after Current World State: %w", err))
+				return
+			}
+			gitChanges := 0
+			gitAvailable := false
+			if worldState.Snapshot.Git != nil {
+				gitAvailable = worldState.Snapshot.Git.Available
+				gitChanges = len(worldState.Snapshot.Git.Changes)
+			}
+			runtime.debug("current_world_state.capture.completed",
+				"run_id", runID,
+				"provider", runtime.provider.Name(),
+				"duration_ms", time.Since(captureStartedAt).Milliseconds(),
+				"files_available", worldState.Snapshot.FilesAvailable,
+				"file_count", len(worldState.Snapshot.Files),
+				"files_truncated", worldState.Snapshot.FilesTruncated,
+				"git_available", gitAvailable,
+				"git_change_count", gitChanges,
+				"check_count", len(worldState.Snapshot.Checks),
+				"checks_truncated", worldState.Snapshot.ChecksTruncated,
+			)
+		}
 		compiled, manifest, err := runtime.compileContext(
 			ctx,
 			runID,
@@ -744,6 +831,7 @@ func (runtime *Runtime) execute(
 			sessionRevision,
 			activeCheckpoint,
 			&activeLedger,
+			latestWorldState,
 		)
 		if err != nil {
 			runtime.debug("context.compile.failed",
@@ -1106,18 +1194,20 @@ func (runtime *Runtime) compileContext(
 	sessionRevision uint64,
 	checkpoint *ContextCheckpoint,
 	ledger *ContextLedger,
+	worldState *CurrentWorldState,
 ) (CompiledContext, PrefixManifest, error) {
 	model := ""
 	if provider, ok := runtime.provider.(ModelIDProvider); ok {
 		model = provider.ModelID()
 	}
 	compiled, err := runtime.contextCompiler.Compile(ctx, ContextCompileRequest{
-		Provider:        runtime.provider.Name(),
-		Model:           model,
-		ModelRequest:    cloneModelRequest(request),
-		SessionRevision: sessionRevision,
-		Checkpoint:      cloneContextCheckpointPointer(checkpoint),
-		Ledger:          cloneContextLedgerPointer(ledger),
+		Provider:          runtime.provider.Name(),
+		Model:             model,
+		ModelRequest:      cloneModelRequest(request),
+		SessionRevision:   sessionRevision,
+		Checkpoint:        cloneContextCheckpointPointer(checkpoint),
+		Ledger:            cloneContextLedgerPointer(ledger),
+		CurrentWorldState: cloneCurrentWorldStatePointer(worldState),
 	})
 	if err != nil {
 		return CompiledContext{}, PrefixManifest{}, err
@@ -1145,6 +1235,9 @@ func (runtime *Runtime) compileContext(
 	}
 	if len(compiled.ModelRequest.Messages) == 0 && compiled.ModelRequest.Instructions == "" {
 		return CompiledContext{}, PrefixManifest{}, errors.New("Context Compiler returned an empty model request")
+	}
+	if err := appendCurrentWorldState(&compiled, worldState); err != nil {
+		return CompiledContext{}, PrefixManifest{}, err
 	}
 	toolNames := make(map[string]struct{}, len(compiled.ModelRequest.Tools))
 	for _, definition := range compiled.ModelRequest.Tools {
@@ -1682,6 +1775,7 @@ func cloneEvent(event Event) Event {
 	event.ContextCheckpoint = cloneContextCheckpointPointer(event.ContextCheckpoint)
 	event.ContextCompaction = cloneContextCompactionReport(event.ContextCompaction)
 	event.FactDirective = cloneFactLifecycleDirective(event.FactDirective)
+	event.CurrentWorldState = cloneCurrentWorldStatePointer(event.CurrentWorldState)
 	if event.Message != nil {
 		message := cloneMessage(*event.Message)
 		event.Message = &message
@@ -1727,6 +1821,7 @@ func cloneRunResult(result RunResult) RunResult {
 	}
 	result.ContextCheckpoint = cloneContextCheckpointPointer(result.ContextCheckpoint)
 	result.ContextLedger = cloneContextLedgerPointer(result.ContextLedger)
+	result.CurrentWorldState = cloneCurrentWorldStatePointer(result.CurrentWorldState)
 	result.ContextCompaction = cloneContextCompactionReport(result.ContextCompaction)
 	result.CachePlan = cloneCachePlanPointer(result.CachePlan)
 	return result

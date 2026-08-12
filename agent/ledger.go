@@ -370,6 +370,12 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 		if event.Message != nil && event.Message.FactDirective != nil {
 			return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: Message retains a Fact lifecycle directive", index)
 		}
+		if event.Type == EventCurrentWorldStateCaptured && event.CurrentWorldState == nil {
+			return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: current_world_state.captured requires Current World State", index)
+		}
+		if event.Type != EventCurrentWorldStateCaptured && event.CurrentWorldState != nil {
+			return ContextLedger{}, fmt.Errorf("Context Ledger Event %d: Event %q must not contain Current World State", index, event.Type)
+		}
 		ledger.Sources = append(ledger.Sources, source)
 		ref := source.ContextLedgerEventRef
 		sourceMessage := sourceMessageCount
@@ -427,6 +433,36 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 			task.entry.Sources = append(task.entry.Sources, ref)
 			if err := applyConstraintFactEvent(&ledger, constraintIndexes, event, ref, sourceMessage); err != nil {
 				return ContextLedger{}, err
+			}
+
+		case EventCurrentWorldStateCaptured:
+			if pendingProviders[event.RunID] != "" {
+				return ContextLedger{}, errors.New("current_world_state.captured overlaps one pending Provider call")
+			}
+			for _, execution := range executions {
+				if execution.entry.RunID == event.RunID && execution.entry.Kind == ExecutionLedgerToolCall &&
+					execution.entry.State == ExecutionLedgerPending {
+					return ContextLedger{}, errors.New("current_world_state.captured overlaps one pending Tool call")
+				}
+			}
+			prefix, err := finalizeContextLedger(
+				ledger,
+				ledger.Sources[:len(ledger.Sources)-1],
+				tasks,
+				taskOrder,
+				executions,
+				artifacts,
+				policies,
+			)
+			if err != nil {
+				return ContextLedger{}, err
+			}
+			if err := validateCurrentWorldStateAgainstPrefix(
+				*event.CurrentWorldState,
+				prefix,
+				events[:index],
+			); err != nil {
+				return ContextLedger{}, fmt.Errorf("current_world_state.captured: %w", err)
 			}
 
 		case EventModelRequest:
@@ -786,6 +822,8 @@ func reduceLegacyLedgerEvent(
 	order int,
 ) error {
 	switch event.Type {
+	case EventCurrentWorldStateCaptured:
+		return errors.New("legacy current_world_state.captured is unsupported")
 	case EventUserMessageAdded:
 		if event.Message == nil {
 			return errors.New("legacy user.message.added requires a Message")
@@ -1398,6 +1436,11 @@ func contextLedgerReferenceForVersion(ledger ContextLedger, version uint32) (Con
 	case ContextLedgerVersion:
 		return ledger.Reference(), nil
 	case 1:
+		for _, source := range ledger.Sources {
+			if source.Type == EventCurrentWorldStateCaptured {
+				return ContextLedgerReference{}, errors.New("Current World State has no v1-compatible Event representation")
+			}
+		}
 		for _, checkpoint := range ledger.CheckpointReferences {
 			if checkpoint.Version != 1 {
 				return ContextLedgerReference{}, errors.New("Context Ledger contains a non-v1 Checkpoint reference")

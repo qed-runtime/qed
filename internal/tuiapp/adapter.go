@@ -299,6 +299,9 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 	case agent.EventContextCompacted:
 		update.status = "preparing context"
 		activity("Context compacted", "")
+	case agent.EventCurrentWorldStateCaptured:
+		update.status = "preparing context"
+		activity("Current state captured", "")
 	case agent.EventProviderRateLimitWait:
 		update.status = "waiting for model capacity"
 		label := "Model request queued"

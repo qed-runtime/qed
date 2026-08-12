@@ -81,6 +81,44 @@ func TestCompactingContextCompilerCreatesRebuildableCheckpoint(t *testing.T) {
 	}
 }
 
+func TestCompactingContextCompilerReservesCurrentWorldStateBytes(t *testing.T) {
+	t.Parallel()
+
+	compiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
+		MaxInputBytes:          900,
+		RecentMessages:         1,
+		EvidenceThresholdBytes: 4096,
+		EvidenceExcerptBytes:   100,
+		CheckpointMaxBytes:     512,
+	}, evidence.NewMemoryObjectStore(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: []agent.Message{{Role: agent.RoleUser, Text: "continue"}}},
+	}
+	if _, err := compiler.Compile(context.Background(), request); err != nil {
+		t.Fatalf("Compile() without Current World State error = %v", err)
+	}
+	state := &agent.CurrentWorldState{
+		Version:  1,
+		Digest:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Snapshot: agent.CurrentWorldStateSnapshot{FilesAvailable: true},
+	}
+	for index := 0; index < 12; index++ {
+		state.Snapshot.Files = append(state.Snapshot.Files, agent.CurrentWorldFile{
+			Path:   strings.Repeat(string(rune('a'+index)), 24) + ".txt",
+			Status: agent.CurrentWorldFilePresent,
+			Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			Bytes:  1,
+		})
+	}
+	request.CurrentWorldState = state
+	if _, err := compiler.Compile(context.Background(), request); err == nil || !strings.Contains(err.Error(), "no safe Checkpoint boundary") {
+		t.Fatalf("Compile() with oversized Current World State error = %v", err)
+	}
+}
+
 func TestDeterministicCheckpointStrategyUsesOnlyActiveConstraintFacts(t *testing.T) {
 	t.Parallel()
 

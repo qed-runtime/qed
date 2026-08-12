@@ -1100,6 +1100,7 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 	var instructions string
 	tools := make([]agent.Tool, 0, 6+len(specification.Delegations))
 	var componentSource agent.ComponentSource
+	var currentWorldStateSource agent.CurrentWorldStateSource
 	if specification.Profile != "" {
 		if err := validateID("Profile reference", specification.Profile); err != nil {
 			return fmt.Errorf("agent %q: %w", agentID, err)
@@ -1109,6 +1110,7 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 			return fmt.Errorf("agent %q references unknown Profile %q", agentID, specification.Profile)
 		}
 		componentSource = configuredProfile.ComponentSource()
+		currentWorldStateSource = configuredProfile.CurrentWorldStateSource()
 		instructions = configuredProfile.Instructions()
 	}
 	instructions = combineInstructions(instructions, specification.Instructions)
@@ -1184,18 +1186,19 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 	}
 
 	runtime, err := agent.NewRuntime(agent.Options{
-		Provider:            modelProvider,
-		ProviderRateLimiter: builder.limiters[specification.Provider],
-		ToolInputValidator:  builder.toolValidator,
-		Tools:               tools,
-		ComponentSource:     componentSource,
-		MaxProviderCalls:    specification.MaxProviderCalls,
-		MaxToolCalls:        specification.MaxToolCalls,
-		SessionStore:        builder.sessions,
-		ContextCompiler:     contextCompiler,
-		CachePolicy:         cachePolicy,
-		ProviderRetry:       providerRetry,
-		Logger:              builder.logger,
+		Provider:                modelProvider,
+		ProviderRateLimiter:     builder.limiters[specification.Provider],
+		ToolInputValidator:      builder.toolValidator,
+		Tools:                   tools,
+		ComponentSource:         componentSource,
+		MaxProviderCalls:        specification.MaxProviderCalls,
+		MaxToolCalls:            specification.MaxToolCalls,
+		SessionStore:            builder.sessions,
+		ContextCompiler:         contextCompiler,
+		CurrentWorldStateSource: currentWorldStateSource,
+		CachePolicy:             cachePolicy,
+		ProviderRetry:           providerRetry,
+		Logger:                  builder.logger,
 	})
 	if err != nil {
 		return fmt.Errorf("agent %q runtime: %w", agentID, err)

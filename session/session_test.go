@@ -97,6 +97,66 @@ func TestSessionStoresReplayEventsAndEnforceRevisions(t *testing.T) {
 	}
 }
 
+func TestSessionStoresReplayCurrentWorldState(t *testing.T) {
+	t.Parallel()
+
+	stores := map[string]func(*testing.T) agent.SessionStore{
+		"memory": func(*testing.T) agent.SessionStore { return session.NewMemoryStore() },
+		"jsonl": func(t *testing.T) agent.SessionStore {
+			store, err := session.NewJSONLStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	for name, construct := range stores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := construct(t)
+			state := agent.CurrentWorldState{
+				Version: 1,
+				Digest:  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				Snapshot: agent.CurrentWorldStateSnapshot{
+					FilesAvailable: true,
+					Files: []agent.CurrentWorldFile{{
+						Path: "note.txt", Status: agent.CurrentWorldFilePresent,
+						Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Bytes: 4,
+					}},
+					Checks: []agent.CurrentWorldCheck{{
+						Argv: []string{"go", "test", "./..."}, CWD: ".", Status: agent.CurrentWorldCheckPassed,
+						Freshness: agent.CurrentWorldCheckCurrent, OutputDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+					}},
+				},
+			}
+			_, err := store.Append(context.Background(), "world-state", 0, []agent.Event{{
+				RunID: "run-1", Sequence: 1, Type: agent.EventCurrentWorldStateCaptured, CurrentWorldState: &state,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := store.Load(context.Background(), "world-state")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.CurrentWorldState == nil || snapshot.CurrentWorldState.Digest != state.Digest ||
+				len(snapshot.CurrentWorldState.Snapshot.Checks) != 1 {
+				t.Fatalf("Current World State = %#v", snapshot.CurrentWorldState)
+			}
+			snapshot.CurrentWorldState.Snapshot.Files[0].Path = "changed.txt"
+			snapshot.CurrentWorldState.Snapshot.Checks[0].Argv[0] = "changed"
+			reloaded, err := store.Load(context.Background(), "world-state")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.CurrentWorldState.Snapshot.Files[0].Path != "note.txt" ||
+				reloaded.CurrentWorldState.Snapshot.Checks[0].Argv[0] != "go" {
+				t.Fatal("Session Store Current World State aliases caller memory")
+			}
+		})
+	}
+}
+
 func TestSessionStoresRebuildIdenticalContextLedgers(t *testing.T) {
 	t.Parallel()
 

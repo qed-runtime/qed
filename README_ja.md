@@ -19,6 +19,7 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - fork不要でapplicationが所有する`extensions.lock` catalogとlive manifest validation
 - host所有Evidence Bundle
 - ordered Session Eventから明示的なFact lifecycleを含めて再構築するdeterministicなArtifact、Execution、Constraint、Policy、Task Ledger
+- relevant file hash、Git state、観測済みcheck freshnessを持つcanonical Current World State snapshot
 - Evidence preservingなContext圧縮、Prefix Manifest、prompt cache Plan、正規化cache Usage
 - NagiベースのCLIとmulti-turn TUI
 - 末端のExtension processまで伝搬する安全な構造化diagnostics

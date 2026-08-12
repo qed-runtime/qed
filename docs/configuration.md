@@ -349,6 +349,12 @@ and capabilities, not raw Tool arguments
 Every selected environment name must exist. Executable lookup uses only the
 selected `PATH` and does not fall back to the Host environment
 
+A declarative Coding Profile also installs its default Current World State
+Source on every referencing Agent. Canonical file and Git reads obey the same
+Profile Policy and optional Run capability restriction. Background capture
+does not request approval for an `ask` outcome. See
+[Coding Profile](coding-profile.md#current-world-state) for scope and limits
+
 ## Agent definitions and delegation
 
 | Field | Required | Meaning |

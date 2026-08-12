@@ -141,6 +141,10 @@ active Runのsteeringは`user.message.added` Event typeを維持し、任意fiel
 明示的なFact lifecycle transitionも同じEvent typeを使い、Runtimeがtarget Event prefixを検証した後に任意の`fact_directive` metadataを追加します
 nested Messageにはhost専用directiveを残しません
 
+Hookは`current_world_state.captured`を購読できます
+payloadはfile、diff、stdout、stderr contentを含みませんが、workspace path、command argument、digest、provenanceを含みます
+sensitiveなSession metadataとして扱う必要があります
+
 ### Command
 
 Commandはname、description、JSON input schema、capabilityを宣言します
