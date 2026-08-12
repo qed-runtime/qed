@@ -320,6 +320,10 @@ QED repositoryは現在次の3つの再利用可能なExtensionを選択して�
 Coding Profileは3つを合成し、別Host repositoryは自身のlockで必要なpackageだけを選択できます
 self-execでも各Extensionは独立したprocess、identity、generation、reload、state namespaceを持ちます
 
+test実行は専用Test Extensionではなく汎用`qed.process` command Toolの用途として扱います
+permission判断はPermission ExtensionではなくHost Policyとoptional Approverに維持します
+このownershipはfirst-partyとthird-partyのExtensionへ同じように適用します
+
 ## Host enforcementとlifecycle
 
 initial startup

@@ -358,6 +358,11 @@ The Coding Profile composes all three, while another Host repository selects
 only the packages it needs in its own lock. Each self-exec Extension still has
 an independent process, identity, generation, reload, and state namespace
 
+Testing remains a use of the generic `qed.process` command Tool rather than a
+special Test Extension. Permission decisions remain in Host Policy and the
+optional Approver rather than a Permission Extension. These ownership choices
+apply equally to first-party and third-party Extensions
+
 ## Host enforcement and lifecycle
 
 Initial startup

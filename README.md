@@ -213,6 +213,10 @@ The standard Coding Profile exposes six model-facing Tools
 - `git_status`
 - `git_diff`
 
+For `worktree` and `base`, `git_diff` appends untracked regular files that are
+not excluded by standard Git ignore rules within the same bounded patch.
+`staged` remains index-only
+
 The checked-in `extensions.lock` selects the reusable `qed.workspace`,
 `qed.process`, and `qed.git` Extensions for this binary. Each runs across
 Extension Protocol v1, including the single-binary self-exec mode
@@ -561,7 +565,6 @@ go build ./...
 - Tool Trace records use hashes, but the Bundle's public Events may contain prompts, messages, Tool arguments, Tool output, and errors; protect the Evidence Store as sensitive data
 - Evidence is not a complete workspace archive
 - Tool input uses a bounded JSON Schema subset plus strict concrete decoders; embedders can inject another validator, but QED does not implement the complete JSON Schema vocabulary
-- `git_diff` does not include untracked file content
 - Shared token and cost limits depend on Provider-reported usage, which may be late or absent
 - The TUI composer is currently one line and the rendered transcript and activity history are each bounded to the most recent 256 entries
 - A built-in HTTP service, GitHub Actions adapter, SQLite Session Store, and WebAssembly backend are not implemented; existing servers can embed `qed.Host`

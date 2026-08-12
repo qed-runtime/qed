@@ -296,6 +296,8 @@ stderr is never copied into verbose output
   Snapshot may be lost after a crash
 - `run_command` is deliberately broad and must be governed as a host permission
   or wrapped in an external sandbox
+- Permission decisions belong to Host Policy and the optional Approver rather
+  than an Extension, so a component cannot authorize its own invocation
 - Tool Trace records hash raw payloads, but Bundle Events preserve public Run
   content for audit; an Evidence Store is not a secret-free telemetry sink or a
   complete workspace archive

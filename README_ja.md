@@ -199,6 +199,9 @@ go run ./cmd/qed run --config ./qed.json --prompt "Review this plan"
 - `git_status`
 - `git_diff`
 
+`git_diff`の`worktree`と`base`はstandard Git ignore ruleで除外されないuntracked regular fileを同じbounded patchへ追加します
+`staged`はindexだけを対象にします
+
 checked-in `extensions.lock`はこのbinary向けに再利用可能な`qed.workspace`、`qed.process`、`qed.git` Extensionを選択します
 各Extensionはsingle binaryのself-exec modeを含め、常にExtension Protocol v1境界で実行されます
 
@@ -520,7 +523,6 @@ go build ./...
 - Tool Trace recordはhashを使いますが、Bundleのpublic Eventはprompt、message、Tool引数、Tool output、errorを含む場合があるためEvidence Storeを機密データとして保護する必要があります
 - Evidenceは完全なworkspace archiveではありません
 - Tool inputは上限付きJSON Schema subsetとstrictな具象argument decoderで検証しますが、完全なJSON Schema vocabularyは実装せず、別validatorは組み込み側から注入します
-- `git_diff`はuntracked fileの内容を含みません
 - 共有tokenとcost上限はProviderがusageを遅れて返す場合や返さない場合に完全には強制できません
 - TUI composerは現在1行で、表示するtranscriptとactivity historyはそれぞれ直近256件に制限します
 - built-in HTTP service、GitHub Actions Adapter、SQLite Session Store、WebAssembly backendは未実装ですが、既存serverは`qed.Host`を組み込めます
