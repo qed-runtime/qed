@@ -75,7 +75,8 @@ The format is used by `qed run`, `qed tui`, and `qed session resume`
       },
       "context": {
         "max_input_bytes": 65536,
-        "recent_messages": 12
+        "recent_messages": 12,
+        "rebase_generation_interval": 4
       },
       "cache": {
         "mode": "adaptive",
@@ -424,12 +425,18 @@ output as content-addressed objects
 | `evidence_threshold_bytes` | no | Externalize Tool output at this size, default `16384` |
 | `evidence_excerpt_bytes` | no | Retain this many bytes from both ends, default `2048` |
 | `checkpoint_max_bytes` | no | Maximum encoded Checkpoint size, default `8192` |
+| `rebase_generation_interval` | no | Rebuild without the previous semantic Checkpoint after this many newer generations, default `4`, maximum `64` |
 
 `max_input_bytes` is deterministic and Provider-neutral, not a tokenizer-backed
 model context limit. QED never rewrites raw Session messages. It compiles a
 validated Checkpoint followed by a recent raw tail, and stops before a Provider
 call when no safe Tool, approval, subagent, edit-verification, or commit
 transaction boundary fits the hard limit
+
+The first Checkpoint and every configured Raw Event Rebase are rebuilt without
+the previous semantic Checkpoint. Explicit Fact lifecycle changes and a
+Checkpoint Fact retired by the current Ledger also trigger a Rebase. The
+`context.compacted` Event reports `rebased` and `rebase_reason`
 
 Prompt-cache control is disabled when `cache` is omitted or `mode` is empty or
 `disabled`. Provider-side implicit behavior may still occur independently

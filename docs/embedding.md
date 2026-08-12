@@ -161,6 +161,12 @@ retain exact user text; store and transmit it with the same protection as
 Session Events. A custom Context Compiler receives an isolated in-progress copy
 through `ContextCompileRequest.Ledger`
 
+A custom `CheckpointStrategy` receives an explicit `CheckpointRequest.Mode`,
+target `Generation`, exact raw `Messages`, isolated `Events`, and the matching
+Ledger. For `CheckpointBuildRawRebase`, `Previous` is always nil and
+`RebaseReason` identifies the deterministic trigger. The Strategy must rebuild
+from raw source instead of recursively summarizing its prior semantic output
+
 An embedding host can inject canonical state independently of any Profile
 
 ```go

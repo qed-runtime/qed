@@ -480,6 +480,16 @@ func (runtime *Runtime) execute(
 				return fmt.Errorf("validate Fact lifecycle transition: %w", err)
 			}
 		}
+		if event.Type == EventContextCompacted {
+			preview := cloneEvent(event)
+			if runtime.sessionStore != nil && request.SessionID != "" {
+				preview.SessionRevision = sessionRevision + 1
+			}
+			previewEvents := append(cloneEvents(ledgerEvents), preview)
+			if _, err := BuildContextLedger(ctx, previewEvents); err != nil {
+				return fmt.Errorf("validate Context compaction: %w", err)
+			}
+		}
 		if event.Type == EventCurrentWorldStateCaptured && event.CurrentWorldState == nil {
 			return errors.New("current_world_state.captured requires Current World State")
 		}
@@ -844,12 +854,23 @@ func (runtime *Runtime) execute(
 			fail(fmt.Errorf("compile Provider context: %w", err))
 			return
 		}
+		compactionReason := ""
+		rebased := false
+		rebaseReason := ContextRebaseReason("")
+		if compiled.Compaction != nil {
+			compactionReason = compiled.Compaction.Reason
+			rebased = compiled.Compaction.Rebased
+			rebaseReason = compiled.Compaction.RebaseReason
+		}
 		runtime.debug("context.compile.completed",
 			"run_id", runID,
 			"provider", runtime.provider.Name(),
 			"duration_ms", time.Since(compileStartedAt).Milliseconds(),
 			"segment_count", len(manifest.Segments),
 			"prefix_epoch", manifest.Epoch,
+			"compaction_reason", compactionReason,
+			"rebased", rebased,
+			"rebase_reason", rebaseReason,
 		)
 		checkpointChanged := compiled.Checkpoint != nil && !contextCheckpointsEqual(activeCheckpoint, compiled.Checkpoint)
 		var newEvidence []EvidenceObjectRef

@@ -283,11 +283,12 @@ type providerRetryProfile struct {
 }
 
 type contextProfile struct {
-	MaxInputBytes          int64 `json:"max_input_bytes"`
-	RecentMessages         int   `json:"recent_messages,omitempty"`
-	EvidenceThresholdBytes int   `json:"evidence_threshold_bytes,omitempty"`
-	EvidenceExcerptBytes   int   `json:"evidence_excerpt_bytes,omitempty"`
-	CheckpointMaxBytes     int   `json:"checkpoint_max_bytes,omitempty"`
+	MaxInputBytes            int64  `json:"max_input_bytes"`
+	RecentMessages           int    `json:"recent_messages,omitempty"`
+	EvidenceThresholdBytes   int    `json:"evidence_threshold_bytes,omitempty"`
+	EvidenceExcerptBytes     int    `json:"evidence_excerpt_bytes,omitempty"`
+	CheckpointMaxBytes       int    `json:"checkpoint_max_bytes,omitempty"`
+	RebaseGenerationInterval uint64 `json:"rebase_generation_interval,omitempty"`
 }
 
 type cacheProfile struct {
@@ -1121,11 +1122,12 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 			return fmt.Errorf("agent %q context compaction requires a JSON Evidence Store", agentID)
 		}
 		configured, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
-			MaxInputBytes:          specification.Context.MaxInputBytes,
-			RecentMessages:         specification.Context.RecentMessages,
-			EvidenceThresholdBytes: specification.Context.EvidenceThresholdBytes,
-			EvidenceExcerptBytes:   specification.Context.EvidenceExcerptBytes,
-			CheckpointMaxBytes:     specification.Context.CheckpointMaxBytes,
+			MaxInputBytes:            specification.Context.MaxInputBytes,
+			RecentMessages:           specification.Context.RecentMessages,
+			EvidenceThresholdBytes:   specification.Context.EvidenceThresholdBytes,
+			EvidenceExcerptBytes:     specification.Context.EvidenceExcerptBytes,
+			CheckpointMaxBytes:       specification.Context.CheckpointMaxBytes,
+			RebaseGenerationInterval: specification.Context.RebaseGenerationInterval,
 		}, builder.objects, nil)
 		if err != nil {
 			return fmt.Errorf("agent %q context: %w", agentID, err)

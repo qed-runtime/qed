@@ -145,6 +145,10 @@ terminal `RunResult.ContextLedger`は受理済みEvent履歴から作るdetermin
 Constraint entryが正確なuser textを保持するためLedgerはcontent-bearingであり、Session Eventと同等に保護して保存および転送する必要があります
 custom Context Compilerは`ContextCompileRequest.Ledger`から進行中Ledgerのisolated copyを受け取ります
 
+custom `CheckpointStrategy`は明示的な`CheckpointRequest.Mode`、target `Generation`、正確なraw `Messages`、isolated `Events`、対応Ledgerを受け取ります
+`CheckpointBuildRawRebase`では`Previous`が常にnilになり、`RebaseReason`が決定的なtriggerを示します
+Strategyは前回semantic outputを再要約せずraw sourceから再構築する必要があります
+
 embedding hostはProfileと独立してcanonical stateを注入できます
 
 ```go

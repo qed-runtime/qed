@@ -566,6 +566,9 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 			if event.ContextCompaction == nil {
 				return ContextLedger{}, errors.New("context.compacted requires a compaction report")
 			}
+			if err := validateContextRebaseEvent(event); err != nil {
+				return ContextLedger{}, err
+			}
 			if event.ContextCheckpoint != nil && event.ContextCheckpoint.Ledger != nil {
 				prefix, err := finalizeContextLedger(
 					ledger,
@@ -846,6 +849,9 @@ func reduceLegacyLedgerEvent(
 		if event.ContextCompaction == nil {
 			return errors.New("legacy context.compacted requires a compaction report")
 		}
+		if err := validateContextRebaseEvent(event); err != nil {
+			return err
+		}
 		for _, reference := range event.ContextCompaction.Externalized {
 			if !validSHA256Digest(reference.Digest) || reference.Bytes < 0 || strings.TrimSpace(reference.MediaType) == "" {
 				return errors.New("legacy context.compacted contains an invalid Evidence Object reference")
@@ -874,6 +880,40 @@ func reduceLegacyLedgerEvent(
 			policy.entry.Sources = append(policy.entry.Sources, ref)
 			delete(pendingApprovals, event.WaitResponse.RequestID)
 		}
+	}
+	return nil
+}
+
+func validateContextRebaseEvent(event Event) error {
+	report := event.ContextCompaction
+	if report == nil {
+		return nil
+	}
+	if report.Rebased != (report.RebaseReason != "") {
+		return errors.New("context.compacted Rebase flag and reason are inconsistent")
+	}
+	if event.ContextCheckpoint != nil &&
+		event.ContextCheckpoint.LastRebaseGeneration > event.ContextCheckpoint.Generation {
+		return errors.New("context.compacted Checkpoint has an invalid last Rebase generation")
+	}
+	if !report.Rebased {
+		return nil
+	}
+	if !report.Applied || event.ContextCheckpoint == nil {
+		return errors.New("context.compacted Raw Event Rebase requires an applied Checkpoint")
+	}
+	if event.ContextCheckpoint.LastRebaseGeneration != event.ContextCheckpoint.Generation {
+		return errors.New("context.compacted Raw Event Rebase does not identify its Checkpoint generation")
+	}
+	switch report.RebaseReason {
+	case ContextRebaseInitial:
+		if event.ContextCheckpoint.Generation != 1 {
+			return errors.New("context.compacted initial Rebase requires Checkpoint generation 1")
+		}
+	case ContextRebaseGenerationInterval, ContextRebaseFactLifecycleChanged,
+		ContextRebaseCheckpointInconsistent:
+	default:
+		return fmt.Errorf("context.compacted has unsupported Rebase reason %q", report.RebaseReason)
 	}
 	return nil
 }

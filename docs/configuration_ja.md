@@ -74,7 +74,8 @@ QEDは1つのstrictなJSON documentからProvider profile、process分離Extensi
       },
       "context": {
         "max_input_bytes": 65536,
-        "recent_messages": 12
+        "recent_messages": 12,
+        "rebase_generation_interval": 4
       },
       "cache": {
         "mode": "adaptive",
@@ -400,10 +401,15 @@ QEDは正確なcompact済みmessage prefixと外部化したTool outputをconten
 | `evidence_threshold_bytes` | no | Tool outputを外部化するsize、既定値`16384` |
 | `evidence_excerpt_bytes` | no | 両端に保持するbyte数、既定値`2048` |
 | `checkpoint_max_bytes` | no | encoded Checkpoint上限、既定値`8192` |
+| `rebase_generation_interval` | no | 前回semantic Checkpointを使わず再構築するまでの新しいgeneration数、既定値`4`、最大`64` |
 
 `max_input_bytes`は決定的なProvider neutral値でありtokenizer basedなmodel context limitではありません
 QEDはraw Session messageを書き換えません
 検証済みCheckpointとrecent raw tailをcompileし、Tool、approval、subagent、edit-verification、commitの安全なtransaction境界でhard limit内に収まらなければProvider call前に停止します
+
+最初のCheckpointと設定間隔ごとのRaw Event Rebaseは前回semantic Checkpointを使わず再構築します
+明示的なFact lifecycle変更とcurrent Ledgerで失効したCheckpoint FactもRebase triggerになります
+`context.compacted` Eventは`rebased`と`rebase_reason`を公開します
 
 `cache`を省略した場合、または`mode`が空か`disabled`の場合、QED側のprompt cache制御は無効です
 Provider側のimplicit behaviorは独立して発生する場合があります

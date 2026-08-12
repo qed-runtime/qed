@@ -423,6 +423,23 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 			want: "context compaction requires a JSON Evidence Store",
 		},
 		{
+			name: "context Rebase interval too large",
+			document: `{
+				"version": 1,
+				"providers": {"local": {"protocol": "echo"}},
+				"evidence": {"store": "json", "path": "evidence"},
+				"agents": {"main": {
+					"provider": "local",
+					"context": {
+						"max_input_bytes": 4096,
+						"checkpoint_max_bytes": 512,
+						"rebase_generation_interval": 65
+					}
+				}}
+			}`,
+			want: "Context Rebase generation interval exceeds 64",
+		},
+		{
 			name: "incomplete cache pricing",
 			document: `{
 				"version": 1,

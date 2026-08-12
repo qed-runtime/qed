@@ -51,6 +51,14 @@ also supplies an isolated copy of the exact Event prefix. The compiler validates
 that prefix against the Ledger and derives safe cuts without relying on Tool
 names in Runtime Core
 
+The first Checkpoint is a Raw Event Rebase. Later generations may update from a
+validated previous semantic view, while a deterministic generation interval,
+an explicit Fact lifecycle change, or a Checkpoint Fact contradicted by the
+current Ledger forces a rebuild with no previous Checkpoint. The Strategy still
+receives the exact raw Messages, validated Events, and derived Ledger. Runtime
+publishes the Rebase reason with `context.compacted` and persists the latest
+Rebase generation in the Checkpoint
+
 `agent.ToolResult.ContextOperation` carries a validated, content-free
 classification for mutation, verification, commit, or subagent work. It never
 enters the model-facing Tool Message and does not grant authority or prove a

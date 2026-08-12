@@ -154,6 +154,29 @@ custom `CheckpointStrategy`も利用できます
 QEDが結果を検証し、失敗時はstrategy errorやmessage本文をfallback labelへ含めずdeterministic strategyへ戻します
 有効なcandidateがhard limit内に収まらない場合はProviderを呼ぶ前にRunを停止します
 
+Checkpoint生成には2つの明示的なmodeがあります
+incremental buildは正確なraw sourceと最新の検証済み`Previous` Checkpointを受け取ります
+`CheckpointBuildRawRebase`はtarget generationと`RebaseReason`を受け取りますが`Previous`はnilです
+`Messages`、isolatedなordered `Events`、対応するdeterministic Ledgerから再構築する必要があります
+QEDはStrategyを呼ぶ前にEvent prefixを検証します
+custom Strategyは複数のsafe candidate cutで呼ばれる場合があるためmutableなrequest valueを保持してはいけません
+従来`Previous`だけから全generationを導出していたStrategyは`CheckpointRequest.Generation`を使う必要があります
+未対応の場合は後続Rebase candidateが拒否され、QEDはdeterministic fallbackを使います
+
+最初のCheckpointは`initial` Raw Event Rebaseとしてreportされます
+以後は次の順で最初に該当した決定的なtriggerを選びます
+
+1. Checkpoint保存済みFactがcurrent Ledgerでactiveではない場合は`checkpoint_inconsistent`
+2. CheckpointのLedger generationより後に明示的なFact lifecycle宣言がある場合は`fact_lifecycle_changed`
+3. 次generationが前回Rebaseから`rebase_generation_interval` generationへ到達した場合は`generation_interval`
+
+intervalの既定値は`4`で上限は`64`です
+triggerされたRebaseは次のcompile boundaryで実行します
+設定したrecent raw tailを維持できる最新safe cutまで進み、優先範囲に後続cutがなければ既存compact済みraw prefixを再構築します
+input圧力によるcompactionも必要ならさらに後続のsafe cutへ進む場合があります
+`ContextCheckpoint.LastRebaseGeneration`が最新の完全再構築を記録し、`ContextCompactionReport.Rebased`と`RebaseReason`が`context.compacted`上で判断を観測可能にします
+messageだけを渡すdirect callerもinitialとgeneration triggerを利用できますが、明示的なlifecycle検出にはRuntimeが常に渡すEvent prefixが必要です
+
 Runtimeは`ContextCompileRequest.Events`へexact Event prefixのisolated copyを渡します
 Eventsを省略するdirect callerは従来のTool Callとresultだけを保護するsafe cutを使います
 `ToolResult.ContextOperation`は`mutation`、`verification`、`commit`、`subagent`のhost-only metadataです

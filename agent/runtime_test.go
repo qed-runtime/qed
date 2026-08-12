@@ -935,6 +935,47 @@ func TestRuntimeFailsBeforeProviderCallWhenContextCompilationFails(t *testing.T)
 	}
 }
 
+func TestRuntimeRejectsInvalidContextRebaseBeforePublication(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{{message: agent.Message{Role: agent.RoleAssistant, Text: "unused"}}}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		ContextCompiler: contextCompilerFunc(func(ctx context.Context, request agent.ContextCompileRequest) (agent.CompiledContext, error) {
+			compiled, err := (agent.DefaultContextCompiler{}).Compile(ctx, request)
+			if err != nil {
+				return agent.CompiledContext{}, err
+			}
+			compiled.Checkpoint = &agent.ContextCheckpoint{Generation: 1, LastRebaseGeneration: 1}
+			compiled.Compaction = &agent.ContextCompactionReport{
+				Applied: true, Rebased: true, RebaseReason: "unknown",
+			}
+			return compiled, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, runErr := collectRun(handle)
+	if runErr == nil || !strings.Contains(runErr.Error(), "unsupported Rebase reason") {
+		t.Fatalf("Run error = %v", runErr)
+	}
+	if result.ProviderCalls != 0 || len(provider.Requests()) != 0 {
+		t.Fatalf("Provider calls = %d/%d", result.ProviderCalls, len(provider.Requests()))
+	}
+	for _, event := range events {
+		if event.Type == agent.EventContextCompacted {
+			t.Fatalf("invalid context.compacted Event was published: %#v", events)
+		}
+	}
+}
+
 func TestRuntimeSuppliesIsolatedContextLedgerToCompiler(t *testing.T) {
 	t.Parallel()
 
@@ -1315,7 +1356,10 @@ func TestRuntimePublishesAndReusesContextCheckpoint(t *testing.T) {
 		switch event.Type {
 		case agent.EventContextCompacted:
 			contextIndex = index
-			if event.ContextCheckpoint == nil || event.ContextCompaction == nil {
+			if event.ContextCheckpoint == nil || event.ContextCompaction == nil ||
+				event.ContextCheckpoint.LastRebaseGeneration != event.ContextCheckpoint.Generation ||
+				!event.ContextCompaction.Rebased ||
+				event.ContextCompaction.RebaseReason != agent.ContextRebaseInitial {
 				t.Fatalf("context.compacted Event = %#v", event)
 			}
 		case agent.EventModelRequest:

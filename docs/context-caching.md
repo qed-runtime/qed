@@ -204,6 +204,38 @@ result and falls back to the deterministic strategy without exposing the
 strategy error or message content in the fallback label. If no valid candidate
 fits the configured hard limit, the Run stops before calling the Provider
 
+Checkpoint construction has two explicit modes. An incremental build receives
+the latest validated `Previous` Checkpoint together with exact raw source. A
+`CheckpointBuildRawRebase` receives the target generation and
+`RebaseReason`, but `Previous` is nil. It must rebuild from `Messages`, the
+isolated ordered `Events`, and the matching deterministic Ledger. QED validates
+the Event prefix before invoking the Strategy. A custom Strategy may be invoked
+for more than one safe candidate cut and must not retain mutable request values
+Strategies that previously derived every generation solely from `Previous`
+must use `CheckpointRequest.Generation`; otherwise a later Rebase candidate is
+rejected and QED uses the deterministic fallback
+
+The first Checkpoint is reported as an `initial` Raw Event Rebase. After that,
+the compiler selects the first applicable deterministic trigger in this order
+
+1. a Fact stored in the Checkpoint is no longer active in the current Ledger:
+   `checkpoint_inconsistent`
+2. an explicit Fact lifecycle directive occurred after the Checkpoint Ledger
+   generation: `fact_lifecycle_changed`
+3. the next generation reaches `rebase_generation_interval` generations after
+   the prior Rebase: `generation_interval`
+
+The interval defaults to `4` and is bounded at `64`. A triggered Rebase occurs
+at the next compile boundary. It advances through the latest safe cut that
+preserves the configured recent raw tail, or rebuilds the existing compacted
+prefix when no later preferred cut exists. If input pressure also requires
+compaction, the compiler may advance farther.
+`ContextCheckpoint.LastRebaseGeneration` records the latest full rebuild;
+`ContextCompactionReport.Rebased` and `RebaseReason` make the decision
+observable on `context.compacted`. Direct message-only callers still get the
+initial and generation triggers, but explicit lifecycle detection requires the
+Event prefix that Runtime always supplies
+
 Runtime supplies `ContextCompileRequest.Events` as an isolated copy of the
 exact Event prefix. A direct caller that omits Events retains the legacy Tool
 Call/result safe-cut behavior. `ToolResult.ContextOperation` is host-only

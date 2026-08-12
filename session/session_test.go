@@ -519,10 +519,11 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			checkpoint := agent.ContextCheckpoint{
-				Version:            1,
-				Generation:         2,
-				SourceMessageCount: 3,
-				SourceHash:         "sha256:" + strings.Repeat("1", 64),
+				Version:              1,
+				Generation:           2,
+				LastRebaseGeneration: 2,
+				SourceMessageCount:   3,
+				SourceHash:           "sha256:" + strings.Repeat("1", 64),
 				Ledger: &agent.ContextLedgerReference{
 					Version: 1, Digest: "sha256:" + strings.Repeat("3", 64),
 					SourceEventCount: 2, SourceHash: "sha256:" + strings.Repeat("4", 64), SessionRevision: 2,
@@ -539,6 +540,8 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 				Reason:        "input_limit",
 				OriginalBytes: 100,
 				CompiledBytes: 40,
+				Rebased:       true,
+				RebaseReason:  agent.ContextRebaseGenerationInterval,
 				Externalized:  append([]agent.EvidenceObjectRef(nil), checkpoint.Evidence...),
 			}
 			store := construct(t)
@@ -557,9 +560,15 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			if snapshot.Checkpoint == nil || snapshot.Checkpoint.Narrative != "checkpoint" ||
+				snapshot.Checkpoint.LastRebaseGeneration != 2 ||
 				snapshot.Checkpoint.Ledger == nil || snapshot.Checkpoint.Ledger.Digest == "mutated" ||
 				len(snapshot.EvidenceObjects) != 1 || snapshot.EvidenceObjects[0].Digest == "mutated" {
 				t.Fatalf("Checkpoint Snapshot = %#v", snapshot)
+			}
+			if len(snapshot.Events) != 1 || snapshot.Events[0].ContextCompaction == nil ||
+				!snapshot.Events[0].ContextCompaction.Rebased ||
+				snapshot.Events[0].ContextCompaction.RebaseReason != agent.ContextRebaseGenerationInterval {
+				t.Fatalf("Checkpoint Rebase Event = %#v", snapshot.Events)
 			}
 		})
 	}

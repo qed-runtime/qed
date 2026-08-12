@@ -49,8 +49,12 @@ func TestCompactingContextCompilerCreatesRebuildableCheckpoint(t *testing.T) {
 	}
 	checkpoint := compiled.Checkpoint
 	if checkpoint.Generation != 1 || checkpoint.SessionRevision != 42 ||
+		checkpoint.LastRebaseGeneration != 1 ||
 		checkpoint.SourceMessageCount < 1 || checkpoint.SourceMessageCount >= len(messages) {
 		t.Fatalf("Checkpoint = %#v", checkpoint)
+	}
+	if !compiled.Compaction.Rebased || compiled.Compaction.RebaseReason != agent.ContextRebaseInitial {
+		t.Fatalf("initial Compaction report = %#v", compiled.Compaction)
 	}
 	if compiled.Compaction.CompiledBytes > 2600 || compiled.Compaction.CompiledBytes >= compiled.Compaction.OriginalBytes {
 		t.Fatalf("Compaction report = %#v", compiled.Compaction)
@@ -78,6 +82,53 @@ func TestCompactingContextCompilerCreatesRebuildableCheckpoint(t *testing.T) {
 	}
 	if len(compiled.Segments) < 3 || compiled.Segments[2].Kind != agent.SegmentKindCheckpoint {
 		t.Fatalf("Context Segments = %#v", compiled.Segments)
+	}
+}
+
+func TestCompactingContextCompilerSuppliesRawEventsForInitialRebase(t *testing.T) {
+	t.Parallel()
+
+	messages := []agent.Message{
+		{Role: agent.RoleUser, Text: strings.Repeat("old", 500)},
+		{Role: agent.RoleAssistant, Text: strings.Repeat("answer", 300)},
+		{Role: agent.RoleUser, Text: "latest"},
+	}
+	events := safeCutCompilerEvents(messages, nil)
+	ledger, err := agent.BuildContextLedger(context.Background(), events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed bool
+	strategy := checkpointStrategyFunc(func(ctx context.Context, request agent.CheckpointRequest) (agent.ContextCheckpoint, error) {
+		observed = true
+		if request.Mode != agent.CheckpointBuildRawRebase || request.RebaseReason != agent.ContextRebaseInitial ||
+			request.Generation != 1 || request.Previous != nil || len(request.Events) != len(events) {
+			t.Fatalf("initial Checkpoint request = %#v", request)
+		}
+		request.Events[0].Type = agent.EventRunFailed
+		return (agent.DeterministicCheckpointStrategy{}).BuildCheckpoint(ctx, request)
+	})
+	compiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
+		MaxInputBytes:          1600,
+		RecentMessages:         1,
+		EvidenceThresholdBytes: 4096,
+		EvidenceExcerptBytes:   256,
+		CheckpointMaxBytes:     900,
+	}, evidence.NewMemoryObjectStore(), strategy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: messages},
+		Ledger:       &ledger,
+		Events:       events,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observed || events[0].Type != agent.EventRunStarted || compiled.Compaction == nil ||
+		!compiled.Compaction.Rebased || compiled.Compaction.RebaseReason != agent.ContextRebaseInitial {
+		t.Fatalf("initial Raw Event Rebase = %#v", compiled)
 	}
 }
 
@@ -159,7 +210,7 @@ func TestDeterministicCheckpointStrategyUsesOnlyActiveConstraintFacts(t *testing
 	}
 }
 
-func TestCompactingContextCompilerFiltersRetiredFactFromReusedCheckpointView(t *testing.T) {
+func TestCompactingContextCompilerRebasesInconsistentCheckpointFact(t *testing.T) {
 	t.Parallel()
 
 	objects := evidence.NewMemoryObjectStore()
@@ -249,9 +300,15 @@ func TestCompactingContextCompilerFiltersRetiredFactFromReusedCheckpointView(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reused.Checkpoint == nil || reused.Checkpoint.Goal == nil ||
-		reused.Checkpoint.Goal.Summary != retiredSummary {
-		t.Fatalf("persisted Checkpoint changed = %#v", reused.Checkpoint)
+	if reused.Checkpoint == nil || reused.Checkpoint.Generation != initial.Checkpoint.Generation+1 ||
+		reused.Checkpoint.LastRebaseGeneration != reused.Checkpoint.Generation ||
+		reused.Checkpoint.SourceMessageCount != initial.Checkpoint.SourceMessageCount ||
+		reused.Checkpoint.Goal == nil || reused.Checkpoint.Goal.Summary == retiredSummary {
+		t.Fatalf("rebased Checkpoint = %#v", reused.Checkpoint)
+	}
+	if reused.Compaction == nil || reused.Compaction.Reason != "raw_event_rebase" ||
+		!reused.Compaction.Rebased || reused.Compaction.RebaseReason != agent.ContextRebaseCheckpointInconsistent {
+		t.Fatalf("Raw Event Rebase report = %#v", reused.Compaction)
 	}
 	if len(reused.ModelRequest.Messages) == 0 ||
 		strings.Contains(reused.ModelRequest.Messages[0].Text, retiredSummary) {
@@ -259,17 +316,140 @@ func TestCompactingContextCompilerFiltersRetiredFactFromReusedCheckpointView(t *
 	}
 }
 
-func TestCompactingContextCompilerAdvancesCheckpointGeneration(t *testing.T) {
+func TestCompactingContextCompilerRebasesAfterFactLifecycleChange(t *testing.T) {
 	t.Parallel()
 
 	objects := evidence.NewMemoryObjectStore()
-	compiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
+	initialCompiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
 		MaxInputBytes:          1800,
-		RecentMessages:         2,
+		RecentMessages:         1,
 		EvidenceThresholdBytes: 4096,
 		EvidenceExcerptBytes:   256,
 		CheckpointMaxBytes:     900,
 	}, objects, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := make([]agent.Message, 8)
+	for index := range messages {
+		messages[index] = agent.Message{Role: agent.RoleUser, Text: strings.Repeat(string(rune('a'+index)), 500)}
+	}
+	events := safeCutCompilerEvents(messages, nil)
+	prefixLedger, err := agent.BuildContextLedger(context.Background(), events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := initialCompiler.Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: messages},
+		Ledger:       &prefixLedger,
+		Events:       events,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initial.Checkpoint == nil || initial.Compaction == nil {
+		t.Fatalf("initial Checkpoint = %#v", initial)
+	}
+	var target string
+	targetSource := -1
+	for _, constraint := range prefixLedger.Constraints {
+		if constraint.SourceMessage >= initial.Checkpoint.SourceMessageCount {
+			target = constraint.ID
+			targetSource = constraint.SourceMessage
+			break
+		}
+	}
+	if target == "" {
+		t.Fatalf("no raw tail Fact after source %d", initial.Checkpoint.SourceMessageCount)
+	}
+	sequence := uint64(len(events) + 1)
+	events = append(events, agent.Event{
+		RunID: "run-safe-cut-compiler", Sequence: sequence, Type: agent.EventContextCompacted,
+		ContextCheckpoint: initial.Checkpoint, ContextCompaction: initial.Compaction,
+	})
+	sequence++
+	resolution := agent.Message{Role: agent.RoleUser, Text: "the tail requirement is resolved"}
+	events = append(events, agent.Event{
+		RunID: "run-safe-cut-compiler", Sequence: sequence, Type: agent.EventUserMessageAdded,
+		Message: &resolution,
+		FactDirective: &agent.FactLifecycleDirective{
+			Action: agent.FactLifecycleResolve, Targets: []string{target},
+		},
+	})
+	messages = append(messages, resolution)
+	currentLedger, err := agent.BuildContextLedger(context.Background(), events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requestMode agent.CheckpointBuildMode
+	var requestReason agent.ContextRebaseReason
+	var requestEventCount int
+	rebaseCompiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
+		MaxInputBytes:          1 << 20,
+		RecentMessages:         1,
+		EvidenceThresholdBytes: 4096,
+		EvidenceExcerptBytes:   256,
+		CheckpointMaxBytes:     4096,
+	}, objects, checkpointStrategyFunc(func(ctx context.Context, request agent.CheckpointRequest) (agent.ContextCheckpoint, error) {
+		requestMode = request.Mode
+		requestReason = request.RebaseReason
+		requestEventCount = len(request.Events)
+		if request.Previous != nil {
+			t.Fatal("Raw Event Rebase exposed the previous Checkpoint")
+		}
+		return (agent.DeterministicCheckpointStrategy{}).BuildCheckpoint(ctx, request)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebased, err := rebaseCompiler.Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: messages},
+		Checkpoint:   initial.Checkpoint,
+		Ledger:       &currentLedger,
+		Events:       events,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestMode != agent.CheckpointBuildRawRebase || requestReason != agent.ContextRebaseFactLifecycleChanged ||
+		requestEventCount != len(events) || rebased.Compaction == nil || !rebased.Compaction.Rebased ||
+		rebased.Compaction.RebaseReason != agent.ContextRebaseFactLifecycleChanged {
+		t.Fatalf("Fact lifecycle Rebase = request %q/%q/%d, compiled %#v", requestMode, requestReason, requestEventCount, rebased)
+	}
+	if rebased.Checkpoint == nil || rebased.Checkpoint.SourceMessageCount <= initial.Checkpoint.SourceMessageCount ||
+		rebased.Checkpoint.SourceMessageCount <= targetSource ||
+		len(rebased.ModelRequest.Messages) == 0 ||
+		strings.Contains(rebased.ModelRequest.Messages[0].Text, messages[targetSource].Text) {
+		t.Fatalf("Fact lifecycle Rebase retained retired raw tail Fact: %#v", rebased)
+	}
+}
+
+func TestCompactingContextCompilerAdvancesCheckpointGeneration(t *testing.T) {
+	t.Parallel()
+
+	objects := evidence.NewMemoryObjectStore()
+	type observedBuild struct {
+		mode        agent.CheckpointBuildMode
+		reason      agent.ContextRebaseReason
+		generation  uint64
+		hasPrevious bool
+	}
+	var builds []observedBuild
+	strategy := checkpointStrategyFunc(func(ctx context.Context, request agent.CheckpointRequest) (agent.ContextCheckpoint, error) {
+		builds = append(builds, observedBuild{
+			mode: request.Mode, reason: request.RebaseReason, generation: request.Generation,
+			hasPrevious: request.Previous != nil,
+		})
+		return (agent.DeterministicCheckpointStrategy{}).BuildCheckpoint(ctx, request)
+	})
+	compiler, err := agent.NewCompactingContextCompiler(agent.ContextCompressionPolicy{
+		MaxInputBytes:            1800,
+		RecentMessages:           2,
+		EvidenceThresholdBytes:   4096,
+		EvidenceExcerptBytes:     256,
+		CheckpointMaxBytes:       900,
+		RebaseGenerationInterval: 2,
+	}, objects, strategy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,8 +481,41 @@ func TestCompactingContextCompilerAdvancesCheckpointGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if second.Checkpoint == nil || second.Checkpoint.Generation != 2 ||
-		second.Checkpoint.SourceMessageCount <= firstCount {
+		second.Checkpoint.LastRebaseGeneration != 1 || second.Checkpoint.SourceMessageCount <= firstCount {
 		t.Fatalf("second Checkpoint = %#v", second.Checkpoint)
+	}
+	third, err := compiler.Compile(context.Background(), agent.ContextCompileRequest{
+		Checkpoint:   second.Checkpoint,
+		ModelRequest: agent.ModelRequest{Messages: messages},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Checkpoint == nil || third.Checkpoint.Generation != 3 ||
+		third.Checkpoint.LastRebaseGeneration != 3 ||
+		third.Checkpoint.SourceMessageCount != second.Checkpoint.SourceMessageCount ||
+		third.Compaction == nil || third.Compaction.Reason != "raw_event_rebase" ||
+		third.Compaction.RebaseReason != agent.ContextRebaseGenerationInterval {
+		t.Fatalf("third Checkpoint = %#v / %#v", third.Checkpoint, third.Compaction)
+	}
+	wantBuilds := []observedBuild{
+		{mode: agent.CheckpointBuildRawRebase, reason: agent.ContextRebaseInitial, generation: 1},
+		{mode: agent.CheckpointBuildIncremental, generation: 2, hasPrevious: true},
+		{mode: agent.CheckpointBuildRawRebase, reason: agent.ContextRebaseGenerationInterval, generation: 3},
+	}
+	uniqueBuilds := make([]observedBuild, 0, len(builds))
+	for _, build := range builds {
+		if len(uniqueBuilds) == 0 || uniqueBuilds[len(uniqueBuilds)-1] != build {
+			uniqueBuilds = append(uniqueBuilds, build)
+		}
+	}
+	if len(uniqueBuilds) != len(wantBuilds) {
+		t.Fatalf("Checkpoint builds = %#v", builds)
+	}
+	for index := range wantBuilds {
+		if uniqueBuilds[index] != wantBuilds[index] {
+			t.Fatalf("Checkpoint build %d = %#v, want %#v", index, uniqueBuilds[index], wantBuilds[index])
+		}
 	}
 }
 
