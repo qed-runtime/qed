@@ -45,6 +45,11 @@ type AgentDefinition struct {
 	Runtime *agent.Runtime
 	// Instructions are prepended to instructions supplied for an individual Run
 	Instructions string
+	// ResultReducer projects successful Team Runs into validated Result Packets
+	//
+	// A nil value selects LedgerResultReducer. This is Profile policy and must
+	// be safe for concurrent use.
+	ResultReducer ResultReducer
 }
 
 // AgentRegistryOptions configures an AgentRegistry and shared orchestration budgets
@@ -232,6 +237,8 @@ type AgentOutcome struct {
 	Output string `json:"output,omitempty"`
 	// Result contains the complete terminal Run result when a Run started
 	Result agent.RunResult `json:"result"`
+	// ResultPacket contains the validated Profile projection for a successful Run
+	ResultPacket *ResultPacket `json:"result_packet,omitempty"`
 	// Error contains the Run error without failing a Team that has other successful candidates
 	Error string `json:"error,omitempty"`
 }
@@ -269,7 +276,7 @@ func (registry *AgentRegistry) RunTeam(ctx context.Context, request TeamRequest)
 		go func(index int, agentID string) {
 			defer waitGroup.Done()
 
-			runResult, runErr := registry.Run(ctx, agent.RunRequest{
+			outcome, runErr := registry.runOutcome(ctx, agent.RunRequest{
 				AgentID:      agentID,
 				SessionID:    request.SessionID,
 				Metadata:     cloneMetadata(request.Metadata),
@@ -277,7 +284,7 @@ func (registry *AgentRegistry) RunTeam(ctx context.Context, request TeamRequest)
 				Input:        cloneMessages(request.Input),
 			})
 			executions[index] = teamExecution{
-				outcome: newAgentOutcome(agentID, runResult, runErr),
+				outcome: outcome,
 				err:     runErr,
 			}
 		}(index, agentID)
@@ -393,8 +400,9 @@ func (tool *SubagentTool) Definition() agent.ToolDefinition {
 
 // Execute runs the configured Agent team for one explicit prompt
 //
-// The returned JSON contains the strategy, candidate Run IDs and outputs, and
-// any selected or synthesized output. Parent conversation state is not copied.
+// The returned JSON contains the strategy, candidate Run IDs, outputs, validated
+// Result Packets, and any selected or synthesized output. Parent conversation
+// state is not copied.
 func (tool *SubagentTool) Execute(ctx context.Context, call agent.ToolCall) (agent.ToolResult, error) {
 	var input struct {
 		Prompt string `json:"prompt"`
@@ -503,14 +511,13 @@ func (registry *AgentRegistry) reduceTeam(ctx context.Context, request TeamReque
 		instructions = combineInstructions(instructions, consensusInstructions())
 	}
 
-	judgeResult, judgeErr := registry.Run(ctx, agent.RunRequest{
+	judge, judgeErr := registry.runOutcome(ctx, agent.RunRequest{
 		AgentID:      request.JudgeAgentID,
 		SessionID:    request.SessionID,
 		Metadata:     cloneMetadata(request.Metadata),
 		Instructions: instructions,
 		Input:        []agent.Message{{Role: agent.RoleUser, Text: string(payload)}},
 	})
-	judge := newAgentOutcome(request.JudgeAgentID, judgeResult, judgeErr)
 	result.Judge = &judge
 	if judgeErr != nil {
 		return result, fmt.Errorf("judge agent %q failed: %w", request.JudgeAgentID, judgeErr)
@@ -543,6 +550,28 @@ func (registry *AgentRegistry) lookup(agentID string) (AgentDefinition, error) {
 		return AgentDefinition{}, fmt.Errorf("%w: %q", ErrAgentNotRegistered, agentID)
 	}
 	return definition, nil
+}
+
+func (registry *AgentRegistry) runOutcome(
+	ctx context.Context,
+	request agent.RunRequest,
+) (AgentOutcome, error) {
+	definition, err := registry.lookup(request.AgentID)
+	if err != nil {
+		return newAgentOutcome(request.AgentID, agent.RunResult{}, err), err
+	}
+	runResult, runErr := registry.Run(ctx, request)
+	outcome := newAgentOutcome(request.AgentID, runResult, runErr)
+	if runErr != nil {
+		return outcome, runErr
+	}
+	packet, err := buildResultPacket(ctx, request.AgentID, runResult, definition.ResultReducer)
+	if err != nil {
+		outcome.Error = err.Error()
+		return outcome, err
+	}
+	outcome.ResultPacket = &packet
+	return outcome, nil
 }
 
 func (registry *AgentRegistry) ensureScope(ctx context.Context) context.Context {
@@ -599,16 +628,18 @@ type teamReviewPayload struct {
 }
 
 type teamReviewCandidate struct {
-	AgentID string `json:"agent_id"`
-	Output  string `json:"output"`
+	AgentID      string        `json:"agent_id"`
+	Output       string        `json:"output"`
+	ResultPacket *ResultPacket `json:"result_packet,omitempty"`
 }
 
 func newTeamReviewCandidates(outcomes []AgentOutcome) []teamReviewCandidate {
 	candidates := make([]teamReviewCandidate, len(outcomes))
 	for index, outcome := range outcomes {
 		candidates[index] = teamReviewCandidate{
-			AgentID: outcome.AgentID,
-			Output:  outcome.Output,
+			AgentID:      outcome.AgentID,
+			Output:       outcome.Output,
+			ResultPacket: cloneResultPacketPointer(outcome.ResultPacket),
 		}
 	}
 	return candidates
@@ -692,17 +723,19 @@ type subagentToolOutput struct {
 }
 
 type subagentToolCandidate struct {
-	AgentID     string `json:"agent_id"`
-	RunID       string `json:"run_id,omitempty"`
-	ParentRunID string `json:"parent_run_id,omitempty"`
-	Output      string `json:"output,omitempty"`
-	Error       string `json:"error,omitempty"`
+	AgentID      string        `json:"agent_id"`
+	RunID        string        `json:"run_id,omitempty"`
+	ParentRunID  string        `json:"parent_run_id,omitempty"`
+	Output       string        `json:"output,omitempty"`
+	ResultPacket *ResultPacket `json:"result_packet,omitempty"`
+	Error        string        `json:"error,omitempty"`
 }
 
 type subagentToolJudge struct {
-	AgentID     string `json:"agent_id"`
-	RunID       string `json:"run_id,omitempty"`
-	ParentRunID string `json:"parent_run_id,omitempty"`
+	AgentID      string        `json:"agent_id"`
+	RunID        string        `json:"run_id,omitempty"`
+	ParentRunID  string        `json:"parent_run_id,omitempty"`
+	ResultPacket *ResultPacket `json:"result_packet,omitempty"`
 }
 
 func newSubagentToolOutput(result TeamResult) subagentToolOutput {
@@ -714,18 +747,20 @@ func newSubagentToolOutput(result TeamResult) subagentToolOutput {
 	}
 	for index, candidate := range result.Candidates {
 		output.Candidates[index] = subagentToolCandidate{
-			AgentID:     candidate.AgentID,
-			RunID:       candidate.Result.RunID,
-			ParentRunID: candidate.Result.ParentRunID,
-			Output:      candidate.Output,
-			Error:       candidate.Error,
+			AgentID:      candidate.AgentID,
+			RunID:        candidate.Result.RunID,
+			ParentRunID:  candidate.Result.ParentRunID,
+			Output:       candidate.Output,
+			ResultPacket: cloneResultPacketPointer(candidate.ResultPacket),
+			Error:        candidate.Error,
 		}
 	}
 	if result.Judge != nil {
 		output.Judge = &subagentToolJudge{
-			AgentID:     result.Judge.AgentID,
-			RunID:       result.Judge.Result.RunID,
-			ParentRunID: result.Judge.Result.ParentRunID,
+			AgentID:      result.Judge.AgentID,
+			RunID:        result.Judge.Result.RunID,
+			ParentRunID:  result.Judge.Result.ParentRunID,
+			ResultPacket: cloneResultPacketPointer(result.Judge.ResultPacket),
 		}
 	}
 	return output

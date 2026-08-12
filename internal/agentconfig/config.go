@@ -1132,6 +1132,7 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 	tools := make([]agent.Tool, 0, 6+len(specification.Delegations))
 	var componentSource agent.ComponentSource
 	var currentWorldStateSource agent.CurrentWorldStateSource
+	var resultReducer orchestration.ResultReducer
 	if specification.Profile != "" {
 		if err := validateID("Profile reference", specification.Profile); err != nil {
 			return fmt.Errorf("agent %q: %w", agentID, err)
@@ -1142,6 +1143,7 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 		}
 		componentSource = configuredProfile.ComponentSource()
 		currentWorldStateSource = configuredProfile.CurrentWorldStateSource()
+		resultReducer = configuredProfile.ResultReducer()
 		instructions = configuredProfile.Instructions()
 	}
 	instructions = combineInstructions(instructions, specification.Instructions)
@@ -1277,9 +1279,10 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 		return fmt.Errorf("agent %q runtime: %w", agentID, err)
 	}
 	if err := builder.registry.Register(orchestration.AgentDefinition{
-		ID:           agentID,
-		Runtime:      runtime,
-		Instructions: instructions,
+		ID:            agentID,
+		Runtime:       runtime,
+		Instructions:  instructions,
+		ResultReducer: resultReducer,
 	}); err != nil {
 		return fmt.Errorf("register agent %q: %w", agentID, err)
 	}

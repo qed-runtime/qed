@@ -180,7 +180,14 @@ tokens and retries only once after an authorization rejection
 bound to one Provider, so a parent and its subagents may use different endpoint,
 credential, model, and protocol combinations without converting private state.
 Declarative configuration shares one outbound rate controller between every
-Runtime that references the same Provider profile
+Runtime that references the same Provider profile. A successful Team candidate
+is reduced into a content-addressed `ResultPacket` bound to its terminal Context
+Ledger. The orchestration layer validates source Events, bounded JSON, artifact
+and execution identities, and Evidence membership before exposing the packet to
+the parent. The default reducer copies only Runtime-observable Ledger state;
+Profile reducers may add source-backed semantic Facts and opaque Profile state
+without extending Runtime Core. Candidate packets are also passed to select and
+consensus judges as untrusted data
 
 `session` implements the `agent.SessionStore` contract in memory and as an
 append-only JSONL Event Log. Runtime serializes concurrent Runs for one Session

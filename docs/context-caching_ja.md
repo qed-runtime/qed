@@ -380,6 +380,20 @@ Runtimeはmodel向けTool Messageからmetadataを除外します
 旧Sessionはscope付き設定の下で新しく開始する必要があります
 旧contentを暗黙にrebindすると新しいisolation境界を迂回するためです
 
+## Subagent result projection
+
+成功した各Team candidateはparentへ届く前にversion付きResult Packetへprojectionされます
+packetはtypedなFact、Artifact、Execution、Evidence reference、optionalなProfile stateをchild Runのterminal Context Ledgerへ結び付けます
+QEDはbound、canonical JSON、source Event所属、Evidence所属、entry ID、packet digestを検証します
+
+既定reducerは現在childのArtifactとterminal Execution Ledger entryをコピーし、Factを推測しません
+Profile reducerはdomain固有kindとstateを追加できます
+これらの値はRuntime Coreの新しいLedger fieldにならず、orchestration packet内に留まります
+
+parent Runでは完全なpacketが通常のsubagent Tool outputの一部として残ります
+parent Ledgerはchild claimをparent Constraint Factとして扱わず、exact Tool output digestとsubagent transactionを記録します
+Context圧縮はdelegated Callとresultを同じ範囲に保ち、その範囲を圧縮する場合はraw message Evidenceによってexact packetを保持します
+
 ## Prefix Manifest
 
 各`model.request.started` EventはProvider、model、任意のhashed Cache Family、Prefix Epoch、ordered Segment fingerprintを含む`prefix_manifest`を持ちます

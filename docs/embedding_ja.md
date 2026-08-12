@@ -149,6 +149,48 @@ custom `CheckpointStrategy`は明示的な`CheckpointRequest.Mode`、target `Gen
 `CheckpointBuildRawRebase`では`Previous`が常にnilになり、`RebaseReason`が決定的なtriggerを示します
 Strategyは前回semantic outputを再要約せずraw sourceから再構築する必要があります
 
+## Subagent Result Packet
+
+`AgentRegistry.RunTeam`はselectionまたはconsensusの前に成功candidateをreductionします
+`AgentDefinition.ResultReducer`がnilの場合は`LedgerResultReducer`を使い、Profileは独自reducerを注入できます
+
+```go
+err := registry.Register(orchestration.AgentDefinition{
+    ID:            "coding-reviewer",
+    Runtime:       reviewerRuntime,
+    ResultReducer: codingProfile.ResultReducer(),
+})
+if err != nil {
+    return err
+}
+
+team, err := registry.RunTeam(ctx, orchestration.TeamRequest{
+    Strategy: orchestration.TeamStrategyDelegate,
+    AgentIDs: []string{"coding-reviewer"},
+    Input:    []agent.Message{{Role: agent.RoleUser, Text: task}},
+})
+if err != nil {
+    return err
+}
+candidate := team.Candidates[0]
+packet := candidate.ResultPacket
+if packet == nil {
+    return errors.New("candidate has no Result Packet")
+}
+if err := orchestration.ValidateResultPacket(ctx, *packet, candidate.Result); err != nil {
+    return err
+}
+```
+
+reducerは成功したterminal `RunResult`を受け取り、Fact、Artifact、Execution、Evidence reference、optionalなProfile JSONのdraftを返します
+AgentRegistryはJSONをcanonical化し、entry IDを割り当て、全sourceをterminal child Ledgerで検証し、件数とbyte数を制限してpacket digestを計算します
+reducer failureはそのcandidateをunsuccessfulにします
+
+Subagent Toolは各packetをcandidate outputの隣に置くため、parent modelとembedding hostは同じprojectionを観測します
+selectとconsensusのjudgeもcandidate packetをuntrusted dataとして受け取ります
+FactとProfile stateはuserまたはrepository contentを含む可能性があり、secretを含めてはいけません
+Evidence referenceはchild authorization scopeを維持し、referenceの返却によってparentへread authorityを移譲しません
+
 ## scope付きEvidence access
 
 `CompactingContextCompiler`を使うembedding hostはscope付きObject StoreとRuntime identityを組み合わせて設定します

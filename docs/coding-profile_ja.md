@@ -65,6 +65,22 @@ Runtimeはannotationを検証して永続化しますがmodelへは見せませ�
 Context Checkpointのcutだけを制約し、commandがfailureを報告した場合もverificationまたはcommit attemptが先行mutation rangeを閉じます
 authorizationと観測済みoutcomeの正本は引き続きPolicy、approval、Evidence、Current World Stateです
 
+## Subagent result reduction
+
+`Profile.ResultReducer`はCoding Profile版`orchestration.ResultReducer`を返します
+宣言的Agent graphはProfileを参照する各Agentへ自動設定します
+
+reducerはdeterministicなArtifactとExecution Ledger entryから始め、canonical Current World Stateを`coding.git_change` Fact、`coding.file`と`coding.git_diff` Artifact、`coding.check` Executionへprojectionします
+version付きProfile stateにはboundedなCurrent World State全体も入ります
+汎用Result Packetはsource Event referenceとidentityを検証しますが、coding固有kindを解釈しません
+
+candidate Runで実行したcheckだけを`coding.check` Executionにします
+過去のSession Runから保持したcheckはProfile stateに残りますが、candidateが実行したworkとして再分類しません
+
+このprojectionはfile content、diff text、stdout、stderrをコピーしません
+Fact、path、command名、Profile stateはparent modelへ提示されるcontent-bearingなuntrusted dataです
+HostはSession Eventと同様に保護し、custom reducer resultへsecretを入れてはいけません
+
 ## Declarative configuration
 
 ExtensionとProfileをProvider profileから独立して定義します

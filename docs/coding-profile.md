@@ -89,6 +89,28 @@ commit attempt closes a preceding mutation range even when the command reports
 failure. Policy, approval, Evidence, and Current World State remain the sources
 of authorization and observed outcome
 
+## Subagent result reduction
+
+`Profile.ResultReducer` returns the Coding Profile implementation of
+`orchestration.ResultReducer`. Declarative Agent graphs install it on every
+Agent that references the Profile
+
+The reducer starts from deterministic Artifact and Execution Ledger entries,
+then projects canonical Current World State into `coding.git_change` Facts,
+`coding.file` and `coding.git_diff` Artifacts, and `coding.check` Executions. It
+also places the complete bounded Current World State in versioned Profile state
+The generic Result Packet validates source Event references and identities but
+does not interpret these coding-specific kinds
+
+Only checks executed by the candidate Run become `coding.check` Executions
+Checks retained from earlier Session Runs remain available in Profile state but
+are not relabeled as work performed by the candidate
+
+This projection does not copy file contents, diff text, stdout, or stderr
+Facts, paths, command names, and Profile state are still content-bearing
+untrusted data shown to a parent model. Hosts must protect them like Session
+Events and must not place secrets in a custom reducer result
+
 ## Declarative configuration
 
 Define Extensions and the Profile independently from Provider profiles

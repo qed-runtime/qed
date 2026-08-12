@@ -10,6 +10,7 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - OpenAI Responses、OpenAI Chat Completions、Anthropic Messages、ChatGPT認証のCodex Responses Provider
 - 1つのAgent graphで利用できる複数Provider profile
 - collect、select、consensusに対応する並行サブエージェント
+- 注入可能なProfile reductionを持つcontent-addressedなsubagent Result Packet
 - profile共有のProvider concurrency上限、cooldown、bounded retry
 - active Runへのsteering、永続Session、terminal後のfollow-up、永続的な承認resume
 - process分離Extension内のcapability制御されたCoding Tool
@@ -519,6 +520,15 @@ if err := registry.Register(orchestration.AgentDefinition{
 candidateは並行実行され、異なるProvider protocolを利用できます
 共有既定上限はAgent Run 16、depth 4、Provider call 64です
 設定済みProvider profileごとにactive Provider stream 4つの既定上限と、観測したrate limit cooldownも共有します
+
+成功した各candidateはterminal Context Ledgerへ結び付いたversion付き`ResultPacket`も返します
+既定の`LedgerResultReducer`はsemantic factを推測せず、typedなArtifactとExecutionを返します
+`AgentDefinition.ResultReducer`はRuntime Coreへdomain fieldを追加せず、source付きFactとboundedなProfile所有JSONを追加できます
+宣言的Coding Profileはreducerを自動設定します
+無効または検証不能なreductionは、別のcandidateを利用できる場合はそのcandidateだけをfailureにします
+
+Result PacketのFactとProfile stateはparent modelへ提示されるuntrusted contentです
+Evidence referenceは元のauthorization scopeを維持し、それ自体はparentへaccessを付与しません
 
 ## 主なimport path
 

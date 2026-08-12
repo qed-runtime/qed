@@ -18,6 +18,8 @@ import (
 	workspaceextension "github.com/qed-runtime/qed/extensions/workspace"
 	"github.com/qed-runtime/qed/internal/agentconfig"
 	"github.com/qed-runtime/qed/internal/extensionregistry"
+	"github.com/qed-runtime/qed/orchestration"
+	"github.com/qed-runtime/qed/profile/coding"
 )
 
 func TestMain(testingMain *testing.M) {
@@ -818,6 +820,23 @@ func TestLoadBuildsWorkspaceBoundCodingProfile(t *testing.T) {
 	}
 	if !foundInstructions {
 		t.Fatalf("Current World State files = %#v", result.CurrentWorldState.Snapshot.Files)
+	}
+	team, err := configuration.Registry.RunTeam(context.Background(), orchestration.TeamRequest{
+		Strategy: orchestration.TeamStrategyDelegate,
+		AgentIDs: []string{"main"},
+		Input:    []agent.Message{{Role: agent.RoleUser, Text: "project state"}},
+	})
+	if err != nil {
+		t.Fatalf("Coding Profile RunTeam() error = %v", err)
+	}
+	if len(team.Candidates) != 1 || team.Candidates[0].ResultPacket == nil ||
+		len(team.Candidates[0].ResultPacket.ProfileState) == 0 {
+		t.Fatalf("declarative Coding Profile Result Packet = %#v", team.Candidates)
+	}
+	var resultState coding.ResultState
+	if err := json.Unmarshal(team.Candidates[0].ResultPacket.ProfileState, &resultState); err != nil ||
+		resultState.Version != coding.ResultStateVersion || resultState.CurrentWorldState == nil {
+		t.Fatalf("declarative Coding Profile ResultState = %#v, %v", resultState, err)
 	}
 }
 

@@ -12,6 +12,7 @@ executable today
   ChatGPT-authenticated Codex Responses Providers
 - multiple Provider profiles in one Agent graph
 - concurrent subagents with collect, select, and consensus strategies
+- content-addressed subagent Result Packets with injectable Profile reduction
 - profile-shared Provider concurrency limits, cooldowns, and bounded retries
 - active-Run steering, persistent Sessions, terminal follow-ups, and durable
   approval resume
@@ -577,6 +578,18 @@ synthesize a result. Candidates run concurrently and may use different
 Provider protocols. Shared default limits are 16 Agent Runs, depth 4, and 64
 Provider calls. Each configured Provider profile also shares a default limit
 of four active Provider streams and any observed rate-limit cooldown
+
+Every successful candidate also returns a versioned `ResultPacket` bound to
+its terminal Context Ledger. The default `LedgerResultReducer` returns typed
+Artifact and Execution entries without inferring semantic facts
+`AgentDefinition.ResultReducer` may add source-backed Facts and bounded
+Profile-owned JSON without adding domain fields to Runtime Core. Declarative
+Coding Profiles install their reducer automatically. Invalid or unverifiable
+reduction fails only that candidate when another candidate remains usable
+
+Result Packet Facts and Profile state are untrusted content shown to the parent
+model. Evidence references preserve their original authorization scope and do
+not grant the parent access by themselves
 
 ## Main import paths
 

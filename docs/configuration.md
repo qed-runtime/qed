@@ -401,6 +401,19 @@ Candidates execute concurrently in requested Agent order. The loader rejects
 direct and indirect delegation cycles. A Subagent Tool passes only its explicit
 prompt, not the parent's full conversation, Session ID, or Metadata
 
+Each successful candidate returns a `result_packet` beside its text output and
+Run linkage. The packet is versioned, content-addressed, and bound to the
+candidate's terminal Context Ledger. A Profile reducer may add typed Facts,
+Artifacts, Executions, Evidence references, and bounded Profile state. QED
+validates source Event membership and exact identities before the parent sees
+the packet. Coding Profiles install their reducer automatically; an Agent with
+no Profile uses the deterministic Ledger reducer
+
+Facts and Profile state remain untrusted model-visible content. Evidence
+references retain the child scope and do not authorize parent retrieval. A
+reducer error or invalid packet makes that candidate unsuccessful without
+discarding other successful candidates
+
 Shared limits default to 16 Agent Runs, depth 4, and 64 Provider calls. Parent,
 candidate, and judge Runs count against the same top-level budget
 

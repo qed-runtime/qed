@@ -137,9 +137,10 @@ func TestAgentRegistryRunsMixedProviderSubagentTool(t *testing.T) {
 		Strategy   orchestration.TeamStrategy `json:"strategy"`
 		Output     string                     `json:"output"`
 		Candidates []struct {
-			AgentID     string `json:"agent_id"`
-			RunID       string `json:"run_id"`
-			ParentRunID string `json:"parent_run_id"`
+			AgentID      string                      `json:"agent_id"`
+			RunID        string                      `json:"run_id"`
+			ParentRunID  string                      `json:"parent_run_id"`
+			ResultPacket *orchestration.ResultPacket `json:"result_packet"`
 		} `json:"candidates"`
 	}
 	if err := json.Unmarshal([]byte(result.ToolResults[0].Output), &delegated); err != nil {
@@ -153,6 +154,10 @@ func TestAgentRegistryRunsMixedProviderSubagentTool(t *testing.T) {
 	}
 	if delegated.Candidates[0].RunID == "" || delegated.Candidates[0].ParentRunID != result.RunID {
 		t.Errorf("child linkage = %#v, parent RunID %q", delegated.Candidates[0], result.RunID)
+	}
+	if delegated.Candidates[0].ResultPacket == nil || delegated.Candidates[0].ResultPacket.Digest == "" ||
+		delegated.Candidates[0].ResultPacket.RunID != delegated.Candidates[0].RunID {
+		t.Errorf("child Result Packet = %#v", delegated.Candidates[0].ResultPacket)
 	}
 
 	childRequests := childProvider.Requests()
@@ -396,7 +401,8 @@ func TestRunTeamSelectReturnsChosenCandidateOriginalOutput(t *testing.T) {
 		t.Errorf("judge instructions = %q", judgeRequest.Instructions)
 	}
 	if !strings.Contains(judgeRequest.Messages[0].Text, `"agent_id":"alpha"`) ||
-		!strings.Contains(judgeRequest.Messages[0].Text, `"output":"beta draft"`) {
+		!strings.Contains(judgeRequest.Messages[0].Text, `"output":"beta draft"`) ||
+		!strings.Contains(judgeRequest.Messages[0].Text, `"result_packet"`) {
 		t.Errorf("judge input = %q", judgeRequest.Messages[0].Text)
 	}
 }

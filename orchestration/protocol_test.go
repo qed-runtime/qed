@@ -128,7 +128,8 @@ func TestOpenAIParentDelegatesToAnthropicChild(t *testing.T) {
 				}
 			}
 			if !strings.Contains(toolOutput, `"agent_id":"anthropic-specialist"`) ||
-				!strings.Contains(toolOutput, `"output":"Anthropic specialist answer"`) {
+				!strings.Contains(toolOutput, `"output":"Anthropic specialist answer"`) ||
+				!strings.Contains(toolOutput, `"result_packet"`) {
 				t.Errorf("OpenAI function output = %q", toolOutput)
 			}
 			_, _ = writer.Write([]byte(`{

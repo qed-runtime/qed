@@ -167,6 +167,53 @@ Ledger. For `CheckpointBuildRawRebase`, `Previous` is always nil and
 `RebaseReason` identifies the deterministic trigger. The Strategy must rebuild
 from raw source instead of recursively summarizing its prior semantic output
 
+## Subagent Result Packets
+
+`AgentRegistry.RunTeam` reduces every successful candidate before selection or
+consensus. A nil `AgentDefinition.ResultReducer` selects
+`LedgerResultReducer`; a Profile can inject its own reducer
+
+```go
+err := registry.Register(orchestration.AgentDefinition{
+    ID:            "coding-reviewer",
+    Runtime:       reviewerRuntime,
+    ResultReducer: codingProfile.ResultReducer(),
+})
+if err != nil {
+    return err
+}
+
+team, err := registry.RunTeam(ctx, orchestration.TeamRequest{
+    Strategy: orchestration.TeamStrategyDelegate,
+    AgentIDs: []string{"coding-reviewer"},
+    Input:    []agent.Message{{Role: agent.RoleUser, Text: task}},
+})
+if err != nil {
+    return err
+}
+candidate := team.Candidates[0]
+packet := candidate.ResultPacket
+if packet == nil {
+    return errors.New("candidate has no Result Packet")
+}
+if err := orchestration.ValidateResultPacket(ctx, *packet, candidate.Result); err != nil {
+    return err
+}
+```
+
+The reducer receives a successful terminal `RunResult`. It returns draft
+Facts, Artifacts, Executions, Evidence references, and optional Profile JSON
+AgentRegistry canonicalizes JSON, assigns entry IDs, verifies every source
+against the terminal child Ledger, limits counts and bytes, and computes the
+packet digest. Reducer failure makes the candidate unsuccessful
+
+The Subagent Tool places each packet beside its candidate output, so the parent
+model and an embedding host observe the same projection. Select and consensus
+judges also receive candidate packets as untrusted data. Facts and Profile
+state may contain user or repository content and must not contain secrets
+Evidence references preserve the child authorization scope; returning a
+reference does not transfer read authority to the parent
+
 ## Scoped Evidence access
 
 An embedding host that uses `CompactingContextCompiler` should configure a

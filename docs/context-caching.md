@@ -515,6 +515,26 @@ unscoped references. Such a Session must start again under the scoped
 configuration; silently rebinding old content would bypass the new isolation
 boundary
 
+## Subagent result projection
+
+Each successful Team candidate is projected into a versioned Result Packet
+before its result reaches a parent. The packet binds typed Facts, Artifacts,
+Executions, Evidence references, and optional Profile state to the child Run's
+terminal Context Ledger. QED validates bounds, canonical JSON, source Event
+membership, Evidence membership, entry IDs, and the packet digest
+
+The default reducer copies current-child Artifact and terminal Execution Ledger
+entries and does not infer Facts. A Profile reducer may add domain-specific
+kinds and state. These values stay inside the orchestration packet rather than
+becoming new Runtime Core Ledger fields
+
+In the parent Run, the complete packet remains part of the ordinary subagent
+Tool output. The parent Ledger therefore records the exact Tool-output digest
+and subagent transaction without treating child claims as parent Constraint
+Facts. Context compression keeps the delegated Call and result together and
+preserves the exact packet through raw-message Evidence when it compacts that
+range
+
 ## Prefix Manifest
 
 Every `model.request.started` Event contains a `prefix_manifest` with Provider,

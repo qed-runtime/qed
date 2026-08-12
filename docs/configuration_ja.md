@@ -381,6 +381,16 @@ candidateは指定Agent順を維持しながら並行実行されます
 loaderは直接または間接delegation cycleを拒否します
 Subagent Toolは明示的なpromptだけを渡し、parentの完全なconversation、Session ID、Metadataを渡しません
 
+成功した各candidateはtext outputとRun linkageに加えて`result_packet`を返します
+packetはversion付きかつcontent-addressedであり、candidateのterminal Context Ledgerへ結び付きます
+Profile reducerはtypedなFact、Artifact、Execution、Evidence reference、boundedなProfile stateを追加できます
+QEDはparentへ提示する前にsource Eventの所属とexact identityを検証します
+Coding Profileはreducerを自動設定し、Profileを持たないAgentはdeterministicなLedger reducerを使います
+
+FactとProfile stateは引き続きmodel-visibleなuntrusted contentです
+Evidence referenceはchild scopeを維持し、parentによるretrievalを認可しません
+reducer errorまたは無効なpacketは他の成功candidateを破棄せず、そのcandidateだけをunsuccessfulにします
+
 共有上限の既定値はAgent Run 16、depth 4、Provider call 64です
 parent、candidate、judge Runは同じtop-level budgetを消費します
 

@@ -27,6 +27,7 @@ import (
 	gitextension "github.com/qed-runtime/qed/extensions/git"
 	processextension "github.com/qed-runtime/qed/extensions/process"
 	workspaceextension "github.com/qed-runtime/qed/extensions/workspace"
+	"github.com/qed-runtime/qed/orchestration"
 	"github.com/qed-runtime/qed/workspace"
 )
 
@@ -278,6 +279,11 @@ func (profile *Profile) ComponentSource() agent.ComponentSource {
 // CurrentWorldStateSource returns the read-only canonical state Source
 func (profile *Profile) CurrentWorldStateSource() agent.CurrentWorldStateSource {
 	return profile.currentWorldStateSource
+}
+
+// ResultReducer returns the Coding Profile subagent Result Packet reducer
+func (profile *Profile) ResultReducer() orchestration.ResultReducer {
+	return ResultPacketReducer{}
 }
 
 // AcquireCommands pins the current custom Command generation set
