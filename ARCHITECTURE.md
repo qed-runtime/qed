@@ -126,7 +126,9 @@ and observed cooldowns remain Runtime controls
 `cmd/qed` and `internal/tuiapp` are adapters. `cmd/qed-extension-gen` is the
 dependency-light downstream catalog generator. Nagi remains inside the QED CLI
 frontend packages and no Nagi type crosses into Runtime, Provider, Extension,
-or Host APIs
+or Host APIs. The TUI chat controller maps composer submissions to active-Run
+steering or terminal follow-up Runs, keeps approval resume and Run cancellation
+separate, and stores Evidence per Run rather than merging Run Event sequences
 
 ## Run and Event ordering
 

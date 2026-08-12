@@ -22,7 +22,7 @@ executable today
 - host-owned Evidence Bundles
 - Evidence-preserving Context compression, Prefix Manifests, prompt-cache Plans,
   and normalized cache Usage
-- Nagi-based CLI and single-turn TUI
+- Nagi-based CLI and multi-turn TUI
 - safe structured diagnostics propagated to the final Extension process
 
 ## Requirements
@@ -293,8 +293,10 @@ discard steering that has not reached that Event. Follow-ups get a new Run ID
 and local limits; without a Session Store the caller must provide prior context
 itself. Reuse the same `*agent.Budget` explicitly when limits must span Runs
 
-The experimental TUI remains single-turn and does not expose steering or
-follow-up controls yet
+The experimental TUI maps Enter to active-Run steering and, after the current
+Run reaches its terminal result, to a follow-up Run. A configured `--session-id`
+replays the persisted Session. Without one, the TUI carries the preceding Run
+messages forward for the lifetime of that chat
 
 Put capabilities in a Profile's `ask` list and use interactive approval
 
@@ -314,8 +316,8 @@ repeating the preceding Provider request
 go run ./cmd/qed session resume work-1 --config ./qed.json
 ```
 
-Configured Runs, configured TUI Runs, and resumed Runs save an Evidence Bundle
-when an Evidence Store is configured
+Configured Runs, every completed Run in a configured TUI chat, and resumed Runs
+save a separate Evidence Bundle when an Evidence Store is configured
 
 ```sh
 go run ./cmd/qed run inspect <run-id> --store .qed/evidence
@@ -332,14 +334,15 @@ go run ./cmd/qed tui --prompt "hello"
 ```
 
 The TUI also accepts `--config`, `--agent`, `--workspace`, and `--session-id`
-and uses the same configured Agent graph. When a Run waits for approval, press
-`Y` to approve or `N` to deny. Press `Q` or Escape to exit, or Ctrl-C to report
-cancellation with status 130
+and uses the same configured Agent graph. Type a message and press Enter to
+steer an active Run or start a follow-up after it finishes. When a Run waits
+for approval, press `Y` to approve or `N` to deny. Ctrl-C cancels only the
+current Run and keeps the chat open; Escape exits and cancels an active Run
 
-The view streams assistant text and shows content-free Run activity with Agent,
-Session, Run, Tool, and approval capability metadata. Tool arguments, Tool
-output, raw wait payloads, and raw Run errors are not copied into the rendered
-view state
+The view keeps recent user and assistant messages, streams assistant text, and
+shows content-free Run activity with Agent, Session, Run, Tool, and approval
+capability metadata. Tool arguments, Tool output, raw wait payloads, and raw
+Run errors are not copied into the rendered view state
 
 ## Develop an external Extension
 
@@ -559,7 +562,7 @@ go build ./...
 - Tool input uses a bounded JSON Schema subset plus strict concrete decoders; embedders can inject another validator, but QED does not implement the complete JSON Schema vocabulary
 - `git_diff` does not include untracked file content
 - Shared token and cost limits depend on Provider-reported usage, which may be late or absent
-- The TUI is a single-turn interface, not a persistent chat client
+- The TUI composer is currently one line and the rendered transcript and activity history are each bounded to the most recent 256 entries
 - A built-in HTTP service, GitHub Actions adapter, SQLite Session Store, and WebAssembly backend are not implemented; existing servers can embed `qed.Host`
 - Compatibility with every third-party OpenAI-compatible API is not guaranteed
 - `openai-codex` follows an experimental ChatGPT backend contract and currently uses full Responses over SSE without model discovery, Responses Lite, or WebSocket transport

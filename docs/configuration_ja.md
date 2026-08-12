@@ -493,7 +493,7 @@ Session Storeが未設定の場合、Session IDはmessageを保持しないた�
 }
 ```
 
-設定済みCLIとTUI Runはterminal完了後にversion付きBundleを保存します
+設定済みCLI Runとmulti-turn TUI chat内で完了した各Runはterminal完了後にversion付きBundleを保存します
 Bundleはpublic Event、usage、configとworkspaceのdigest、host所有Tool traceを含みます
 同じStoreがcontext圧縮用のcontent-addressed objectも保持します
 2つのcommand familyからBundleをinspectまたはexportできます

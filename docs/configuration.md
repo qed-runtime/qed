@@ -525,10 +525,11 @@ does not retain messages and the caller must supply prior context
 }
 ```
 
-Configured CLI and TUI Runs save one versioned Bundle after terminal completion,
-including public Events, usage, config/workspace digests, and host-owned Tool
-trace records. The same Store keeps content-addressed objects used by context
-compression. Inspect or export Bundles with either command family
+Configured CLI Runs and every completed Run in a configured multi-turn TUI chat
+save one versioned Bundle after terminal completion, including public Events,
+usage, config/workspace digests, and host-owned Tool trace records. The same
+Store keeps content-addressed objects used by context compression. Inspect or
+export Bundles with either command family
 
 Tool trace payloads are represented by digests, but public Events retain their
 normal observable payload. A Bundle may therefore contain prompts, assistant

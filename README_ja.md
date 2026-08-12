@@ -18,7 +18,7 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 - fork不要でapplicationが所有する`extensions.lock` catalogとlive manifest validation
 - host所有Evidence Bundle
 - Evidence preservingなContext圧縮、Prefix Manifest、prompt cache Plan、正規化cache Usage
-- NagiベースのCLIと単一turn TUI
+- NagiベースのCLIとmulti-turn TUI
 - 末端のExtension processまで伝搬する安全な構造化diagnostics
 
 ## 要件
@@ -272,7 +272,8 @@ cancel、Deadline切れ、terminal Run failureでは、このEventへ到達し�
 follow-upは新しいRun IDとRun local上限を持ち、Session Storeがない場合はcallerが過去contextを渡す必要があります
 複数Runで上限を共有する場合だけ同じ`*agent.Budget`を明示的に再利用します
 
-実験的TUIは引き続きsingle-turnで、steeringとfollow-upの操作はまだ公開しません
+実験的TUIではEnterをactive Runへのsteeringへ割り当て、現在のRunがterminal resultへ達した後はfollow-up Runを開始します
+設定済み`--session-id`がある場合は永続Sessionをreplayし、ない場合はそのchatが続く間だけ前Runのmessageを引き継ぎます
 
 Profileの`ask` listへcapabilityを置き、対話承認を有効にできます
 
@@ -291,7 +292,7 @@ JSONL Sessionの待機中にprocessが終了した場合、直前のProvider req
 go run ./cmd/qed session resume work-1 --config ./qed.json
 ```
 
-Evidence Storeが設定されている場合、設定Run、設定TUI Run、resume RunはEvidence Bundleを保存します
+Evidence Storeが設定されている場合、設定Run、設定TUI chat内で完了した各Run、resume Runは個別のEvidence Bundleを保存します
 
 ```sh
 go run ./cmd/qed run inspect <run-id> --store .qed/evidence
@@ -307,10 +308,11 @@ go run ./cmd/qed tui --prompt "hello"
 ```
 
 TUIは`--config`、`--agent`、`--workspace`、`--session-id`にも対応し、同じ設定Agent graphを利用します
+messageを入力してEnterを押すとactive Runへsteeringし、完了後はfollow-upを開始します
 Runが承認待ちになった場合は`Y`で許可、`N`で拒否します
-`Q`またはEscapeで終了し、Ctrl-Cはstatus 130のcancelとして扱います
+Ctrl-Cは現在のRunだけをcancelしてchatを維持し、Escapeはactive RunをcancelしてTUIを終了します
 
-TUIはassistant textをstream表示し、Agent、Session、Run、Tool、approval Capabilityの本文なしactivityを表示します
+TUIは最近のuserとassistant messageを保持し、assistant textをstream表示し、Agent、Session、Run、Tool、approval Capabilityの本文なしactivityを表示します
 Tool引数、Tool出力、raw wait payload、raw Run errorはrendering用の表示状態へ保持しません
 
 ## 外部Extensionの開発
@@ -519,7 +521,7 @@ go build ./...
 - Tool inputは上限付きJSON Schema subsetとstrictな具象argument decoderで検証しますが、完全なJSON Schema vocabularyは実装せず、別validatorは組み込み側から注入します
 - `git_diff`はuntracked fileの内容を含みません
 - 共有tokenとcost上限はProviderがusageを遅れて返す場合や返さない場合に完全には強制できません
-- TUIは単一turn interfaceであり、永続chat clientではありません
+- TUI composerは現在1行で、表示するtranscriptとactivity historyはそれぞれ直近256件に制限します
 - built-in HTTP service、GitHub Actions Adapter、SQLite Session Store、WebAssembly backendは未実装ですが、既存serverは`qed.Host`を組み込めます
 - すべてのthird-party OpenAI互換APIとの互換性は保証しません
 - `openai-codex`はexperimentalなChatGPT backend contractに追従し、現在はmodel discovery、Responses Lite、WebSocket transportを持たないfull ResponsesのSSE経路だけを利用します

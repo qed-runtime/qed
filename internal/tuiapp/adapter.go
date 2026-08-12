@@ -52,6 +52,10 @@ type presentationUpdate struct {
 	identity           runIdentity
 	status             string
 	activity           *runActivity
+	userMessage        *string
+	userMessageOrigin  agent.UserMessageOrigin
+	assistantStarted   bool
+	assistantCompleted bool
 	resetAnswer        bool
 	answerDelta        string
 	answer             *string
@@ -62,23 +66,39 @@ type presentationUpdate struct {
 }
 
 type runPresentation struct {
-	prompt             string
 	identity           runIdentity
 	status             string
 	answer             string
+	transcript         []transcriptEntry
+	streamingEntry     int
 	activities         []runActivity
 	pendingApproval    *approvalPrompt
 	waitingUnsupported bool
 }
 
-func newRunPresentation(prompt string, identity runIdentity) runPresentation {
+type transcriptState string
+
+const (
+	transcriptStateQueued   transcriptState = "queued"
+	transcriptStateApplied  transcriptState = "applied"
+	transcriptStateCanceled transcriptState = "canceled"
+)
+
+type transcriptEntry struct {
+	role   agent.Role
+	text   string
+	state  transcriptState
+	origin agent.UserMessageOrigin
+}
+
+func newRunPresentation(_ string, identity runIdentity) runPresentation {
 	identity.runID = diagnosticText(identity.runID)
 	identity.agentID = diagnosticText(identity.agentID)
 	identity.sessionID = diagnosticText(identity.sessionID)
 	return runPresentation{
-		prompt:   prompt,
-		identity: identity,
-		status:   "starting",
+		identity:       identity,
+		status:         "starting",
+		streamingEntry: -1,
 	}
 }
 
@@ -95,12 +115,27 @@ func (presentation *runPresentation) apply(update presentationUpdate) {
 	if update.status != "" {
 		presentation.status = update.status
 	}
+	if update.userMessage != nil {
+		presentation.applyUserMessage(*update.userMessage, update.userMessageOrigin)
+	}
+	if update.assistantStarted {
+		presentation.startAssistantMessage()
+	}
 	if update.resetAnswer {
 		presentation.answer = ""
 	}
 	presentation.answer += update.answerDelta
+	if update.answerDelta != "" && presentation.streamingEntry >= 0 {
+		presentation.transcript[presentation.streamingEntry].text += update.answerDelta
+	}
 	if update.answer != nil {
 		presentation.answer = *update.answer
+		if presentation.streamingEntry >= 0 {
+			presentation.transcript[presentation.streamingEntry].text = *update.answer
+		}
+	}
+	if update.assistantCompleted {
+		presentation.completeAssistantMessage()
 	}
 	if update.activity != nil {
 		presentation.applyActivity(*update.activity)
@@ -119,6 +154,83 @@ func (presentation *runPresentation) apply(update presentationUpdate) {
 		presentation.pendingApproval = nil
 		presentation.waitingUnsupported = true
 	}
+}
+
+func (presentation *runPresentation) queueUserMessage(text string) {
+	presentation.transcript = append(presentation.transcript, transcriptEntry{
+		role:  agent.RoleUser,
+		text:  text,
+		state: transcriptStateQueued,
+	})
+}
+
+func (presentation *runPresentation) applyUserMessage(text string, origin agent.UserMessageOrigin) {
+	for index := range presentation.transcript {
+		entry := &presentation.transcript[index]
+		if entry.role != agent.RoleUser || entry.state != transcriptStateQueued || entry.text != text {
+			continue
+		}
+		entry.state = transcriptStateApplied
+		entry.origin = origin
+		return
+	}
+	presentation.transcript = append(presentation.transcript, transcriptEntry{
+		role:   agent.RoleUser,
+		text:   text,
+		state:  transcriptStateApplied,
+		origin: origin,
+	})
+}
+
+func (presentation *runPresentation) startAssistantMessage() {
+	if presentation.streamingEntry >= 0 {
+		presentation.completeAssistantMessage()
+	}
+	presentation.transcript = append(presentation.transcript, transcriptEntry{
+		role:  agent.RoleAssistant,
+		state: transcriptStateApplied,
+	})
+	presentation.streamingEntry = len(presentation.transcript) - 1
+}
+
+func (presentation *runPresentation) completeAssistantMessage() {
+	if presentation.streamingEntry < 0 || presentation.streamingEntry >= len(presentation.transcript) {
+		presentation.streamingEntry = -1
+		return
+	}
+	if presentation.transcript[presentation.streamingEntry].text == "" {
+		presentation.transcript = append(
+			presentation.transcript[:presentation.streamingEntry],
+			presentation.transcript[presentation.streamingEntry+1:]...,
+		)
+	}
+	presentation.streamingEntry = -1
+}
+
+func (presentation *runPresentation) reconcileMessages(messages []agent.Message) {
+	pending := make([]transcriptEntry, 0)
+	for _, entry := range presentation.transcript {
+		if entry.role == agent.RoleUser && entry.state == transcriptStateQueued {
+			entry.state = transcriptStateCanceled
+			pending = append(pending, entry)
+		}
+	}
+	transcript := make([]transcriptEntry, 0, len(messages)+len(pending))
+	for _, message := range messages {
+		if message.Role != agent.RoleUser && message.Role != agent.RoleAssistant {
+			continue
+		}
+		if message.Role == agent.RoleAssistant && message.Text == "" {
+			continue
+		}
+		transcript = append(transcript, transcriptEntry{
+			role:  message.Role,
+			text:  message.Text,
+			state: transcriptStateApplied,
+		})
+	}
+	presentation.transcript = append(transcript, pending...)
+	presentation.streamingEntry = -1
 }
 
 func (presentation *runPresentation) resolveApproval(approved bool) (string, bool) {
@@ -178,6 +290,11 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 		if event.UserMessageOrigin == agent.UserMessageOriginSteering {
 			label = "Steering added"
 		}
+		if event.Message != nil && event.Message.Role == agent.RoleUser {
+			text := event.Message.Text
+			update.userMessage = &text
+			update.userMessageOrigin = event.UserMessageOrigin
+		}
 		activity(label, "")
 	case agent.EventContextCompacted:
 		update.status = "preparing context"
@@ -217,6 +334,7 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 		activity(label, activityStateWaiting)
 	case agent.EventMessageStarted:
 		update.status = "responding"
+		update.assistantStarted = true
 		update.resetAnswer = true
 	case agent.EventMessageDelta:
 		update.status = "responding"
@@ -227,6 +345,7 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 			answer := event.Message.Text
 			update.answer = &answer
 		}
+		update.assistantCompleted = true
 		activity("Assistant response", activityStateCompleted)
 	case agent.EventToolStarted:
 		update.status = "running tool"

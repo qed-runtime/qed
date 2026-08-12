@@ -629,8 +629,18 @@ func TestTUICommandLoadsConfiguredAgentAndSession(t *testing.T) {
 		}
 		received = request
 		return tuiapp.Outcome{
-			Result: agent.RunResult{RunID: "tui_evidence", AgentID: "main", Status: agent.RunStatusCompleted},
-			Events: []agent.Event{{RunID: "tui_evidence", AgentID: "main", Type: agent.EventRunCompleted}},
+			Result: agent.RunResult{RunID: "tui_evidence_2", AgentID: "main", Status: agent.RunStatusCompleted},
+			Events: []agent.Event{{RunID: "tui_evidence_2", AgentID: "main", Type: agent.EventRunCompleted}},
+			Runs: []tuiapp.RunOutcome{
+				{
+					Result: agent.RunResult{RunID: "tui_evidence_1", AgentID: "main", Status: agent.RunStatusCompleted},
+					Events: []agent.Event{{RunID: "tui_evidence_1", AgentID: "main", Type: agent.EventRunCompleted}},
+				},
+				{
+					Result: agent.RunResult{RunID: "tui_evidence_2", AgentID: "main", Status: agent.RunStatusCompleted},
+					Events: []agent.Event{{RunID: "tui_evidence_2", AgentID: "main", Type: agent.EventRunCompleted}},
+				},
+			},
 		}, nil
 	}
 	var stdout bytes.Buffer
@@ -648,8 +658,10 @@ func TestTUICommandLoadsConfiguredAgentAndSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Load(context.Background(), "tui_evidence"); err != nil {
-		t.Fatalf("load TUI Evidence = %v", err)
+	for _, runID := range []string{"tui_evidence_1", "tui_evidence_2"} {
+		if _, err := store.Load(context.Background(), runID); err != nil {
+			t.Fatalf("load TUI Evidence %q = %v", runID, err)
+		}
 	}
 }
 

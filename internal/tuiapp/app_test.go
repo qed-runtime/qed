@@ -3,7 +3,9 @@ package tuiapp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/qed-runtime/qed/agent"
 	providerbase "github.com/qed-runtime/qed/provider"
 	"github.com/qed-runtime/qed/provider/echo"
+	"github.com/qed-runtime/qed/session"
 )
 
 func TestRunEventsReachView(t *testing.T) {
@@ -74,7 +77,8 @@ func TestRunEventsReachView(t *testing.T) {
 		"QED Runtime",
 		"Agent: echo  Session: session-tui",
 		"Status: completed",
-		"Answer: hello",
+		"You: hello",
+		"Assistant: hello",
 		"Run completed [completed]",
 	} {
 		if !strings.Contains(rendered, expected) {
@@ -272,7 +276,7 @@ func TestAdapterMapsContentAndContentFreeDiagnostics(t *testing.T) {
 	rendered := surfaceText(harness.LatestSurface())
 	for _, expected := range []string{
 		"Agent: agent-event  Session: session-event  Run: run-adapter",
-		"Answer: assistant-visible-content",
+		"Assistant: assistant-visible-content",
 		"Waiting for model capacity (limit 2) [waiting]",
 		"Model rate limit cooldown 750ms [waiting]",
 		"Model retry 2 in 1000ms (rate_limited) [waiting]",
@@ -369,6 +373,396 @@ func TestMalformedApprovalCannotBeAcceptedOrRendered(t *testing.T) {
 			t.Errorf("rendered surface contains rejected approval value %q:\n%s", excluded, rendered)
 		}
 	}
+}
+
+func TestChatFollowUpUsesPersistentSession(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewMemoryStore()
+	runtime, err := agent.NewRuntime(agent.Options{Provider: echo.New(), SessionStore: store})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	request := agent.RunRequest{
+		AgentID:   "echo",
+		SessionID: "chat-session",
+		Input:     []agent.Message{{Role: agent.RoleUser, Text: "first"}},
+	}
+	view, harness := startChatHarness(t, runtime.Run, request, "first")
+	defer closeChatHarness(view, harness)
+
+	waitForChat(t, harness, func() bool { return view.finished }, "initial Run")
+	if _, err := harness.RequestFocus(composerInputID); err != nil {
+		t.Fatalf("focus composer: %v", err)
+	}
+	if err := harness.Input([]byte("second\r")); err != nil {
+		t.Fatalf("submit follow-up: %v", err)
+	}
+	if view.runNumber != 2 || view.finished {
+		t.Fatalf("follow-up state = run %d finished %t", view.runNumber, view.finished)
+	}
+	waitForChat(t, harness, func() bool { return view.finished }, "follow-up Run")
+
+	outcome := view.Outcome()
+	if len(outcome.Runs) != 2 || outcome.Result.Status != agent.RunStatusCompleted {
+		t.Fatalf("chat Outcome = %#v", outcome)
+	}
+	snapshot, err := store.Snapshot(context.Background(), "chat-session")
+	if err != nil {
+		t.Fatalf("Session Snapshot: %v", err)
+	}
+	wantMessages := []agent.Message{
+		{Role: agent.RoleUser, Text: "first"},
+		{Role: agent.RoleAssistant, Text: "first", StopReason: agent.StopReasonEndTurn},
+		{Role: agent.RoleUser, Text: "second"},
+		{Role: agent.RoleAssistant, Text: "second", StopReason: agent.StopReasonEndTurn},
+	}
+	if !equalChatMessages(snapshot.Messages, wantMessages) {
+		t.Fatalf("Session Messages = %#v", snapshot.Messages)
+	}
+	rendered := surfaceText(harness.LatestSurface())
+	for _, expected := range []string{"You: first", "Assistant: first", "You: second", "Assistant: second", "Enter follow-up"} {
+		if !strings.Contains(rendered, expected) {
+			t.Errorf("rendered surface does not contain %q:\n%s", expected, rendered)
+		}
+	}
+}
+
+func TestChatFollowUpWithoutSessionCarriesHistory(t *testing.T) {
+	t.Parallel()
+
+	runtime, err := agent.NewRuntime(agent.Options{Provider: echo.New()})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	request := agent.RunRequest{
+		AgentID: "echo",
+		Input:   []agent.Message{{Role: agent.RoleUser, Text: "first"}},
+	}
+	view, harness := startChatHarness(t, runtime.Run, request, "first")
+	defer closeChatHarness(view, harness)
+
+	waitForChat(t, harness, func() bool { return view.finished }, "initial Run")
+	if _, err := harness.RequestFocus(composerInputID); err != nil {
+		t.Fatalf("focus composer: %v", err)
+	}
+	if err := harness.Input([]byte("second\r")); err != nil {
+		t.Fatalf("submit follow-up: %v", err)
+	}
+	waitForChat(t, harness, func() bool { return view.finished }, "follow-up Run")
+
+	if len(view.currentResult.Messages) != 4 || view.currentResult.Messages[2].Text != "second" {
+		t.Fatalf("follow-up Messages = %#v", view.currentResult.Messages)
+	}
+	requestActivities := 0
+	for _, activity := range view.presentation.activities {
+		if activity.label == "Request added" {
+			requestActivities++
+		}
+	}
+	if requestActivities != 2 {
+		t.Fatalf("Request activity count = %d, want 2", requestActivities)
+	}
+}
+
+func TestChatSteersActiveRunAtNextProviderBoundary(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedTUIProvider([]agent.Message{
+		{Role: agent.RoleAssistant, Text: "first answer", StopReason: agent.StopReasonEndTurn},
+		{Role: agent.RoleAssistant, Text: "steered answer", StopReason: agent.StopReasonEndTurn},
+	}, true)
+	runtime, err := agent.NewRuntime(agent.Options{Provider: provider})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	request := agent.RunRequest{
+		AgentID: "scripted",
+		Input:   []agent.Message{{Role: agent.RoleUser, Text: "first"}},
+	}
+	view, harness := startChatHarness(t, runtime.Run, request, "first")
+	defer closeChatHarness(view, harness)
+
+	select {
+	case <-provider.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Provider call")
+	}
+	if _, err := harness.RequestFocus(composerInputID); err != nil {
+		t.Fatalf("focus composer: %v", err)
+	}
+	if err := harness.Input([]byte("steer now\r")); err != nil {
+		t.Fatalf("submit steering: %v", err)
+	}
+	if view.draft != "" || view.inputNotice != "Steering queued" {
+		t.Fatalf("steering draft/notice = %q/%q", view.draft, view.inputNotice)
+	}
+	close(provider.release)
+	waitForChat(t, harness, func() bool { return view.finished }, "steered Run")
+
+	requests := provider.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("Provider requests = %d, want 2", len(requests))
+	}
+	if got := requests[1].Messages[len(requests[1].Messages)-1]; got.Role != agent.RoleUser || got.Text != "steer now" {
+		t.Fatalf("second Provider request tail = %#v", got)
+	}
+	steeringEvents := 0
+	for _, event := range view.Outcome().Runs[0].Events {
+		if event.Type == agent.EventUserMessageAdded && event.UserMessageOrigin == agent.UserMessageOriginSteering {
+			steeringEvents++
+		}
+	}
+	if steeringEvents != 1 {
+		t.Fatalf("steering Events = %d, want 1", steeringEvents)
+	}
+	rendered := surfaceText(harness.LatestSurface())
+	for _, expected := range []string{"You: steer now", "Assistant: steered answer", "Steering added"} {
+		if !strings.Contains(rendered, expected) {
+			t.Errorf("rendered surface does not contain %q:\n%s", expected, rendered)
+		}
+	}
+}
+
+func TestChatApprovesToolAndResumesRun(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedTUIProvider([]agent.Message{
+		{
+			Role:       agent.RoleAssistant,
+			StopReason: agent.StopReasonToolUse,
+			ToolCalls: []agent.ToolCall{{
+				ID: "approval-call", Name: "approval_tool", Arguments: json.RawMessage(`{}`),
+			}},
+		},
+		{Role: agent.RoleAssistant, Text: "approved", StopReason: agent.StopReasonEndTurn},
+	}, false)
+	runtime, err := agent.NewRuntime(agent.Options{Provider: provider, Tools: []agent.Tool{tuiApprovalTool{}}})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	request := agent.RunRequest{
+		AgentID: "scripted",
+		Input:   []agent.Message{{Role: agent.RoleUser, Text: "use the tool"}},
+	}
+	view, harness := startChatHarness(t, runtime.Run, request, "use the tool")
+	defer closeChatHarness(view, harness)
+
+	waitForChat(t, harness, func() bool { return view.presentation.pendingApproval != nil }, "approval wait")
+	rendered := surfaceText(harness.LatestSurface())
+	if !strings.Contains(rendered, "Approval: Tool approval_tool [workspace.read]") {
+		t.Fatalf("approval is not rendered:\n%s", rendered)
+	}
+	if err := harness.Input([]byte("y")); err != nil {
+		t.Fatalf("approve Tool: %v", err)
+	}
+	waitForChat(t, harness, func() bool { return view.finished }, "resumed Run")
+
+	eventTypes := make(map[agent.EventType]bool)
+	for _, event := range view.Outcome().Runs[0].Events {
+		eventTypes[event.Type] = true
+	}
+	for _, eventType := range []agent.EventType{
+		agent.EventToolStarted,
+		agent.EventRunWaiting,
+		agent.EventRunResumed,
+		agent.EventToolCompleted,
+		agent.EventRunCompleted,
+	} {
+		if !eventTypes[eventType] {
+			t.Errorf("missing Event %q", eventType)
+		}
+	}
+	rendered = surfaceText(harness.LatestSurface())
+	for _, expected := range []string{"Assistant: approved", "Tool approval_tool [completed]", "Run resumed"} {
+		if !strings.Contains(rendered, expected) {
+			t.Errorf("rendered surface does not contain %q:\n%s", expected, rendered)
+		}
+	}
+}
+
+func TestChatControlCCancelsCurrentRunWithoutExiting(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedTUIProvider([]agent.Message{
+		{Role: agent.RoleAssistant, Text: "unreachable", StopReason: agent.StopReasonEndTurn},
+	}, true)
+	runtime, err := agent.NewRuntime(agent.Options{Provider: provider})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	request := agent.RunRequest{
+		AgentID: "scripted",
+		Input:   []agent.Message{{Role: agent.RoleUser, Text: "wait"}},
+	}
+	view, harness := startChatHarness(t, runtime.Run, request, "wait")
+	defer closeChatHarness(view, harness)
+
+	select {
+	case <-provider.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Provider call")
+	}
+	if err := harness.Input([]byte{0x03}); err != nil {
+		t.Fatalf("send Ctrl-C: %v", err)
+	}
+	waitForChat(t, harness, func() bool { return view.finished }, "canceled Run")
+	if harness.ExitRequested() {
+		t.Fatal("Ctrl-C exited the chat")
+	}
+	if view.currentResult.Status != agent.RunStatusCanceled || view.runErr != nil {
+		t.Fatalf("cancel result/error = %#v / %v", view.currentResult, view.runErr)
+	}
+	if !strings.Contains(surfaceText(harness.LatestSurface()), "Status: canceled") {
+		t.Fatalf("canceled status is not rendered:\n%s", surfaceText(harness.LatestSurface()))
+	}
+}
+
+type scriptedTUIProvider struct {
+	mu        sync.Mutex
+	responses []agent.Message
+	requests  []agent.ModelRequest
+	entered   chan struct{}
+	release   chan struct{}
+	gateOnce  sync.Once
+	gateFirst bool
+}
+
+func newScriptedTUIProvider(responses []agent.Message, gateFirst bool) *scriptedTUIProvider {
+	return &scriptedTUIProvider{
+		responses: append([]agent.Message(nil), responses...),
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+		gateFirst: gateFirst,
+	}
+}
+
+func (*scriptedTUIProvider) Name() string {
+	return "scripted-tui"
+}
+
+func (provider *scriptedTUIProvider) Stream(ctx context.Context, request agent.ModelRequest) (agent.ModelStream, error) {
+	provider.mu.Lock()
+	index := len(provider.requests)
+	provider.requests = append(provider.requests, request)
+	if index >= len(provider.responses) {
+		provider.mu.Unlock()
+		return nil, fmt.Errorf("scripted TUI Provider exhausted at call %d", index+1)
+	}
+	response := provider.responses[index]
+	provider.mu.Unlock()
+
+	if provider.gateFirst && index == 0 {
+		provider.gateOnce.Do(func() { close(provider.entered) })
+		select {
+		case <-provider.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return agent.MessageStream(response), nil
+}
+
+func (provider *scriptedTUIProvider) Requests() []agent.ModelRequest {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	return append([]agent.ModelRequest(nil), provider.requests...)
+}
+
+type tuiApprovalTool struct{}
+
+func (tuiApprovalTool) Definition() agent.ToolDefinition {
+	return agent.ToolDefinition{
+		Name:         "approval_tool",
+		InputSchema:  json.RawMessage(`{"type":"object","additionalProperties":false}`),
+		Capabilities: []string{"workspace.read"},
+	}
+}
+
+func (tuiApprovalTool) Execute(ctx context.Context, _ agent.ToolCall) (agent.ToolResult, error) {
+	response, err := agent.WaitForInput(ctx, agent.WaitRequest{
+		ID:     "approval-tui",
+		Kind:   agent.WaitKindApproval,
+		Prompt: "content not rendered",
+		Payload: json.RawMessage(
+			`{"tool":"approval_tool","capabilities":["workspace.read"]}`,
+		),
+	})
+	if err != nil {
+		return agent.ToolResult{}, err
+	}
+	var payload struct {
+		Approved bool `json:"approved"`
+	}
+	if err := json.Unmarshal(response.Payload, &payload); err != nil {
+		return agent.ToolResult{}, err
+	}
+	if !payload.Approved {
+		return agent.ToolResult{Output: "denied", IsError: true}, nil
+	}
+	return agent.ToolResult{Output: "approved"}, nil
+}
+
+func startChatHarness(
+	t *testing.T,
+	start StartFunc,
+	request agent.RunRequest,
+	prompt string,
+) (*runView, *tuitest.Harness[message]) {
+	t.Helper()
+	handle, err := start(context.Background(), request)
+	if err != nil {
+		t.Fatalf("start Run: %v", err)
+	}
+	bridge := newEventBridgeForRun(handle, 1, 0)
+	view := newChatView(context.Background(), start, request, prompt, handle, bridge)
+	harness, err := tuitest.New(view, tui.Size{Width: 100, Height: 30}, mapEvent)
+	if err != nil {
+		view.closeRuns()
+		t.Fatalf("tuitest.New: %v", err)
+	}
+	return view, harness
+}
+
+func closeChatHarness(view *runView, harness *tuitest.Harness[message]) {
+	view.closeRuns()
+	harness.Close()
+}
+
+func waitForChat(
+	t *testing.T,
+	harness *tuitest.Harness[message],
+	ready func() bool,
+	description string,
+) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !ready() {
+		if err := harness.Step(); err != nil {
+			t.Fatalf("step while waiting for %s: %v", description, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", description)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := harness.Step(); err != nil {
+		t.Fatalf("final step for %s: %v", description, err)
+	}
+}
+
+func equalChatMessages(left, right []agent.Message) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].Role != right[index].Role ||
+			left[index].Text != right[index].Text ||
+			left[index].StopReason != right[index].StopReason {
+			return false
+		}
+	}
+	return true
 }
 
 func surfaceText(rendered *surface.Surface) string {

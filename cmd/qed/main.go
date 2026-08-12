@@ -1027,7 +1027,7 @@ func runAgentCommand(dependencies commandDependencies) *cli.Command {
 
 func runTUICommand(dependencies commandDependencies) *cli.Command {
 	command := cli.NewCommand("tui").
-		About("Run one Agent turn in an interactive terminal").
+		About("Run a multi-turn Agent chat in an interactive terminal").
 		Option(
 			cli.ValueOption(promptValueID).
 				Long("prompt").
@@ -1066,13 +1066,13 @@ func runTUICommand(dependencies commandDependencies) *cli.Command {
 				Long("session-id").
 				Parser(cli.StringParser()).
 				RequiresSupplied(configValueID).
-				Help("Persist this turn in the configured Session Store"),
+				Help("Persist this chat in the configured Session Store"),
 		)
 	command = withProviderOptions(command).
 		Validator(validatePrompt).
 		Validator(validateAgentConfigOptions).
 		Validator(validateProviderOptions).
-		Example("interactive event view", "qed tui --prompt hello").
+		Example("interactive Agent chat", "qed tui --prompt hello").
 		Handle(func(commandContext *cli.Context, invocation *cli.Invocation) (cli.Outcome, error) {
 			prompt, diagnostic := requiredString(invocation, promptValueID)
 			if diagnostic != nil {
@@ -1125,12 +1125,21 @@ func runTUICommand(dependencies commandDependencies) *cli.Command {
 					},
 					prompt,
 				)
-				if configured.EvidenceStore != nil && outcome.Result.RunID != "" {
-					evidenceContext, cancel := context.WithTimeout(context.WithoutCancel(commandContext.Cancellation()), 5*time.Second)
-					_, evidenceErr := configured.SaveRunEvidence(evidenceContext, outcome.Result, outcome.Events)
-					cancel()
-					if evidenceErr != nil {
-						runErr = errors.Join(runErr, fmt.Errorf("save Run Evidence: %w", evidenceErr))
+				if configured.EvidenceStore != nil {
+					runs := outcome.Runs
+					if len(runs) == 0 && outcome.Result.RunID != "" {
+						runs = []tuiapp.RunOutcome{{Result: outcome.Result, Events: outcome.Events}}
+					}
+					for _, completed := range runs {
+						if completed.Result.RunID == "" {
+							continue
+						}
+						evidenceContext, cancel := context.WithTimeout(context.WithoutCancel(commandContext.Cancellation()), 5*time.Second)
+						_, evidenceErr := configured.SaveRunEvidence(evidenceContext, completed.Result, completed.Events)
+						cancel()
+						if evidenceErr != nil {
+							runErr = errors.Join(runErr, fmt.Errorf("save Run %q Evidence: %w", completed.Result.RunID, evidenceErr))
+						}
 					}
 				}
 				closeErr := configured.Close()
