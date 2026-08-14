@@ -1,6 +1,6 @@
 {
   "id": "reload-development-test",
   "version": "v1",
-  "protocol_version": 2,
+  "protocol_version": 1,
   "entrypoint": "bin/reload-development-test"
 }

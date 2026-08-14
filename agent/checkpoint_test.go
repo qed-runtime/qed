@@ -86,7 +86,7 @@ func TestCompactingContextCompilerCreatesRebuildableCheckpoint(t *testing.T) {
 	}
 }
 
-func TestCompactingContextCompilerRendersHierarchyAndReplaysLegacyCheckpoint(t *testing.T) {
+func TestCompactingContextCompilerRendersAndReusesHierarchy(t *testing.T) {
 	t.Parallel()
 
 	objects := evidence.NewMemoryObjectStore()
@@ -177,24 +177,6 @@ func TestCompactingContextCompilerRendersHierarchyAndReplaysLegacyCheckpoint(t *
 		t.Fatalf("follow-up mutated stored hierarchy = %#v", followUpCompiled.Checkpoint)
 	}
 
-	legacy := *checkpoint
-	legacy.Version = 1
-	legacy.Layers = nil
-	reused, err := compiler.Compile(context.Background(), agent.ContextCompileRequest{
-		ModelRequest: agent.ModelRequest{Messages: messages},
-		Checkpoint:   &legacy,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyView := decodeCheckpointModelView(t, reused.ModelRequest.Messages[0].Text)
-	if version, ok := legacyView["version"].(float64); !ok || version != 1 {
-		t.Fatalf("legacy model view version = %#v", legacyView["version"])
-	}
-	if _, exists := legacyView["layers"]; exists || len(reused.Compaction.ModelLevels) != 0 {
-		t.Fatalf("legacy model view or report gained hierarchy = %#v / %#v", legacyView, reused.Compaction)
-	}
-
 	tampered := *checkpoint
 	tampered.Layers = append([]agent.ContextCheckpointLayer(nil), checkpoint.Layers...)
 	tampered.Layers[0].SourceMessageEnd = 0
@@ -204,6 +186,26 @@ func TestCompactingContextCompilerRendersHierarchyAndReplaysLegacyCheckpoint(t *
 	})
 	if err == nil || !strings.Contains(err.Error(), "hierarchy") {
 		t.Fatalf("tampered hierarchy error = %v", err)
+	}
+
+	flat := *checkpoint
+	flat.Layers = nil
+	_, err = compiler.Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: messages},
+		Checkpoint:   &flat,
+	})
+	if err == nil || !strings.Contains(err.Error(), "hierarchy") {
+		t.Fatalf("flat Checkpoint error = %v", err)
+	}
+
+	unsupported := *checkpoint
+	unsupported.Version = agent.ContextCheckpointVersion + 1
+	_, err = compiler.Compile(context.Background(), agent.ContextCompileRequest{
+		ModelRequest: agent.ModelRequest{Messages: messages},
+		Checkpoint:   &unsupported,
+	})
+	if err == nil || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("unsupported Checkpoint error = %v", err)
 	}
 }
 
@@ -702,15 +704,15 @@ func TestCompactingContextCompilerUsesEventAwareMutationVerificationBoundary(t *
 		{Role: agent.RoleTool, ToolCallID: "verify-1", ToolName: "verify", Text: "passed"},
 		{Role: agent.RoleUser, Text: "next request"},
 	}
-	legacyCompiler := newCompiler(t)
-	legacy, err := legacyCompiler.Compile(context.Background(), agent.ContextCompileRequest{
+	directCompiler := newCompiler(t)
+	direct, err := directCompiler.Compile(context.Background(), agent.ContextCompileRequest{
 		ModelRequest: agent.ModelRequest{Messages: messages},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if legacy.Checkpoint == nil || legacy.Checkpoint.SourceMessageCount != 5 {
-		t.Fatalf("legacy Checkpoint = %#v", legacy.Checkpoint)
+	if direct.Checkpoint == nil || direct.Checkpoint.SourceMessageCount != 5 {
+		t.Fatalf("direct Checkpoint = %#v", direct.Checkpoint)
 	}
 
 	events := safeCutCompilerEvents(messages, map[string]agent.ContextOperationKind{
@@ -732,9 +734,9 @@ func TestCompactingContextCompilerUsesEventAwareMutationVerificationBoundary(t *
 	if compiled.Checkpoint == nil || compiled.Checkpoint.SourceMessageCount != 7 {
 		t.Fatalf("event-aware Checkpoint = %#v", compiled.Checkpoint)
 	}
-	_, err = legacyCompiler.Compile(context.Background(), agent.ContextCompileRequest{
+	_, err = directCompiler.Compile(context.Background(), agent.ContextCompileRequest{
 		ModelRequest: agent.ModelRequest{Messages: messages},
-		Checkpoint:   legacy.Checkpoint,
+		Checkpoint:   direct.Checkpoint,
 		Ledger:       &ledger,
 		Events:       events,
 	})

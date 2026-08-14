@@ -409,25 +409,25 @@ follow-upはEventをdrainして`Wait`を呼んだ後、設定済みSession Store
 follow-upは永続Sessionをreplayしつつ新しいRun IDとRuntime local上限を持ちます
 Session Storeがない場合はcallerが過去contextを渡し、両方のRunで1つの共有上限が必要な場合だけ同じ`*agent.Budget`を明示的に再利用します
 
-互換性に関する注意として、steeringはEvent JSONへ任意fieldの`user_message_origin`、Fact lifecycleは任意fieldの`fact_directive`を追加します
-既存の`user.message.added` HookもこれらのEventを観測します
+Event JSONはsteeringに任意fieldの`user_message_origin`、Fact lifecycleに任意fieldの`fact_directive`を使います
+`user.message.added` HookもこれらのEventを観測します
 外部decoderは任意fieldを受理する必要があります
-Goの`agent.Message`と`agent.Event` structにはexported fieldが増え、Ledger v2は`agent.ConstraintLedgerEntry`を拡張するため、外部のcomposite literalはfield名を指定してください
+Goの`agent.Message`、`agent.Event`、`agent.ConstraintLedgerEntry` structにはexported fieldが増える可能性があるため、外部のcomposite literalはfield名を指定してください
 
 Current World Stateは`current_world_state.captured` Event type、Event、terminal Result、Session snapshotのoptional `current_world_state` field、`current_world_state` Segment kindを追加します
 strictなEvent type switchは新しいEventを受理または明示的に無視する必要があります
 snapshot内のpathとcommand argumentはfile、diff、stdout、stderr contentを含まなくてもcontent-bearing metadataです
 
-Deterministic LedgerによりTool resultへ任意の`policy` metadata、terminal Run resultへ`context_ledger`、新しいCheckpointへ`ledger`参照が追加されます
+Deterministic LedgerはTool resultに任意の`policy` metadata、terminal Run resultに`context_ledger`、新しいCheckpointに`ledger`参照を公開します
 host Policyのraw reasonは含めず、Policy metadataをmodel向けTool Messageへコピーしません
-strictな外部JSON decoderはこれらの追加fieldを受理する必要があります
-Ledger schema v2はFact stateとtransition provenanceを追加し、replayではLedger v1が作成したCheckpoint参照も引き続き検証します
-`ValidateContextLedger`は現在schemaと比較するため、standaloneなv1 Ledger snapshotは検証前にEventから再構築する必要があります
+strictな外部JSON decoderはこれらのfieldを受理する必要があります
+Ledger schema v1はFact stateとtransition provenanceを含みます
+`ValidateContextLedger`はEventからcurrent deterministic snapshotを再構築して渡されたstateと比較します
 
 safe cut annotationによりTool resultへ任意の`context_operation` metadata、`ContextCompileRequest`へ`Events`が追加されます
 Runtimeはisolatedなexact Event prefixを渡し、semantic cutの前にLedgerと照合します
 directなCompiler callerはEventsを省略してToolだけのboundaryを維持できます
-Extension peerはProtocol v2を実装する必要があり、v1 manifestとpeerはexact version negotiationで拒否されます
+Extension peerはProtocol v1を実装する必要があり、別versionを宣言するmanifestとpeerはexact version negotiationで拒否されます
 
 built-in Context retrievalはTool resultと`tool.completed` Event JSONへ任意の`context_retrieval` fieldを追加します
 これはExtension Protocol fieldではなくadditiveなhost metadataです

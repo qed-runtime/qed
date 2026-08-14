@@ -549,7 +549,7 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 				Facts: []agent.CheckpointFact{{SourceMessage: 0, Summary: "session"}},
 				Goal:  &agent.CheckpointFact{SourceMessage: 2, Summary: "episode"},
 				Ledger: &agent.ContextLedgerReference{
-					Version: 1, Digest: "sha256:" + strings.Repeat("3", 64),
+					Version: agent.ContextLedgerVersion, Digest: "sha256:" + strings.Repeat("3", 64),
 					SourceEventCount: 2, SourceHash: "sha256:" + strings.Repeat("4", 64), SessionRevision: 2,
 				},
 				Narrative: "checkpoint",
@@ -625,28 +625,6 @@ func TestSessionStoresPreserveContextCheckpoint(t *testing.T) {
 				again.Events[0].ContextCompaction.Validation == nil ||
 				again.Events[0].ContextCompaction.Validation.ActiveConstraints.Required != 1 {
 				t.Fatalf("Checkpoint Rebase Event = %#v", again.Events)
-			}
-
-			legacy := agent.ContextCheckpoint{
-				Version: 1, Generation: 1, LastRebaseGeneration: 1,
-				SourceMessageCount: 1, SourceHash: "sha256:" + strings.Repeat("5", 64),
-				Narrative: "legacy", Evidence: []agent.EvidenceObjectRef{reference},
-			}
-			if _, err := store.Append(context.Background(), "legacy-checkpoint", 0, []agent.Event{{
-				Type: agent.EventContextCompacted, ContextCheckpoint: &legacy,
-				ContextCompaction: &agent.ContextCompactionReport{
-					Applied: true, Reason: "input_limit", SourceMessageCount: 1,
-				},
-			}}); err != nil {
-				t.Fatal(err)
-			}
-			legacySnapshot, err := store.Load(context.Background(), "legacy-checkpoint")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if legacySnapshot.Checkpoint == nil || legacySnapshot.Checkpoint.Version != 1 ||
-				len(legacySnapshot.Checkpoint.Layers) != 0 {
-				t.Fatalf("legacy Checkpoint replay = %#v", legacySnapshot.Checkpoint)
 			}
 		})
 	}

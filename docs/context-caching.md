@@ -64,7 +64,7 @@ the complete ordered Event prefix. The terminal `agent.RunResult` contains the
 Ledger after the terminal Event. A custom Compiler receives an isolated copy in
 `ContextCompileRequest.Ledger`; changing it cannot alter Runtime state
 
-The v2 Reducer produces five typed ledgers without calling a model or reading a
+The Reducer produces five typed ledgers without calling a model or reading a
 live workspace
 
 | Ledger | Runtime-observable contents |
@@ -118,14 +118,14 @@ ephemeral Run can transition a Fact through steering after observing its
 `user.message.added` Event, but passing prior Messages alone to a later Run does
 not recreate their earlier Event identities
 
-Ledger schema v2 adds Fact lifecycle fields. New Checkpoints reference v2,
-while replay still verifies references produced by Ledger v1. The deterministic
-Checkpoint strategy omits superseded and resolved Constraint Facts from a new
-model-facing Checkpoint. When reusing an earlier Checkpoint, the Compiler also
-filters its transient model view against the current Ledger without mutating
-the persisted Checkpoint. Its Ledger reference commits the complete lifecycle
-snapshot. Artifact entries do not represent current file or Git state because
-those values belong to Current World State
+The Ledger schema includes Fact lifecycle fields. New Checkpoints reference the
+exact current Ledger generation. The deterministic Checkpoint strategy omits
+superseded and resolved Constraint Facts from a new model-facing Checkpoint.
+When reusing an earlier Checkpoint, the Compiler also filters its transient
+model view against the current Ledger without mutating the persisted
+Checkpoint. Its Ledger reference commits the complete lifecycle snapshot.
+Artifact entries do not represent current file or Git state because those
+values belong to Current World State
 
 ## Current World State
 
@@ -159,12 +159,10 @@ never interpreted as instructions. State capture changes the volatile suffix
 and therefore participates in Prefix Manifest and cache planning without
 rewriting stable earlier Segments
 
-`ContextLedgerVersion` and the snapshot digest domain changed from v1 to v2.
-Standalone v1 snapshots are derived data and should be rebuilt from their Event
-Log; `ValidateContextLedger` compares supplied state with the current v2
-reduction. Compatibility support is limited to v1 references already embedded
-in persisted Checkpoints whose Event prefix predates Current World State
-capture
+`ContextLedgerVersion` and the snapshot digest domain are version 1. Ledger
+snapshots are derived data and can be rebuilt from their Event Log.
+`ValidateContextLedger` compares supplied state with that deterministic
+reduction
 
 For compatibility, Runtime emits one `user.message.added` Event for every
 `RunRequest.Input` entry, including caller-supplied assistant or Tool history
@@ -199,7 +197,7 @@ raw messages
   Git changes, retained failed checks, pending Tools, and required Evidence
 - it injects the validated Checkpoint followed by the recent raw message tail
 
-New Checkpoints use schema version 2. Their ordered `Layers` cover the complete
+New Checkpoints use schema version 1. Their ordered `Layers` cover the complete
 compacted prefix exactly once. Session Synopsis ends where the current Run
 starts, Task contains earlier compacted messages from that Run, and Episode is
 the latest transaction-safe range inside the prefix. `recent_messages` is the
@@ -223,9 +221,8 @@ generation
 
 Core derives and validates layer boundaries after a custom
 `CheckpointStrategy` returns. A Strategy cannot split a protected transaction
-or forge a second source partition. Version 1 Checkpoints remain valid for
-Session replay and retain their original flat Provider view; the next
-published generation is upgraded to version 2
+or forge a second source partition. Every published version 1 Checkpoint
+contains the validated hierarchy
 
 The Compiler never deletes or rewrites Session messages. A successfully
 published Checkpoint emits `context.compacted`; `SessionSnapshot.Checkpoint`

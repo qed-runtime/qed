@@ -52,7 +52,7 @@ func TestUnmarshalRejectsUnknownFields(t *testing.T) {
 	t.Parallel()
 
 	var request protocol.HandshakeRequest
-	err := protocol.Unmarshal(json.RawMessage(`{"protocol_version":2,"unexpected":true}`), &request)
+	err := protocol.Unmarshal(json.RawMessage(`{"protocol_version":1,"unexpected":true}`), &request)
 	if err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("Unmarshal() error = %v, want unknown field", err)
 	}

@@ -480,13 +480,12 @@ persisted Session. Without a Store, the caller must provide prior context.
 Reuse the same `*agent.Budget` explicitly only when one shared limit must span
 both Runs
 
-Compatibility note: steering adds the optional `user_message_origin` field and
-Fact lifecycle adds the optional `fact_directive` field to Event JSON. Existing
-Hooks subscribed to `user.message.added` also observe these Events. External
-decoders must accept the optional fields. The Go `agent.Message` and
-`agent.Event` structs gained exported fields, and Ledger v2 extends
-`agent.ConstraintLedgerEntry`, so external composite literals should use field
-names
+Event JSON uses the optional `user_message_origin` field for steering and the
+optional `fact_directive` field for Fact lifecycle. Hooks subscribed to
+`user.message.added` also observe these Events. External decoders must accept
+the optional fields. The Go `agent.Message`, `agent.Event`, and
+`agent.ConstraintLedgerEntry` structs may grow exported fields, so external
+composite literals should use field names
 
 Current World State adds the `current_world_state.captured` Event type, the
 optional `current_world_state` field on Events, terminal Results, and Session
@@ -495,21 +494,20 @@ must accept or deliberately ignore the new Event. Paths and command arguments
 inside a snapshot are content-bearing metadata even though file, diff, stdout,
 and stderr content is absent
 
-Deterministic Ledgers add optional `policy` metadata to Tool results,
-`context_ledger` to terminal Run results, and `ledger` references to new
+Deterministic Ledgers expose optional `policy` metadata on Tool results,
+`context_ledger` on terminal Run results, and `ledger` references on new
 Checkpoints. The raw host Policy reason is not included, and Policy metadata is
 not copied into the model-facing Tool Message. Strict external JSON decoders
-must accept these additive fields. Ledger schema v2 adds Fact state and
-transition provenance; replay continues to verify Checkpoint references created
-by Ledger v1. Standalone v1 Ledger snapshots must be rebuilt from Events before
-validation because `ValidateContextLedger` compares against the current schema
+must accept these fields. Ledger schema v1 includes Fact state and transition
+provenance. `ValidateContextLedger` rebuilds the current deterministic snapshot
+from Events before comparing it with supplied state
 
 Safe-cut annotations add optional `context_operation` metadata to Tool results
 and `Events` to `ContextCompileRequest`. Runtime supplies an isolated exact
 Event prefix and validates it against the Ledger before semantic cuts. A direct
 compiler caller may omit Events to retain Tool-only boundaries. Extension peers
-must implement Protocol v2; v1 manifests and peers are rejected by exact
-version negotiation
+must implement Protocol v1; manifests and peers declaring another version are
+rejected by exact version negotiation
 
 Built-in Context retrieval adds the optional `context_retrieval` field to Tool
 results and `tool.completed` Event JSON. It is additive host metadata rather

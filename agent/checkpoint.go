@@ -12,23 +12,22 @@ import (
 
 const (
 	// ContextCheckpointVersion is the schema version published by CompactingContextCompiler
-	ContextCheckpointVersion uint32 = 2
+	ContextCheckpointVersion uint32 = 1
 
-	legacyContextCheckpointVersion = 1
-	checkpointSourceHashDomain     = "qed.context.checkpoint.source.v1"
-	checkpointMediaType            = "application/vnd.qed.context-messages+json"
-	checkpointMessageKind          = "qed_context_checkpoint"
-	defaultRecentMessages          = 12
-	defaultEvidenceThreshold       = 16 << 10
-	defaultEvidenceExcerptBytes    = 2 << 10
-	defaultCheckpointMaxBytes      = 8 << 10
-	defaultRebaseGenerations       = 4
-	maximumRebaseGenerations       = 64
-	maximumCheckpointFacts         = 16
-	maximumCheckpointDecisions     = 12
-	maximumCheckpointExecutions    = 24
-	maximumCheckpointSummary       = 512
-	contextCheckpointPriority      = 80
+	checkpointSourceHashDomain  = "qed.context.checkpoint.source.v1"
+	checkpointMediaType         = "application/vnd.qed.context-messages+json"
+	checkpointMessageKind       = "qed_context_checkpoint"
+	defaultRecentMessages       = 12
+	defaultEvidenceThreshold    = 16 << 10
+	defaultEvidenceExcerptBytes = 2 << 10
+	defaultCheckpointMaxBytes   = 8 << 10
+	defaultRebaseGenerations    = 4
+	maximumRebaseGenerations    = 64
+	maximumCheckpointFacts      = 16
+	maximumCheckpointDecisions  = 12
+	maximumCheckpointExecutions = 24
+	maximumCheckpointSummary    = 512
+	contextCheckpointPriority   = 80
 )
 
 // ContextCheckpointLevel identifies one model-facing context granularity
@@ -124,9 +123,6 @@ type ContextCheckpoint struct {
 	// SourceHash identifies the exact ordered raw message prefix
 	SourceHash string `json:"source_hash"`
 	// Layers partition the source prefix into model-facing context granularities
-	//
-	// Version 1 Checkpoints omit Layers. Runtime accepts them for replay and
-	// upgrades the next published generation to the current schema.
 	Layers []ContextCheckpointLayer `json:"layers,omitempty"`
 	// Ledger references the deterministic Event-derived state observed at creation
 	Ledger *ContextLedgerReference `json:"ledger,omitempty"`
@@ -208,7 +204,7 @@ type CheckpointRequest struct {
 	Messages []Message
 	// Events is the exact ordered raw Event prefix available during compilation
 	//
-	// Runtime always supplies Events. A direct caller may omit them for legacy
+	// Runtime always supplies Events. A direct caller may omit them for
 	// message-only compilation.
 	Events []Event
 	// SessionRevision identifies the Session revision being compiled
@@ -269,7 +265,7 @@ func (DeterministicCheckpointStrategy) BuildCheckpoint(
 		lastRebaseGeneration = checkpointLastRebaseGeneration(request.Previous)
 	}
 	checkpoint := ContextCheckpoint{
-		Version:              legacyContextCheckpointVersion,
+		Version:              ContextCheckpointVersion,
 		Generation:           generation,
 		LastRebaseGeneration: lastRebaseGeneration,
 		SessionRevision:      request.SessionRevision,

@@ -50,7 +50,7 @@ func TestLoadResolvesValidatedEntrypoint(t *testing.T) {
 	document := `{
   "id": "test-extension",
   "version": "v1",
-  "protocol_version": 2,
+  "protocol_version": 1,
   "entrypoint": "extension",
   "capabilities": ["test.read"],
   "hooks": ["run.started"],
@@ -85,8 +85,8 @@ func TestLoadRejectsEntrypointEscapeAndAmbiguousJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	tests := []string{
-		`{"id":"one","id":"two","version":"v1","protocol_version":2,"entrypoint":"extension"}`,
-		`{"id":"one","version":"v1","protocol_version":2,"entrypoint":"../outside"}`,
+		`{"id":"one","id":"two","version":"v1","protocol_version":1,"entrypoint":"extension"}`,
+		`{"id":"one","version":"v1","protocol_version":1,"entrypoint":"../outside"}`,
 	}
 	for index, document := range tests {
 		if err := os.WriteFile(filepath.Join(directory, manifest.Filename), []byte(document), 0o600); err != nil {
@@ -106,7 +106,7 @@ func TestLoadForDevelopmentAllowsMissingBuildOutput(t *testing.T) {
 	if err := os.WriteFile(manifestPath, []byte(`{
 		"id":"development-extension",
 		"version":"v1",
-		"protocol_version":2,
+		"protocol_version":1,
 		"entrypoint":"bin/development-extension"
 	}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -135,7 +135,7 @@ func TestDiscoverRejectsDuplicateExtensionIDs(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(directory, "extension"), []byte("binary"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		document := `{"id":"duplicate","version":"v1","protocol_version":2,"entrypoint":"extension"}`
+		document := `{"id":"duplicate","version":"v1","protocol_version":1,"entrypoint":"extension"}`
 		if err := os.WriteFile(filepath.Join(directory, manifest.Filename), []byte(document), 0o600); err != nil {
 			t.Fatal(err)
 		}

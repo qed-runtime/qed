@@ -1,4 +1,4 @@
-// Package protocol defines the language-independent QED Extension Protocol v2
+// Package protocol defines the language-independent QED Extension Protocol v1
 package protocol
 
 import (
@@ -11,7 +11,7 @@ import (
 
 const (
 	// Version is the only Extension Protocol version supported by this package
-	Version = 2
+	Version = 1
 	// MaxFrameBytes bounds one encoded protocol envelope
 	MaxFrameBytes = 8 << 20
 )
@@ -19,7 +19,7 @@ const (
 // Method identifies one Extension lifecycle or component RPC operation
 type Method string
 
-// Extension Protocol v2 methods
+// Extension Protocol v1 methods
 const (
 	MethodHandshake            Method = "handshake"
 	MethodDescribe             Method = "describe"

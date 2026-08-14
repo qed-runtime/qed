@@ -54,17 +54,16 @@ supplies an isolated copy of the exact Event prefix. The compiler validates that
 prefix against the Ledger and derives safe cuts without relying on Tool names in
 Runtime Core
 
-Checkpoint schema v2 treats hierarchy as a derived view, never as another
+Checkpoint schema v1 treats hierarchy as a derived view, never as another
 source of truth. Core partitions the exact compacted message prefix into
 ordered, non-overlapping Session Synopsis, Task, and Episode ranges. The
 current Run boundary separates Session from Task, and the existing safe-cut
 plan selects the Episode boundary. The Provider projection includes only
 levels containing retained typed state, while the stored Checkpoint, Event,
-Ledger, and Evidence retain complete validation provenance. Schema v1 remains
-replayable and is upgraded only when a later generation is published. A
-follow-up request reprojects the unchanged stored source against its new Run
-boundary, so prior Task and Episode state becomes Session Synopsis without a
-spurious Checkpoint generation
+Ledger, and Evidence retain complete validation provenance. A follow-up request
+reprojects the unchanged stored source against its new Run boundary, so prior
+Task and Episode state becomes Session Synopsis without a spurious Checkpoint
+generation
 
 The first Checkpoint is a Raw Event Rebase. Later generations may update from a
 validated previous semantic view, while a deterministic generation interval,
@@ -208,12 +207,12 @@ Policy, or approval. The proxies then combine capabilities, evaluate Policy,
 request approval when required, and invoke the remote component only after
 authorization. Tool Evidence is recorded in the Host
 
-`extension/protocol` defines Protocol v2 as 4-byte big-endian length-prefixed
+`extension/protocol` defines Protocol v1 as 4-byte big-endian length-prefixed
 strict JSON over stdio. `extension/server` adapts Go Tools, Hooks, Commands, and
 lifecycle callbacks to that contract and revalidates Tool input before direct
-RPC calls reach component code. Protocol v2 adds Tool-result
-`context_operation` metadata; exact version negotiation intentionally rejects
-v1 peers. `extension/host` supervises processes and generation leases
+RPC calls reach component code. Protocol v1 includes Tool-result
+`context_operation` metadata and exact version negotiation rejects mismatched
+peers. `extension/host` supervises processes and generation leases
 
 `extension/manifest` validates the transport-independent declaration shared by
 external and embedded Extensions, resolves distributable manifests, and
@@ -305,9 +304,8 @@ shape at submission, moves it from `Message.FactDirective` to
 or persistence. `supersede` retires earlier targets and creates one active
 replacement, while `resolve` retires targets without creating a Fact from the
 resolution Message. Stored and Provider-facing conversation Messages do not
-retain the directive. Ledger v2 records the raw message index, current state,
-state source, transition sources, and both directions of supersedes edges;
-replay also validates references emitted by Ledger v1
+retain the directive. Ledger v1 records the raw message index, current state,
+state source, transition sources, and both directions of supersedes edges
 
 An observed `run.waiting` rejects new steering with `ErrRunWaiting`. Steering
 queued before the wait remains pending until the matching resume and Tool

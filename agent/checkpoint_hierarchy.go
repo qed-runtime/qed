@@ -36,7 +36,7 @@ func attachCheckpointHierarchy(
 	if checkpoint == nil {
 		return errors.New("Context Checkpoint must not be nil")
 	}
-	if checkpoint.Version != legacyContextCheckpointVersion && checkpoint.Version != ContextCheckpointVersion {
+	if checkpoint.Version != ContextCheckpointVersion {
 		return nil
 	}
 	layers, err := buildCheckpointLayers(
@@ -161,20 +161,8 @@ func validateCheckpointHierarchy(
 	events []Event,
 	ledger *ContextLedger,
 ) error {
-	switch checkpoint.Version {
-	case legacyContextCheckpointVersion:
-		if len(checkpoint.Layers) != 0 {
-			return errors.New("legacy Context Checkpoint must not contain hierarchy layers")
-		}
-		return nil
-	case ContextCheckpointVersion:
-	default:
-		return fmt.Errorf(
-			"Checkpoint version = %d, want %d or %d",
-			checkpoint.Version,
-			legacyContextCheckpointVersion,
-			ContextCheckpointVersion,
-		)
+	if checkpoint.Version != ContextCheckpointVersion {
+		return fmt.Errorf("Checkpoint version = %d, want %d", checkpoint.Version, ContextCheckpointVersion)
 	}
 	if len(checkpoint.Layers) == 0 || len(checkpoint.Layers) > 3 {
 		return errors.New("Context Checkpoint hierarchy must contain one to three layers")

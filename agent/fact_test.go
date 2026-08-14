@@ -2,12 +2,7 @@ package agent_test
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"hash"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +29,7 @@ func TestBuildContextLedgerAppliesFactLifecycleAcrossRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ledger.Version != 2 || len(ledger.Constraints) != 2 {
+	if ledger.Version != agent.ContextLedgerVersion || len(ledger.Constraints) != 2 {
 		t.Fatalf("Context Ledger = %#v", ledger)
 	}
 	first := ledger.Constraints[0]
@@ -585,7 +580,7 @@ func TestRuntimeAppliesSteeringFactDirectiveAtSafeBoundary(t *testing.T) {
 	}
 }
 
-func TestBuildContextLedgerAcceptsV1CheckpointReference(t *testing.T) {
+func TestBuildContextLedgerValidatesCheckpointReference(t *testing.T) {
 	t.Parallel()
 
 	prefixEvents := []agent.Event{
@@ -599,7 +594,7 @@ func TestBuildContextLedgerAcceptsV1CheckpointReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reference := legacyContextLedgerReference(t, prefix)
+	reference := prefix.Reference()
 	checkpoint := &agent.ContextCheckpoint{Ledger: &reference}
 	events := append(append([]agent.Event(nil), prefixEvents...),
 		agent.Event{
@@ -624,7 +619,14 @@ func TestBuildContextLedgerAcceptsV1CheckpointReference(t *testing.T) {
 	tampered := cloneLedgerEvents(events)
 	tampered[2].ContextCheckpoint.Ledger.Digest = "sha256:" + strings.Repeat("f", 64)
 	if _, err := agent.BuildContextLedger(context.Background(), tampered); err == nil {
-		t.Fatal("BuildContextLedger accepted changed v1 Checkpoint reference")
+		t.Fatal("BuildContextLedger accepted changed Checkpoint reference")
+	}
+
+	unsupported := cloneLedgerEvents(events)
+	unsupported[2].ContextCheckpoint.Ledger.Version = agent.ContextLedgerVersion + 1
+	if _, err := agent.BuildContextLedger(context.Background(), unsupported); err == nil ||
+		!strings.Contains(err.Error(), "unsupported Context Ledger reference version") {
+		t.Fatalf("unsupported Checkpoint reference error = %v", err)
 	}
 }
 
@@ -669,64 +671,4 @@ func runFactRequest(t *testing.T, runtime *agent.Runtime, request agent.RunReque
 		return nil, agent.RunResult{}, err
 	}
 	return collectRun(handle)
-}
-
-func legacyContextLedgerReference(t *testing.T, ledger agent.ContextLedger) agent.ContextLedgerReference {
-	t.Helper()
-	type legacyConstraint struct {
-		ID          string                        `json:"id"`
-		Kind        agent.ConstraintLedgerKind    `json:"kind"`
-		Text        string                        `json:"text"`
-		ContentHash string                        `json:"content_hash"`
-		Origin      agent.UserMessageOrigin       `json:"origin,omitempty"`
-		Sources     []agent.ContextLedgerEventRef `json:"sources"`
-	}
-	type legacyLedger struct {
-		Version              uint32                         `json:"version"`
-		SessionID            string                         `json:"session_id,omitempty"`
-		SessionRevision      uint64                         `json:"session_revision,omitempty"`
-		SourceEventCount     int                            `json:"source_event_count"`
-		SourceHash           string                         `json:"source_hash"`
-		Digest               string                         `json:"digest"`
-		Sources              []agent.ContextLedgerSource    `json:"sources"`
-		CheckpointReferences []agent.ContextLedgerReference `json:"checkpoint_references"`
-		Artifacts            []agent.ArtifactLedgerEntry    `json:"artifacts"`
-		Executions           []agent.ExecutionLedgerEntry   `json:"executions"`
-		Constraints          []legacyConstraint             `json:"constraints"`
-		Policies             []agent.PolicyLedgerEntry      `json:"policies"`
-		Tasks                []agent.TaskLedgerEntry        `json:"tasks"`
-	}
-	constraints := make([]legacyConstraint, len(ledger.Constraints))
-	for index, entry := range ledger.Constraints {
-		constraints[index] = legacyConstraint{
-			ID: entry.ID, Kind: entry.Kind, Text: entry.Text, ContentHash: entry.ContentHash,
-			Origin: entry.Origin, Sources: entry.Sources[:1],
-		}
-	}
-	value := legacyLedger{
-		Version: 1, SessionID: ledger.SessionID, SessionRevision: ledger.SessionRevision,
-		SourceEventCount: ledger.SourceEventCount, SourceHash: ledger.SourceHash,
-		Sources: ledger.Sources, CheckpointReferences: ledger.CheckpointReferences,
-		Artifacts: ledger.Artifacts, Executions: ledger.Executions, Constraints: constraints,
-		Policies: ledger.Policies, Tasks: ledger.Tasks,
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.New()
-	writeLegacyHashPart(digest, []byte("qed.context.ledger.v1"))
-	writeLegacyHashPart(digest, encoded)
-	return agent.ContextLedgerReference{
-		Version: 1, Digest: "sha256:" + hex.EncodeToString(digest.Sum(nil)),
-		SourceEventCount: ledger.SourceEventCount, SourceHash: ledger.SourceHash,
-		SessionRevision: ledger.SessionRevision,
-	}
-}
-
-func writeLegacyHashPart(writer hash.Hash, value []byte) {
-	var size [8]byte
-	binary.BigEndian.PutUint64(size[:], uint64(len(value)))
-	_, _ = writer.Write(size[:])
-	_, _ = writer.Write(value)
 }

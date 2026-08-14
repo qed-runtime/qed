@@ -1,7 +1,7 @@
 # Extension process
 
 QEDはTool、Event Hook、host-invoked Commandをversion付きprocess境界の背後に置きます
-development executable、discovered package、QED self-exec childは同じProtocol v2 contractを使います
+development executable、discovered package、QED self-exec childは同じProtocol v1 contractを使います
 
 ```text
 Agent Run
@@ -66,14 +66,14 @@ scaffoldは新規directoryだけを作成します
 Go dependency commandを実行せず、`go.mod`、`go.sum`、`extensions.lock`を変更しません
 所有moduleは通常のdependency workflowでQED dependencyを追加する必要があります
 
-## Protocol v2
+## Protocol v1
 
 各messageは4-byte unsigned big-endian payload lengthを前置したUTF-8 JSON objectです
 envelope上限は8 MiBです
 unknown field、trailing value、不正frame、空のcorrelation ID、version mismatchを拒否します
 
-Protocol v2は`invoke_tool` resultへ任意の`context_operation` metadataを追加します
-v1 decoderはunknown fieldを拒否するため、exact version negotiationではwire変更を互換扱いせずv1 peerを意図的に拒否します
+Protocol v1は`invoke_tool` resultに任意の`context_operation` metadataを含みます
+exact version negotiationは別のprotocol versionを宣言するpeerを拒否します
 
 requestは`version`、`id`、`method`、optionalな`params`を含みます
 responseは`version`と`id`を反復し、`result`または`error`のどちらか一方だけを含みます
@@ -135,7 +135,7 @@ Runtimeはこのcontent-free metadataをEventとSession replayへ保持します
 context圧縮がsemantic transactionを分断しないための分類であり、callをauthorizeせずresult成功も証明しません
 HostとExtension serverは未知のkindを拒否します
 
-`ToolResult.ContextRetrieval`はRuntime所有のbuilt-in retrieval Tool向けに予約され、Extension Protocol v2には含まれません
+`ToolResult.ContextRetrieval`はRuntime所有のbuilt-in retrieval Tool向けに予約され、Extension Protocol v1には含まれません
 third-party Extensionは通常outputと任意の`ContextOperation`を返してください
 Runtimeは明示的に設定されたbuilt-in Toolだけにretrieval metadataを付与します
 
@@ -279,7 +279,7 @@ conventional filenameは`qed-extension.json`です
 {
   "id": "example-extension",
   "version": "0.1.0",
-  "protocol_version": 2,
+  "protocol_version": 1,
   "entrypoint": "bin/example-extension",
   "capabilities": ["filesystem.read"],
   "hooks": ["run.started"],
@@ -324,7 +324,7 @@ Hostは外部identity、version、capability、Hook、Commandをlive processと�
       "manifest": {
         "id": "example-extension",
         "version": "0.1.0",
-        "protocol_version": 2,
+        "protocol_version": 1,
         "capabilities": ["example.read"]
       }
     }

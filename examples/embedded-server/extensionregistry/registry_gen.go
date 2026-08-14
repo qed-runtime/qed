@@ -15,7 +15,7 @@ var Catalog = selfexec.MustNewCatalog([]selfexec.Definition{
 		Manifest: extensionmanifest.Declaration{
 			ID:              "example.greeting",
 			Version:         "0.1.0",
-			ProtocolVersion: 2,
+			ProtocolVersion: 1,
 			Capabilities:    []string{"example.read"},
 		},
 		ServerOptions: extension0.ServerOptions,

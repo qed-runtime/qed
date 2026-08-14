@@ -223,7 +223,7 @@ go run ./cmd/qed run --config ./qed.json "Review this plan"
 `staged`はindexだけを対象にします
 
 checked-in `extensions.lock`はこのbinary向けに再利用可能な`qed.workspace`、`qed.process`、`qed.git` Extensionを選択します
-各Extensionはsingle binaryのself-exec modeを含め、常にExtension Protocol v2境界で実行されます
+各Extensionはsingle binaryのself-exec modeを含め、常にExtension Protocol v1境界で実行されます
 
 ```json
 {

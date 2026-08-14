@@ -16,11 +16,10 @@ import (
 
 const (
 	// ContextLedgerVersion is the schema version emitted by BuildContextLedger
-	ContextLedgerVersion uint32 = 2
+	ContextLedgerVersion uint32 = 1
 
 	contextLedgerSourceHashDomain = "qed.context.ledger.sources.v1"
-	contextLedgerDigestDomain     = "qed.context.ledger.v2"
-	contextLedgerV1DigestDomain   = "qed.context.ledger.v1"
+	contextLedgerDigestDomain     = "qed.context.ledger.v1"
 	contextLedgerEventHashDomain  = "qed.context.ledger.event.v1"
 	contextLedgerValueHashDomain  = "qed.context.ledger.value.v1"
 )
@@ -637,10 +636,13 @@ func BuildContextLedger(ctx context.Context, events []Event) (ContextLedger, err
 				if err != nil {
 					return ContextLedger{}, err
 				}
-				wantReference, err := contextLedgerReferenceForVersion(prefix, event.ContextCheckpoint.Ledger.Version)
-				if err != nil {
-					return ContextLedger{}, err
+				if event.ContextCheckpoint.Ledger.Version != ContextLedgerVersion {
+					return ContextLedger{}, fmt.Errorf(
+						"unsupported Context Ledger reference version %d",
+						event.ContextCheckpoint.Ledger.Version,
+					)
 				}
+				wantReference := prefix.Reference()
 				if *event.ContextCheckpoint.Ledger != wantReference &&
 					!containsContextLedgerReference(ledger.CheckpointReferences, *event.ContextCheckpoint.Ledger) {
 					if event.Type == EventContextCompacted {
@@ -767,7 +769,7 @@ func ValidateContextLedger(ctx context.Context, ledger ContextLedger, events []E
 }
 
 func validateContextLedgerReference(reference ContextLedgerReference, current *ContextLedger) error {
-	if (reference.Version != 1 && reference.Version != ContextLedgerVersion) || !validSHA256Digest(reference.Digest) ||
+	if reference.Version != ContextLedgerVersion || !validSHA256Digest(reference.Digest) ||
 		!validSHA256Digest(reference.SourceHash) || reference.SourceEventCount < 0 {
 		return errors.New("reference identity is invalid")
 	}
@@ -792,10 +794,7 @@ func validateContextLedgerReference(reference ContextLedgerReference, current *C
 		return errors.New("Session revision does not match current Event prefix")
 	}
 	if reference.SourceEventCount == current.SourceEventCount {
-		want, err := contextLedgerReferenceForVersion(*current, reference.Version)
-		if err != nil {
-			return err
-		}
+		want := current.Reference()
 		if reference != want {
 			return errors.New("digest does not match current Ledger")
 		}
@@ -1524,90 +1523,6 @@ func contextLedgerSnapshotDigest(ledger ContextLedger) (string, error) {
 		return "", fmt.Errorf("encode Context Ledger: %w", err)
 	}
 	return contextLedgerJSONDigest(contextLedgerDigestDomain, json.RawMessage(encoded)), nil
-}
-
-type contextLedgerV1Constraint struct {
-	ID          string                  `json:"id"`
-	Kind        ConstraintLedgerKind    `json:"kind"`
-	Text        string                  `json:"text"`
-	ContentHash string                  `json:"content_hash"`
-	Origin      UserMessageOrigin       `json:"origin,omitempty"`
-	Sources     []ContextLedgerEventRef `json:"sources"`
-}
-
-type contextLedgerV1Snapshot struct {
-	Version              uint32                      `json:"version"`
-	SessionID            string                      `json:"session_id,omitempty"`
-	SessionRevision      uint64                      `json:"session_revision,omitempty"`
-	SourceEventCount     int                         `json:"source_event_count"`
-	SourceHash           string                      `json:"source_hash"`
-	Digest               string                      `json:"digest"`
-	Sources              []ContextLedgerSource       `json:"sources"`
-	CheckpointReferences []ContextLedgerReference    `json:"checkpoint_references"`
-	Artifacts            []ArtifactLedgerEntry       `json:"artifacts"`
-	Executions           []ExecutionLedgerEntry      `json:"executions"`
-	Constraints          []contextLedgerV1Constraint `json:"constraints"`
-	Policies             []PolicyLedgerEntry         `json:"policies"`
-	Tasks                []TaskLedgerEntry           `json:"tasks"`
-}
-
-func contextLedgerReferenceForVersion(ledger ContextLedger, version uint32) (ContextLedgerReference, error) {
-	switch version {
-	case ContextLedgerVersion:
-		return ledger.Reference(), nil
-	case 1:
-		for _, source := range ledger.Sources {
-			if source.Type == EventCurrentWorldStateCaptured {
-				return ContextLedgerReference{}, errors.New("Current World State has no v1-compatible Event representation")
-			}
-		}
-		for _, checkpoint := range ledger.CheckpointReferences {
-			if checkpoint.Version != 1 {
-				return ContextLedgerReference{}, errors.New("Context Ledger contains a non-v1 Checkpoint reference")
-			}
-		}
-		constraints := make([]contextLedgerV1Constraint, len(ledger.Constraints))
-		for index, entry := range ledger.Constraints {
-			if entry.State != FactActive || len(entry.Sources) != 1 || len(entry.Supersedes) != 0 || entry.SupersededBy != "" {
-				return ContextLedgerReference{}, fmt.Errorf("Constraint Fact %q has no v1-compatible lifecycle", entry.ID)
-			}
-			constraints[index] = contextLedgerV1Constraint{
-				ID:          entry.ID,
-				Kind:        entry.Kind,
-				Text:        entry.Text,
-				ContentHash: entry.ContentHash,
-				Origin:      entry.Origin,
-				Sources:     append([]ContextLedgerEventRef(nil), entry.Sources[:1]...),
-			}
-		}
-		legacy := contextLedgerV1Snapshot{
-			Version:              1,
-			SessionID:            ledger.SessionID,
-			SessionRevision:      ledger.SessionRevision,
-			SourceEventCount:     ledger.SourceEventCount,
-			SourceHash:           ledger.SourceHash,
-			Sources:              ledger.Sources,
-			CheckpointReferences: ledger.CheckpointReferences,
-			Artifacts:            ledger.Artifacts,
-			Executions:           ledger.Executions,
-			Constraints:          constraints,
-			Policies:             ledger.Policies,
-			Tasks:                ledger.Tasks,
-		}
-		encoded, err := json.Marshal(legacy)
-		if err != nil {
-			return ContextLedgerReference{}, fmt.Errorf("encode Context Ledger v1 compatibility snapshot: %w", err)
-		}
-		return ContextLedgerReference{
-			Version:          1,
-			Digest:           contextLedgerJSONDigest(contextLedgerV1DigestDomain, json.RawMessage(encoded)),
-			SourceEventCount: ledger.SourceEventCount,
-			SourceHash:       ledger.SourceHash,
-			SessionRevision:  ledger.SessionRevision,
-		}, nil
-	default:
-		return ContextLedgerReference{}, fmt.Errorf("unsupported Context Ledger reference version %d", version)
-	}
 }
 
 func contextLedgerJSONDigest(domain string, value any) string {

@@ -56,7 +56,7 @@ RuntimeはContext Compiler callの前に完全なordered Event prefixから`agen
 terminal `agent.RunResult`にはterminal Event反映後のLedgerが入ります
 custom Compilerは`ContextCompileRequest.Ledger`からisolated copyを受け取り、変更してもRuntime stateには影響しません
 
-v2 Reducerはmodel callやlive workspace readを行わず5つのtyped Ledgerを生成します
+Reducerはmodel callやlive workspace readを行わず5つのtyped Ledgerを生成します
 
 | Ledger | Runtimeから観測できる内容 |
 | --- | --- |
@@ -95,8 +95,8 @@ shape errorは`Runtime.Run`または`RunHandle.Steer`が返し、安全なsteeri
 Fact IDはsource Eventを識別するため、terminal RunをまたぐtransitionにはEventをreplayするSession Storeが必要です
 ephemeral Runでも`user.message.added` Eventを観測した後のsteeringなら同じRun内のFactを遷移できますが、過去Messageだけを後続Runへ渡しても以前のEvent identityは再生成されません
 
-Ledger schema v2はFact lifecycle fieldを追加します
-新しいCheckpointはv2を参照し、replayではLedger v1が生成した参照も引き続き検証します
+Ledger schemaはFact lifecycle fieldを含みます
+新しいCheckpointは正確なcurrent Ledger generationを参照します
 deterministic Checkpoint Strategyは新しいmodel向けCheckpointからsupersededとresolvedのConstraint Factを除外し、Ledger参照が完全なlifecycle snapshotをcommitします
 過去のCheckpointを再利用する場合も、Compilerは永続Checkpointを変更せず現在Ledgerに照らして一時的なmodel viewをfilterします
 Artifact entryは現在のfileやGit stateを表さず、これらの値はCurrent World Stateが所有します
@@ -122,9 +122,9 @@ check resultはstdoutやstderrではなくcommand identityと正確なstructured
 pathとargumentはuntrusted contentでありinstructionとして解釈しません
 state captureはvolatile suffixを変更するため、stableな先行Segmentを書き換えずPrefix Manifestとcache planningへ反映されます
 
-`ContextLedgerVersion`とsnapshot digest domainはv1からv2へ変更しました
-standaloneなv1 snapshotはderived dataであるためEvent Logから再構築し、`ValidateContextLedger`は渡されたstateを現在のv2 reductionと比較します
-互換対応はCurrent World State captureより前のEvent prefixを参照する永続Checkpoint内のv1 referenceに限定します
+`ContextLedgerVersion`とsnapshot digest domainはversion 1です
+Ledger snapshotはderived dataでありEvent Logから再構築できます
+`ValidateContextLedger`は渡されたstateをそのdeterministic reductionと比較します
 
 互換性のためRuntimeはcallerが渡したassistantまたはTool履歴を含む全`RunRequest.Input` entryを`user.message.added` Eventとしてemitします
 Reducerはすべてをsourceとして保持し、roleが`user`のMessageだけをConstraint entryにします
@@ -149,7 +149,7 @@ Constraint entryはuser本文を保持するためLedgerはprivateなcontent-bea
 - active Constraint、現在のGit change、保持済みfailed check、pending Tool、required Evidenceの本文なし保存件数を公開
 - 検証済みCheckpointの後ろへrecent raw message tailを配置
 
-新規Checkpointはschema version 2を使います
+新規Checkpointはschema version 1を使います
 ordered `Layers`はcompact済みprefix全体を一度だけcoverします
 Session Synopsisはcurrent Runの開始位置まで、Taskは同じRunのうち以前にcompactされたmessage、Episodeはprefix内で最新のtransaction safeな範囲です
 `recent_messages`はraw tail幅に加えてEpisode幅の目安にもなります
@@ -166,7 +166,7 @@ follow-upでは保存済みgenerationをpublishし直したり変更したりせ
 
 Coreはcustom `CheckpointStrategy`の返却後にlayer境界を導出して検証します
 Strategyはprotected transactionを分割したり別のsource partitionを偽装したりできません
-Version 1 CheckpointはSession replayと従来のflatなProvider viewで引き続き有効で、次にpublishするgenerationからversion 2へ更新します
+publishされるversion 1 Checkpointはすべて検証済みhierarchyを持ちます
 
 CompilerはSession messageを削除も書き換えもしません
 検証済みCheckpointのpublish時に`context.compacted`を発行し、`SessionSnapshot.Checkpoint`が最新generationを保持します

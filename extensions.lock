@@ -7,7 +7,7 @@
       "manifest": {
         "id": "qed.git",
         "version": "0.1.0",
-        "protocol_version": 2,
+        "protocol_version": 1,
         "capabilities": ["git.read"]
       }
     },
@@ -17,7 +17,7 @@
       "manifest": {
         "id": "qed.process",
         "version": "0.1.0",
-        "protocol_version": 2,
+        "protocol_version": 1,
         "capabilities": ["process.execute"]
       }
     },
@@ -27,7 +27,7 @@
       "manifest": {
         "id": "qed.workspace",
         "version": "0.1.0",
-        "protocol_version": 2,
+        "protocol_version": 1,
         "capabilities": ["filesystem.read", "filesystem.write"]
       }
     }

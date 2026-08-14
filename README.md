@@ -249,7 +249,7 @@ not excluded by standard Git ignore rules within the same bounded patch.
 
 The checked-in `extensions.lock` selects the reusable `qed.workspace`,
 `qed.process`, and `qed.git` Extensions for this binary. Each runs across
-Extension Protocol v2, including the single-binary self-exec mode
+Extension Protocol v1, including the single-binary self-exec mode
 
 ```json
 {
