@@ -530,6 +530,42 @@ func TestIdleChatStartsFirstRunOnSubmit(t *testing.T) {
 	}
 }
 
+func TestComposerRendersDraftBeforeSubmit(t *testing.T) {
+	t.Parallel()
+
+	view := newIdleChatView(
+		context.Background(),
+		func(context.Context, agent.RunRequest) (*agent.RunHandle, error) {
+			t.Fatal("Composer draft unexpectedly started a Run")
+			return nil, nil
+		},
+		agent.RunRequest{AgentID: "echo"},
+	)
+	harness, err := tuitest.New(view, tui.Size{Width: 100, Height: 30}, mapEvent)
+	if err != nil {
+		t.Fatalf("tuitest.New: %v", err)
+	}
+	defer harness.Close()
+
+	if _, err := harness.RequestFocus(composerInputID); err != nil {
+		t.Fatalf("focus composer: %v", err)
+	}
+	if rendered := surfaceText(harness.LatestSurface()); !strings.Contains(rendered, "Send a message") {
+		t.Fatalf("rendered surface does not contain Composer placeholder:\n%s", rendered)
+	}
+	const draft = "ascii 日本語"
+	if err := harness.Input([]byte(draft)); err != nil {
+		t.Fatalf("type Composer draft: %v", err)
+	}
+	if view.draftText() != draft {
+		t.Fatalf("Composer draft = %q, want %q", view.draftText(), draft)
+	}
+	rendered := surfaceText(harness.LatestSurface())
+	if !strings.Contains(rendered, draft) {
+		t.Fatalf("rendered surface does not contain Composer draft %q:\n%s", draft, rendered)
+	}
+}
+
 func TestIdleChatRejectsSessionWithPendingInput(t *testing.T) {
 	t.Parallel()
 

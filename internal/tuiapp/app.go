@@ -610,7 +610,14 @@ func (view *runView) View(context tui.ViewContext) tui.Node[message] {
 	}
 	if view.composerVisible() {
 		composer := view.composerWidget(context)
-		content = append(content, tui.Panel(composer.Node(), "Message").WithLength(tui.Fixed(composer.VisibleRows()+2)))
+		panelOptions := tui.DefaultPanelOptions()
+		panelOptions.Padding.Top = 0
+		panelOptions.Padding.Bottom = 0
+		content = append(content, tui.PanelWithOptions(
+			composer.Node(),
+			"Message",
+			panelOptions,
+		).WithLength(tui.Fixed(composer.VisibleRows()+2)))
 	}
 	if view.inputNotice != "" {
 		content = append(content, tui.Text[message](view.inputNotice).WithLength(tui.Fixed(1)))
