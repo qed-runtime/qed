@@ -255,7 +255,13 @@ generator. Nagi remains inside the QED CLI
 frontend packages and no Nagi type crosses into Runtime, Provider, Extension,
 or Host APIs. The TUI chat controller maps composer submissions to active-Run
 steering or terminal follow-up Runs, keeps approval resume and Run cancellation
-separate, and stores Evidence per Run rather than merging Run Event sequences
+separate, and stores Evidence per Run rather than merging Run Event sequences.
+Its variable-height feed and application-owned Composer retain bounded state.
+Content-free Context and cache projections are derived from Events, while exact
+Evidence retrieval stays behind Runtime Tools and their scoped authorization.
+Standard Session Stores expose a bounded `session.Catalog`; the TUI loads one
+historical snapshot into a read-only projection without replacing the current
+Run controller
 
 ## Run and Event ordering
 

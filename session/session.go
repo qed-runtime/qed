@@ -373,7 +373,10 @@ func clonePrefixManifest(manifest agent.PrefixManifest) agent.PrefixManifest {
 }
 
 func (store *JSONLStore) acquireFileLock(ctx context.Context, id string) (func(), error) {
-	path := store.lockPath(id)
+	return acquireSessionLock(ctx, store.lockPath(id))
+}
+
+func acquireSessionLock(ctx context.Context, path string) (func(), error) {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {

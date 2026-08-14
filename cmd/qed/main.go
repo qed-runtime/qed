@@ -94,7 +94,7 @@ type chatAuthService interface {
 type commandDependencies struct {
 	newRuntime         func(runtimeConfig) (*agent.Runtime, error)
 	loadAgentConfig    func(string, agentconfig.LoadOptions) (*agentconfig.Configuration, error)
-	runTUI             func(context.Context, tuiapp.StartFunc, agent.RunRequest, string) (tuiapp.Outcome, error)
+	runTUI             func(context.Context, tuiapp.StartFunc, agent.RunRequest, string, tuiapp.ChatOptions) (tuiapp.Outcome, error)
 	newChatAuthService func() (chatAuthService, error)
 	openURL            func(context.Context, string) error
 }
@@ -261,7 +261,7 @@ func defaultCommandDependencies() commandDependencies {
 			})
 		},
 		loadAgentConfig: agentconfig.Load,
-		runTUI:          tuiapp.RunWithStarterOutcome,
+		runTUI:          tuiapp.RunWithStarterOptions,
 		newChatAuthService: func() (chatAuthService, error) {
 			return chatauth.NewDefault()
 		},
@@ -1187,6 +1187,7 @@ func runTUICommand(dependencies commandDependencies) *cli.Command {
 						Input:     []agent.Message{{Role: agent.RoleUser, Text: prompt}},
 					},
 					prompt,
+					tuiapp.ChatOptions{SessionStore: configured.SessionStore},
 				)
 				if configured.EvidenceStore != nil {
 					runs := outcome.Runs
@@ -1238,6 +1239,7 @@ func runTUICommand(dependencies commandDependencies) *cli.Command {
 					Input:        []agent.Message{{Role: agent.RoleUser, Text: prompt}},
 				},
 				prompt,
+				tuiapp.ChatOptions{},
 			); err != nil {
 				if errors.Is(err, context.Canceled) {
 					return cli.Outcome{}, cli.NewDiagnostic(cli.CodeCancelled, "TUI canceled")

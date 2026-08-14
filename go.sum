@@ -1,6 +1,6 @@
-github.com/mayahiro/nagi-go v0.1.2 h1:AmqT6xOUJ9ApUzw/ozkE2vhsOStTf2eBwoEUlR23gZc=
-github.com/mayahiro/nagi-go v0.1.2/go.mod h1:W0QrFh6zOw8nMrddac9SRpr3W1+HXA44GZm+mtnslpM=
-github.com/mayahiro/nagicli-go v0.3.2 h1:vK0uUedrNpIPOm1PRAjwbyYCwTV4S2nJZWpzmDJx5ew=
-github.com/mayahiro/nagicli-go v0.3.2/go.mod h1:Ze7EUbJbQquNSGL4Pmkan2Pil5t9y3beH4TwDg65Aqk=
-github.com/mayahiro/nagitui-go v0.1.4 h1:tG03tbu2TcbEZC8oWS2l8T5+aLiF9NZ3sTz/rnT5a68=
-github.com/mayahiro/nagitui-go v0.1.4/go.mod h1:m23EPcK1Ii5QGhbOLbsVE9QHLgvif+5sWQy5gFxs57E=
+github.com/mayahiro/nagi-go v0.4.0 h1:S5NIPvIWy1qlGyTTaX6VMllH2pc0jAcku6YJeEu/z+M=
+github.com/mayahiro/nagi-go v0.4.0/go.mod h1:W0QrFh6zOw8nMrddac9SRpr3W1+HXA44GZm+mtnslpM=
+github.com/mayahiro/nagicli-go v0.4.0 h1:XcXbCVTy565CwfTfPDC2ZzzgKamevma3zp1MUAwfXCM=
+github.com/mayahiro/nagicli-go v0.4.0/go.mod h1:H4n90aOACr5kf8CIDG7M1UKJvItXYlWHGMSDU/kEYFc=
+github.com/mayahiro/nagitui-go v0.4.0 h1:whTOBdXvE26RHsvV9q6AYIOtDo6XrDWYKM4/nKwhxzk=
+github.com/mayahiro/nagitui-go v0.4.0/go.mod h1:pBeTWKzhBc7yI+reQ8TwSpF2CaUEft1zgtH/R6UtV8A=

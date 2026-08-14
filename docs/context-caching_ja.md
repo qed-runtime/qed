@@ -265,6 +265,11 @@ validation時のStore readは数えません
 
 embedding hostは`agent.BuildContextReport`で同じJSON互換構造を構築し、`ContextReport.Snapshot`で選択し、`agent.DiffContextSnapshots`で比較できます
 
+TUIは同じordered Eventからより小さいlive projectionを構築します
+常時表示する行にはcompaction件数、effective generation、predictive input上限、最新Cache Plan modeとbreakpoint件数、報告済みinput usageを表示します
+F2ではbyteとmessage件数、externalized object合計、cache TTLとUsage detail、正規化済みfallback labelを確認できます
+Evidence digestとobject contentは保持せず、正確なretrievalはscope付き`context_search`または`context_fetch` ToolをAgentへ依頼します
+
 `max_input_bytes`はProvider-neutralなcanonical byte上限であり、tokenizerやmodelの公開context windowではありません
 選択modelに対して安全側に調整してください
 Predictive Budgetは任意であり、この独立したhard byte境界を置き換えません

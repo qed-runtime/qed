@@ -10,19 +10,28 @@ import (
 
 	"github.com/mayahiro/nagi-go/vt"
 	tui "github.com/mayahiro/nagitui-go"
+	"github.com/mayahiro/nagitui-go/widget"
 
 	"github.com/qed-runtime/qed/agent"
+	"github.com/qed-runtime/qed/session"
 )
 
 const (
 	eventBridgeCapacity      = 256
 	maximumEventHistory      = 256
-	maximumTranscriptHistory = 256
+	maximumTranscriptHistory = 2048
+	maximumComposerHistory   = 128
+	maximumComposerBytes     = 64 << 10
+	maximumRecentSessions    = 64
 )
 
 var (
-	chatViewportID  = tui.NewNodeID("chat-history")
-	composerInputID = tui.NewNodeID("chat-composer")
+	chatViewportID        = tui.NewNodeID("chat-history")
+	sessionViewportID     = tui.NewNodeID("session-history")
+	composerInputID       = tui.NewNodeID("chat-composer")
+	composerViewportID    = tui.NewNodeID("chat-composer-viewport")
+	composerCaretID       = tui.NewNodeID("chat-composer-caret")
+	sessionHistoryTaskKey = tui.NewTaskKey("qed-session-history")
 )
 
 type messageKind uint8
@@ -34,17 +43,36 @@ const (
 	cancelMessage
 	approveMessage
 	denyMessage
-	draftChangedMessage
+	composerChangedMessage
 	submitMessage
+	feedScrolledMessage
+	toggleContextMessage
+	browseOlderSessionMessage
+	browseNewerSessionMessage
+	returnCurrentSessionMessage
+	sessionHistoryLoadedMessage
+	runtimeFailureMessage
 )
 
 type message struct {
-	kind      messageKind
-	update    presentationUpdate
-	result    agent.RunResult
-	err       error
-	draft     string
-	runNumber uint64
+	kind              messageKind
+	update            presentationUpdate
+	result            agent.RunResult
+	err               error
+	composer          widget.ComposerState
+	scroll            tui.ScrollState
+	historicalScroll  bool
+	runNumber         uint64
+	sessionDescriptor session.SessionDescriptor
+	sessionSnapshot   agent.SessionSnapshot
+	historyRequest    uint64
+}
+
+// ChatOptions supplies optional stores used by long-running TUI navigation
+type ChatOptions struct {
+	// SessionStore enables bounded recent-Session navigation when it also
+	// implements [session.Catalog]. It must be the same Store used by start.
+	SessionStore agent.SessionStore
 }
 
 // RunOutcome contains one complete Run result and its ordered Events
@@ -88,7 +116,9 @@ type runView struct {
 	cancelRun       func()
 	steerRun        func(agent.Message) error
 	resolveWait     func(string, bool) error
-	draft           string
+	composer        widget.ComposerState
+	composerHistory widget.ComposerHistory
+	nextHistoryID   uint64
 	inputNotice     string
 	runErr          error
 	finished        bool
@@ -97,6 +127,14 @@ type runView struct {
 	composerEnabled bool
 	streamDone      chan struct{}
 	streamClosed    *sync.Once
+	options         ChatOptions
+	feedAtEnd       bool
+	feedUnread      bool
+	showContext     bool
+	historyLoading  bool
+	historyRequest  uint64
+	historyView     *runPresentation
+	historySession  session.SessionDescriptor
 }
 
 // StartFunc starts one Run for the TUI without coupling it to a concrete Harness
@@ -135,6 +173,17 @@ func RunWithStarter(ctx context.Context, start StartFunc, request agent.RunReque
 // Session Store. Without a SessionID, the TUI carries the previous Run messages
 // into the next in-memory Run request.
 func RunWithStarterOutcome(ctx context.Context, start StartFunc, request agent.RunRequest, prompt string) (Outcome, error) {
+	return RunWithStarterOptions(ctx, start, request, prompt, ChatOptions{})
+}
+
+// RunWithStarterOptions displays a multi-turn chat with optional history navigation
+func RunWithStarterOptions(
+	ctx context.Context,
+	start StartFunc,
+	request agent.RunRequest,
+	prompt string,
+	options ChatOptions,
+) (Outcome, error) {
 	if ctx == nil {
 		return Outcome{}, errors.New("TUI context must not be nil")
 	}
@@ -144,6 +193,15 @@ func RunWithStarterOutcome(ctx context.Context, start StartFunc, request agent.R
 	if strings.TrimSpace(prompt) == "" {
 		return Outcome{}, errors.New("TUI prompt must not be empty")
 	}
+	var priorSession *agent.SessionSnapshot
+	if options.SessionStore != nil && request.SessionID != "" {
+		snapshot, snapshotErr := options.SessionStore.Snapshot(ctx, request.SessionID)
+		if snapshotErr == nil {
+			priorSession = &snapshot
+		} else if !errors.Is(snapshotErr, agent.ErrSessionNotFound) {
+			return Outcome{}, fmt.Errorf("load TUI Session history: %w", snapshotErr)
+		}
+	}
 	handle, err := start(ctx, request)
 	if err != nil {
 		return Outcome{}, fmt.Errorf("start run: %w", err)
@@ -151,11 +209,16 @@ func RunWithStarterOutcome(ctx context.Context, start StartFunc, request agent.R
 
 	bridge := newEventBridgeForRun(handle, 1, 0)
 	view := newChatView(ctx, start, request, prompt, handle, bridge)
-	terminalErr := tui.RunTerminalContext(
+	view.options = options
+	if priorSession != nil {
+		view.seedCurrentSession(*priorSession, request, prompt)
+	}
+	terminalErr := tui.RunTerminalContextWithNoticeMapper(
 		ctx,
 		view,
 		tui.DefaultTerminalOptions(),
 		mapEvent,
+		mapRuntimeNotice,
 	)
 	view.closeRuns()
 	outcome := view.Outcome()
@@ -289,7 +352,11 @@ func newChatView(
 		baseRequest:     request,
 		persistent:      request.SessionID != "",
 		composerEnabled: true,
+		composer:        widget.NewComposerStateAtEnd(""),
+		feedAtEnd:       true,
+		nextHistoryID:   1,
 	}
+	view.recordComposerHistory(prompt)
 	view.presentation.queueUserMessage(prompt)
 	view.attachRun(handle, bridge)
 	return view
@@ -302,16 +369,21 @@ func newRunView(
 	cancelRun func(),
 	resolveWait func(string, bool) error,
 ) *runView {
-	return &runView{
-		presentation: newRunPresentation(prompt, identity),
-		ctx:          context.Background(),
-		messages:     messages,
-		cancelRun:    cancelRun,
-		resolveWait:  resolveWait,
-		runNumber:    1,
-		streamDone:   make(chan struct{}),
-		streamClosed: &sync.Once{},
+	view := &runView{
+		presentation:  newRunPresentation(prompt, identity),
+		ctx:           context.Background(),
+		messages:      messages,
+		cancelRun:     cancelRun,
+		resolveWait:   resolveWait,
+		runNumber:     1,
+		streamDone:    make(chan struct{}),
+		streamClosed:  &sync.Once{},
+		composer:      widget.NewComposerStateAtEnd(""),
+		feedAtEnd:     true,
+		nextHistoryID: 1,
 	}
+	view.recordComposerHistory(prompt)
+	return view
 }
 
 func (view *runView) attachRun(handle *agent.RunHandle, bridge *eventBridge) {
@@ -352,10 +424,20 @@ func (view *runView) Update(value message) tui.Effect[message] {
 	switch value.kind {
 	case runEventMessage:
 		view.presentation.apply(value.update)
+		view.markFeedUpdated()
+		if (view.historyView != nil || view.historyLoading) &&
+			(value.update.approval != nil || value.update.waitingUnsupported) {
+			view.historyRequest++
+			view.historyView = nil
+			view.historySession = session.SessionDescriptor{}
+			view.historyLoading = false
+			view.inputNotice = "Current Run requires input"
+			return tui.CancelEffect[message](sessionHistoryTaskKey)
+		}
 	case runResultMessage:
 		view.presentation.apply(value.update)
 		view.presentation.reconcileMessages(value.result.Messages)
-		view.trimTranscript()
+		view.markFeedUpdated()
 		view.currentResult = value.result
 		view.finished = true
 		if view.cancelRequested && value.result.Status == agent.RunStatusCanceled {
@@ -372,6 +454,10 @@ func (view *runView) Update(value message) tui.Effect[message] {
 		}
 		return tui.ExitEffect[message]()
 	case cancelMessage:
+		if view.historyView != nil || view.historyLoading {
+			view.inputNotice = "Press F7 to return before canceling the current Run"
+			return tui.NoneEffect[message]()
+		}
 		if !view.finished && view.cancelRun != nil {
 			view.cancelRequested = true
 			view.presentation.status = "canceling"
@@ -382,11 +468,65 @@ func (view *runView) Update(value message) tui.Effect[message] {
 		return view.resolveApproval(true)
 	case denyMessage:
 		return view.resolveApproval(false)
-	case draftChangedMessage:
-		view.draft = value.draft
+	case composerChangedMessage:
+		view.composer = value.composer
 		view.inputNotice = ""
 	case submitMessage:
 		return view.submitDraft()
+	case feedScrolledMessage:
+		if !value.historicalScroll {
+			view.feedAtEnd = value.scroll.AtEnd
+			if value.scroll.AtEnd {
+				view.feedUnread = false
+			}
+		}
+	case toggleContextMessage:
+		view.showContext = !view.showContext
+	case browseOlderSessionMessage:
+		return view.browseSession(1)
+	case browseNewerSessionMessage:
+		return view.browseSession(-1)
+	case returnCurrentSessionMessage:
+		view.historyRequest++
+		view.historyView = nil
+		view.historySession = session.SessionDescriptor{}
+		view.historyLoading = false
+		view.inputNotice = "Returned to current Session"
+		return tui.BatchEffects(
+			tui.CancelEffect[message](sessionHistoryTaskKey),
+			view.focusComposer(),
+		)
+	case sessionHistoryLoadedMessage:
+		if value.historyRequest != view.historyRequest {
+			return tui.NoneEffect[message]()
+		}
+		view.historyLoading = false
+		if value.err != nil {
+			view.inputNotice = sessionHistoryNotice(value.err)
+			return tui.NoneEffect[message]()
+		}
+		presentation := presentationFromSnapshot(value.sessionSnapshot)
+		view.historyView = &presentation
+		view.historySession = value.sessionDescriptor
+		view.inputNotice = "Viewing previous Session; F7 returns to the current chat"
+	case runtimeFailureMessage:
+		if errors.Is(value.err, errRunEventStream) {
+			view.runErr = value.err
+			view.presentation.status = "TUI event stream failed"
+			view.inputNotice = "Run Event stream failed"
+			view.exiting = true
+			if !view.finished && view.cancelRun != nil {
+				view.cancelRun()
+			}
+			return tui.ExitEffect[message]()
+		}
+		if errors.Is(value.err, errSessionHistoryTask) {
+			view.historyRequest++
+			view.historyLoading = false
+			view.inputNotice = "Session history is unavailable"
+			return tui.NoneEffect[message]()
+		}
+		view.inputNotice = "TUI background work failed"
 	}
 	return tui.NoneEffect[message]()
 }
@@ -420,19 +560,27 @@ func (view *runView) Subscriptions() tui.Subscription[message] {
 	)
 }
 
-func (view *runView) View(_ tui.ViewContext) tui.Node[message] {
+func (view *runView) View(context tui.ViewContext) tui.Node[message] {
+	presentation := view.displayPresentation()
 	content := []tui.Node[message]{
 		tui.StyledText[message]("QED Runtime", vt.Style{Bold: true}).WithLength(tui.Fixed(1)),
-		tui.Text[message](view.identityText()).WithLength(tui.Fixed(1)),
-		tui.Text[message]("Status: " + view.presentation.status).WithLength(tui.Fixed(1)),
-		view.chatHistoryNode().WithLength(tui.Flex(1)),
+		tui.Text[message](view.identityText(presentation)).WithLength(tui.Fixed(1)),
+		tui.Text[message]("Status: " + view.statusText(presentation)).WithLength(tui.Fixed(1)),
+		tui.Text[message](observabilitySummary(presentation)).WithLength(tui.Fixed(1)),
 	}
+	if view.showContext {
+		for _, detail := range contextDetails(presentation) {
+			content = append(content, tui.Text[message](detail).WithLength(tui.Fixed(1)))
+		}
+	}
+	content = append(content, view.chatHistoryNode(presentation).WithLength(tui.Flex(1)))
 
-	if approval := view.approvalText(); approval != "" {
+	if approval := view.approvalText(); approval != "" && view.historyView == nil && !view.historyLoading {
 		content = append(content, tui.Text[message](approval).WithLength(tui.Fixed(1)))
 	}
-	if view.composerEnabled && view.presentation.pendingApproval == nil && !view.presentation.waitingUnsupported {
-		content = append(content, view.composerNode().WithLength(tui.Fixed(3)))
+	if view.composerVisible() {
+		composer := view.composerWidget(context)
+		content = append(content, tui.Panel(composer.Node(), "Message").WithLength(tui.Fixed(composer.VisibleRows()+2)))
 	}
 	if view.inputNotice != "" {
 		content = append(content, tui.Text[message](view.inputNotice).WithLength(tui.Fixed(1)))
@@ -442,67 +590,63 @@ func (view *runView) View(_ tui.ViewContext) tui.Node[message] {
 	return tui.Panel(tui.Column(content...), "Agent Chat")
 }
 
-func (view *runView) chatHistoryNode() tui.Node[message] {
-	nodes := make([]tui.Node[message], 0, len(view.presentation.transcript)+len(view.presentation.activities)+2)
-	if len(view.presentation.transcript) == 0 {
-		nodes = append(nodes, tui.Text[message]("Waiting for messages..."))
-	} else {
-		for _, entry := range view.presentation.transcript {
-			role := "Assistant"
-			style := vt.Style{}
-			if entry.role == agent.RoleUser {
-				role = "You"
-				style.Bold = true
-			}
-			state := ""
-			if entry.state == transcriptStateQueued || entry.state == transcriptStateCanceled {
-				state = " [" + string(entry.state) + "]"
-			}
-			nodes = append(nodes, tui.Paragraph[message]([]tui.TextSpan{
-				tui.NewTextSpan(role+": ", style),
-				tui.NewTextSpan(entry.text+state, vt.Style{}),
-			}, tui.DefaultParagraphOptions()))
-		}
+func (view *runView) chatHistoryNode(presentation *runPresentation) tui.Node[message] {
+	entries, items := buildFeedEntries(presentation)
+	order, err := tui.NewVirtualFlowItems(items)
+	if err != nil {
+		return tui.Text[message]("Chat history is unavailable")
 	}
-	nodes = append(nodes, tui.StyledText[message]("Activity", vt.Style{Bold: true}))
-	if len(view.presentation.activities) == 0 {
-		nodes = append(nodes, tui.Text[message]("Waiting for Run activity..."))
-	} else {
-		for _, activity := range view.presentation.activities {
-			label := activity.label
-			if activity.state != "" {
-				label += " [" + string(activity.state) + "]"
-			}
-			nodes = append(nodes, tui.Text[message](fmt.Sprintf("%03d  %s", activity.sequence, label)))
-		}
-	}
-	return tui.ScrollViewportWithOptions(
-		chatViewportID,
-		tui.Column(nodes...),
-		tui.ScrollViewportOptions[message]{Axis: tui.ScrollAxisVertical, StickToEnd: true},
-	)
-}
-
-func (view *runView) composerNode() tui.Node[message] {
-	input := tui.StyledTextInput(
-		composerInputID,
-		view.draft,
-		"Send a message",
-		vt.Style{},
-		vt.Style{Dim: true},
-		func(value string) message {
-			return message{kind: draftChangedMessage, draft: value}
+	source := tui.NewVirtualFlowSource(order, func(context tui.VirtualFlowItemContext) tui.Node[message] {
+		return entries[context.Index].node()
+	}).Update(virtualFlowUpdate(presentation)).EstimatedHeight(
+		func(context tui.VirtualFlowItemContext) uint32 {
+			return entries[context.Index].estimatedHeight(context.Width)
 		},
 	)
-	return tui.Panel(input, "Message")
+	feedID := chatViewportID
+	if view.historyView != nil {
+		feedID = sessionViewportID
+	}
+	historical := view.historyView != nil
+	feed := widget.NewVirtualFeed(feedID, source).
+		Overscan(8).
+		FollowEnd(true).
+		OnScroll(func(state tui.ScrollState) message {
+			return message{kind: feedScrolledMessage, scroll: state, historicalScroll: historical}
+		}).
+		Empty(tui.Text[message]("Waiting for messages..."))
+	if view.feedUnread && view.historyView == nil {
+		feed = feed.UnreadIndicator(tui.StyledText[message](" New activity below ", vt.Style{Reverse: true}))
+	}
+	return feed.Node()
 }
 
-func (view *runView) identityText() string {
+func (view *runView) composerWidget(context tui.ViewContext) widget.Composer[message] {
+	wrapWidth := max(int(context.Size.Width)-6, 1)
+	return widget.NewComposer(
+		composerInputID,
+		composerViewportID,
+		composerCaretID,
+		view.composer,
+		func(state widget.ComposerState) message {
+			return message{kind: composerChangedMessage, composer: state}
+		},
+		func() message { return message{kind: submitMessage} },
+	).
+		Placeholder("Send a message").
+		WidthProfile(context.WidthProfile).
+		SoftWrap(wrapWidth).
+		Rows(1, 6).
+		MaximumUTF8Bytes(maximumComposerBytes, widget.ComposerOverflowReject).
+		History(view.composerHistory)
+}
+
+func (view *runView) identityText(presentation *runPresentation) string {
 	return fmt.Sprintf(
 		"Agent: %s  Session: %s  Run: %s",
-		displayIdentity(view.presentation.identity.agentID),
-		displayIdentity(view.presentation.identity.sessionID),
-		displayIdentity(view.presentation.identity.runID),
+		displayIdentity(presentation.identity.agentID),
+		displayIdentity(presentation.identity.sessionID),
+		displayIdentity(presentation.identity.runID),
 	)
 }
 
@@ -519,19 +663,21 @@ func (view *runView) approvalText() string {
 
 func (view *runView) helpText() string {
 	switch {
+	case view.historyView != nil || view.historyLoading:
+		return "F6 older  Shift-F6 newer  F7 current  F2 context  Esc quit"
 	case view.presentation.pendingApproval != nil:
-		return "Approval required  Y approve  N deny  Ctrl-C cancel  Esc quit"
+		return "Approval required  Y approve  N deny  Ctrl-C cancel  F2 context  Esc quit"
 	case view.presentation.waitingUnsupported:
-		return "Input cannot be handled here  Ctrl-C cancel  Esc quit"
+		return "Input cannot be handled here  Ctrl-C cancel  F2 context  Esc quit"
 	case !view.composerEnabled:
 		if view.finished {
-			return "Run finished  Q/Esc quit"
+			return "Run finished  F2 context  Q/Esc quit"
 		}
 		return "Q/Esc quit  Ctrl-C cancel"
 	case view.finished:
-		return "Enter follow-up  Esc quit"
+		return "Enter follow-up  F2 context  F6 Sessions  Esc quit"
 	default:
-		return "Enter steer  Ctrl-C cancel  Esc quit"
+		return "Enter steer  Ctrl-C cancel  F2 context  F6 Sessions  Esc quit"
 	}
 }
 
@@ -543,11 +689,15 @@ func displayIdentity(value string) string {
 }
 
 func (view *runView) submitDraft() tui.Effect[message] {
+	if view.historyView != nil || view.historyLoading {
+		view.inputNotice = "Press F7 to return to the current chat before sending a message"
+		return tui.NoneEffect[message]()
+	}
 	if !view.composerEnabled || view.presentation.pendingApproval != nil || view.presentation.waitingUnsupported {
 		view.inputNotice = "Resolve the pending input before sending a message"
 		return tui.NoneEffect[message]()
 	}
-	if strings.TrimSpace(view.draft) == "" {
+	if strings.TrimSpace(view.draftText()) == "" {
 		view.inputNotice = "Message must not be empty"
 		return view.focusComposer()
 	}
@@ -558,14 +708,14 @@ func (view *runView) submitDraft() tui.Effect[message] {
 		view.inputNotice = "Steering is unavailable"
 		return view.focusComposer()
 	}
-	text := view.draft
+	text := view.draftText()
 	if err := view.steerRun(agent.Message{Role: agent.RoleUser, Text: text}); err != nil {
 		view.inputNotice = steeringNotice(err)
 		return view.focusComposer()
 	}
 	view.presentation.queueUserMessage(text)
-	view.trimTranscript()
-	view.draft = ""
+	view.recordComposerHistory(text)
+	view.clearComposer()
 	view.inputNotice = "Steering queued"
 	return view.focusComposer()
 }
@@ -575,7 +725,7 @@ func (view *runView) startFollowUp() tui.Effect[message] {
 		view.inputNotice = "Follow-up is unavailable"
 		return view.focusComposer()
 	}
-	text := view.draft
+	text := view.draftText()
 	request := view.baseRequest
 	request.Resume = nil
 	skipInputMessages := 0
@@ -593,8 +743,8 @@ func (view *runView) startFollowUp() tui.Effect[message] {
 		return view.focusComposer()
 	}
 	view.presentation.queueUserMessage(text)
-	view.trimTranscript()
-	view.draft = ""
+	view.recordComposerHistory(text)
+	view.clearComposer()
 	view.inputNotice = ""
 	bridge := newEventBridgeForRun(handle, view.runNumber+1, skipInputMessages)
 	view.attachRun(handle, bridge)
@@ -619,25 +769,10 @@ func (view *runView) resolveApproval(approved bool) tui.Effect[message] {
 }
 
 func (view *runView) focusComposer() tui.Effect[message] {
-	if !view.composerEnabled || view.presentation.pendingApproval != nil || view.presentation.waitingUnsupported {
+	if !view.composerVisible() {
 		return tui.NoneEffect[message]()
 	}
 	return tui.FocusEffect[message](composerInputID)
-}
-
-func (view *runView) trimTranscript() {
-	if len(view.presentation.transcript) <= maximumTranscriptHistory {
-		return
-	}
-	extra := len(view.presentation.transcript) - maximumTranscriptHistory
-	copy(view.presentation.transcript, view.presentation.transcript[extra:])
-	view.presentation.transcript = view.presentation.transcript[:maximumTranscriptHistory]
-	if view.presentation.streamingEntry >= 0 {
-		view.presentation.streamingEntry -= extra
-		if view.presentation.streamingEntry < 0 {
-			view.presentation.streamingEntry = -1
-		}
-	}
 }
 
 func (view *runView) closeRuns() {
@@ -687,6 +822,14 @@ func mapEvent(event vt.Event) tui.EventAction[message] {
 	switch {
 	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyEscape:
 		return tui.MessageAction(message{kind: quitMessage})
+	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyFunction && event.Key.Function == 2:
+		return tui.MessageAction(message{kind: toggleContextMessage})
+	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyFunction && event.Key.Function == 6 && event.Key.Modifiers.Shift:
+		return tui.MessageAction(message{kind: browseNewerSessionMessage})
+	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyFunction && event.Key.Function == 6:
+		return tui.MessageAction(message{kind: browseOlderSessionMessage})
+	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyFunction && event.Key.Function == 7:
+		return tui.MessageAction(message{kind: returnCurrentSessionMessage})
 	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyEnter:
 		return tui.MessageAction(message{kind: submitMessage})
 	case event.Kind == vt.EventKey &&

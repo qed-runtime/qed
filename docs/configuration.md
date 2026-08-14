@@ -650,6 +650,14 @@ not persist `agent.Budget`; reuse the same `*agent.Budget` explicitly when one
 budget must span follow-up Runs. Without a configured Session Store, Session ID
 does not retain messages and the caller must supply prior context
 
+The standard Memory and JSONL Stores also implement `session.Catalog`.
+`RecentSessions` returns a caller-bounded, newest-first list of content-free
+Session descriptors containing IDs, revisions, message counts, the latest Run
+identity and time, and pending-wait state. It accepts between one and 256
+entries, and returned descriptors never contain message text. The TUI requests
+at most 64 descriptors, loads only the selected snapshot into a bounded
+read-only projection, and keeps the current Run controller separate
+
 ## Evidence Store
 
 ```json

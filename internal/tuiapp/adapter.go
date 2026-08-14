@@ -1,9 +1,12 @@
 package tuiapp
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -36,6 +39,7 @@ type runIdentity struct {
 }
 
 type runActivity struct {
+	id       uint64
 	sequence uint64
 	key      string
 	label    string
@@ -44,6 +48,7 @@ type runActivity struct {
 
 type approvalPrompt struct {
 	requestID    string
+	activityKey  string
 	tool         string
 	capabilities []string
 }
@@ -63,6 +68,9 @@ type presentationUpdate struct {
 	clearWait          bool
 	waitingUnsupported bool
 	terminal           bool
+	context            *contextObservation
+	cache              *cacheObservation
+	usage              *agent.Usage
 }
 
 type runPresentation struct {
@@ -74,6 +82,64 @@ type runPresentation struct {
 	activities         []runActivity
 	pendingApproval    *approvalPrompt
 	waitingUnsupported bool
+	context            contextPresentation
+	cache              cachePresentation
+	nextEntryID        uint64
+	revision           uint64
+	feedKey            string
+	feedPrevious       uint64
+	feedChangedStart   int
+	feedChangedEnd     int
+	feedPartial        bool
+}
+
+type contextObservation struct {
+	hasCompaction     bool
+	hasPredictive     bool
+	compacted         bool
+	prepared          bool
+	applied           bool
+	reason            string
+	originalBytes     int64
+	compiledBytes     int64
+	sourceMessages    int
+	recentMessages    int
+	generation        uint64
+	generationKnown   bool
+	externalized      int
+	externalizedBytes int64
+	predictiveLevel   agent.PredictiveBudgetLevel
+	predictiveAction  agent.PredictiveBudgetAction
+	predictedInput    int64
+	maximumInput      int64
+}
+
+type contextPresentation struct {
+	compactions        int
+	preparedCandidates int
+	last               contextObservation
+	externalized       int
+	externalizedBytes  int64
+}
+
+type cacheObservation struct {
+	mode               agent.CacheMode
+	ttl                agent.CacheTTL
+	breakpoints        int
+	expectedReuse      int
+	inputTokenEstimate int64
+	tokenEstimateKind  string
+	fallbackReason     string
+}
+
+type cachePresentation struct {
+	available           bool
+	latest              cacheObservation
+	providerInputTokens int64
+	usageReported       bool
+	cacheReadTokens     int64
+	cacheWriteTokens    int64
+	detailsReported     bool
 }
 
 type transcriptState string
@@ -85,6 +151,7 @@ const (
 )
 
 type transcriptEntry struct {
+	id     uint64
 	role   agent.Role
 	text   string
 	state  transcriptState
@@ -92,6 +159,7 @@ type transcriptEntry struct {
 }
 
 func newRunPresentation(_ string, identity runIdentity) runPresentation {
+	feedKey := presentationKey("session", identity.sessionID)
 	identity.runID = diagnosticText(identity.runID)
 	identity.agentID = diagnosticText(identity.agentID)
 	identity.sessionID = diagnosticText(identity.sessionID)
@@ -99,10 +167,24 @@ func newRunPresentation(_ string, identity runIdentity) runPresentation {
 		identity:       identity,
 		status:         "starting",
 		streamingEntry: -1,
+		nextEntryID:    1,
+		feedKey:        feedKey,
 	}
 }
 
 func (presentation *runPresentation) apply(update presentationUpdate) {
+	streamingEntry := presentation.streamingEntry
+	partialDelta := update.answerDelta != "" && streamingEntry >= 0 &&
+		update.activity == nil && update.userMessage == nil && !update.assistantStarted &&
+		!update.assistantCompleted && update.answer == nil && update.approval == nil &&
+		!update.clearWait && !update.waitingUnsupported && !update.terminal &&
+		update.context == nil && update.cache == nil && update.usage == nil
+	presentation.invalidateFeed()
+	if partialDelta {
+		presentation.feedPartial = true
+		presentation.feedChangedStart = streamingEntry
+		presentation.feedChangedEnd = streamingEntry + 1
+	}
 	if update.identity.runID != "" {
 		presentation.identity.runID = update.identity.runID
 	}
@@ -154,14 +236,26 @@ func (presentation *runPresentation) apply(update presentationUpdate) {
 		presentation.pendingApproval = nil
 		presentation.waitingUnsupported = true
 	}
+	if update.context != nil {
+		presentation.applyContext(*update.context)
+	}
+	if update.cache != nil {
+		presentation.applyCache(*update.cache)
+	}
+	if update.usage != nil {
+		presentation.applyUsage(*update.usage)
+	}
 }
 
 func (presentation *runPresentation) queueUserMessage(text string) {
+	presentation.invalidateFeed()
 	presentation.transcript = append(presentation.transcript, transcriptEntry{
+		id:    presentation.allocateEntryID(),
 		role:  agent.RoleUser,
 		text:  text,
 		state: transcriptStateQueued,
 	})
+	presentation.trimTranscript()
 }
 
 func (presentation *runPresentation) applyUserMessage(text string, origin agent.UserMessageOrigin) {
@@ -175,11 +269,13 @@ func (presentation *runPresentation) applyUserMessage(text string, origin agent.
 		return
 	}
 	presentation.transcript = append(presentation.transcript, transcriptEntry{
+		id:     presentation.allocateEntryID(),
 		role:   agent.RoleUser,
 		text:   text,
 		state:  transcriptStateApplied,
 		origin: origin,
 	})
+	presentation.trimTranscript()
 }
 
 func (presentation *runPresentation) startAssistantMessage() {
@@ -187,10 +283,12 @@ func (presentation *runPresentation) startAssistantMessage() {
 		presentation.completeAssistantMessage()
 	}
 	presentation.transcript = append(presentation.transcript, transcriptEntry{
+		id:    presentation.allocateEntryID(),
 		role:  agent.RoleAssistant,
 		state: transcriptStateApplied,
 	})
 	presentation.streamingEntry = len(presentation.transcript) - 1
+	presentation.trimTranscript()
 }
 
 func (presentation *runPresentation) completeAssistantMessage() {
@@ -208,6 +306,7 @@ func (presentation *runPresentation) completeAssistantMessage() {
 }
 
 func (presentation *runPresentation) reconcileMessages(messages []agent.Message) {
+	presentation.invalidateFeed()
 	pending := make([]transcriptEntry, 0)
 	for _, entry := range presentation.transcript {
 		if entry.role == agent.RoleUser && entry.state == transcriptStateQueued {
@@ -215,15 +314,34 @@ func (presentation *runPresentation) reconcileMessages(messages []agent.Message)
 			pending = append(pending, entry)
 		}
 	}
-	transcript := make([]transcriptEntry, 0, len(messages)+len(pending))
-	for _, message := range messages {
+	visibleMessages := messages
+	if len(visibleMessages) > maximumTranscriptHistory {
+		visibleMessages = visibleMessages[len(visibleMessages)-maximumTranscriptHistory:]
+	}
+	transcript := make([]transcriptEntry, 0, min(len(visibleMessages)+len(pending), maximumTranscriptHistory))
+	searchFrom := 0
+	for _, message := range visibleMessages {
 		if message.Role != agent.RoleUser && message.Role != agent.RoleAssistant {
 			continue
 		}
 		if message.Role == agent.RoleAssistant && message.Text == "" {
 			continue
 		}
+		entryID := uint64(0)
+		for index := searchFrom; index < len(presentation.transcript); index++ {
+			entry := presentation.transcript[index]
+			if entry.role != message.Role || entry.text != message.Text || entry.state == transcriptStateQueued {
+				continue
+			}
+			entryID = entry.id
+			searchFrom = index + 1
+			break
+		}
+		if entryID == 0 {
+			entryID = presentation.allocateEntryID()
+		}
 		transcript = append(transcript, transcriptEntry{
+			id:    entryID,
 			role:  message.Role,
 			text:  message.Text,
 			state: transcriptStateApplied,
@@ -231,6 +349,7 @@ func (presentation *runPresentation) reconcileMessages(messages []agent.Message)
 	}
 	presentation.transcript = append(transcript, pending...)
 	presentation.streamingEntry = -1
+	presentation.trimTranscript()
 }
 
 func (presentation *runPresentation) resolveApproval(approved bool) (string, bool) {
@@ -238,7 +357,7 @@ func (presentation *runPresentation) resolveApproval(approved bool) (string, boo
 		return "", false
 	}
 	requestID := presentation.pendingApproval.requestID
-	key := approvalActivityKey(requestID)
+	key := presentation.pendingApproval.activityKey
 	for index := len(presentation.activities) - 1; index >= 0; index-- {
 		if presentation.activities[index].key != key {
 			continue
@@ -248,6 +367,10 @@ func (presentation *runPresentation) resolveApproval(approved bool) (string, boo
 		} else {
 			presentation.activities[index].state = activityStateDenied
 		}
+		presentation.invalidateFeed()
+		presentation.feedPartial = true
+		presentation.feedChangedStart = len(presentation.transcript) + 1 + index
+		presentation.feedChangedEnd = presentation.feedChangedStart + 1
 		break
 	}
 	presentation.pendingApproval = nil
@@ -261,10 +384,14 @@ func (presentation *runPresentation) applyActivity(activity runActivity) {
 			if presentation.activities[index].key != activity.key {
 				continue
 			}
+			activity.id = presentation.activities[index].id
 			presentation.activities[index].label = activity.label
 			presentation.activities[index].state = activity.state
 			return
 		}
+	}
+	if activity.id == 0 {
+		activity.id = presentation.allocateEntryID()
 	}
 	if len(presentation.activities) == maximumEventHistory {
 		copy(presentation.activities, presentation.activities[1:])
@@ -272,6 +399,94 @@ func (presentation *runPresentation) applyActivity(activity runActivity) {
 		return
 	}
 	presentation.activities = append(presentation.activities, activity)
+}
+
+func (presentation *runPresentation) allocateEntryID() uint64 {
+	id := presentation.nextEntryID
+	presentation.nextEntryID++
+	return id
+}
+
+func (presentation *runPresentation) invalidateFeed() {
+	presentation.feedPrevious = presentation.revision
+	presentation.revision++
+	presentation.feedChangedStart = 0
+	presentation.feedChangedEnd = 0
+	presentation.feedPartial = false
+}
+
+func (presentation *runPresentation) trimTranscript() {
+	if len(presentation.transcript) <= maximumTranscriptHistory {
+		return
+	}
+	extra := len(presentation.transcript) - maximumTranscriptHistory
+	copy(presentation.transcript, presentation.transcript[extra:])
+	presentation.transcript = presentation.transcript[:maximumTranscriptHistory]
+	if presentation.streamingEntry >= 0 {
+		presentation.streamingEntry -= extra
+		if presentation.streamingEntry < 0 {
+			presentation.streamingEntry = -1
+		}
+	}
+}
+
+func (presentation *runPresentation) applyContext(observation contextObservation) {
+	predictive := observation
+	if observation.compacted {
+		presentation.context.compactions = saturatingAddInt(presentation.context.compactions, 1)
+	}
+	if observation.prepared {
+		presentation.context.preparedCandidates = saturatingAddInt(presentation.context.preparedCandidates, 1)
+	}
+	presentation.context.externalized = saturatingAddInt(
+		presentation.context.externalized,
+		observation.externalized,
+	)
+	presentation.context.externalizedBytes = saturatingAddInt64(
+		presentation.context.externalizedBytes,
+		observation.externalizedBytes,
+	)
+	if observation.hasCompaction {
+		last := presentation.context.last
+		if !observation.generationKnown && last.generationKnown {
+			observation.generation = last.generation
+			observation.generationKnown = true
+		}
+		observation.hasPredictive = observation.hasPredictive || last.hasPredictive
+		observation.predictiveLevel = last.predictiveLevel
+		observation.predictiveAction = last.predictiveAction
+		observation.predictedInput = last.predictedInput
+		observation.maximumInput = last.maximumInput
+		presentation.context.last = observation
+	}
+	if predictive.hasPredictive {
+		presentation.context.last.hasPredictive = true
+		presentation.context.last.predictiveLevel = predictive.predictiveLevel
+		presentation.context.last.predictiveAction = predictive.predictiveAction
+		presentation.context.last.predictedInput = predictive.predictedInput
+		presentation.context.last.maximumInput = predictive.maximumInput
+	}
+}
+
+func (presentation *runPresentation) applyCache(observation cacheObservation) {
+	presentation.cache.available = true
+	presentation.cache.latest = observation
+	presentation.cache.providerInputTokens = 0
+	presentation.cache.usageReported = false
+	presentation.cache.cacheReadTokens = 0
+	presentation.cache.cacheWriteTokens = 0
+	presentation.cache.detailsReported = false
+}
+
+func (presentation *runPresentation) applyUsage(usage agent.Usage) {
+	if !presentation.cache.available {
+		return
+	}
+	presentation.cache.providerInputTokens = usage.InputTokens
+	presentation.cache.usageReported = true
+	presentation.cache.cacheReadTokens = usage.CacheReadInputTokens
+	presentation.cache.cacheWriteTokens = usage.CacheWriteInputTokens
+	presentation.cache.detailsReported = usage.InputTokenDetailsReported
 }
 
 func adaptRunEvent(event agent.Event) presentationUpdate {
@@ -298,9 +513,11 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 		activity(label, "")
 	case agent.EventContextCompacted:
 		update.status = "preparing context"
+		update.context = contextObservationFromEvent(event, true, false)
 		activity("Context compacted", "")
 	case agent.EventContextCompactionPrepared:
 		update.status = "preparing context"
+		update.context = contextObservationFromEvent(event, false, true)
 		activity("Context candidate prepared", "")
 	case agent.EventCurrentWorldStateCaptured:
 		update.status = "preparing context"
@@ -325,6 +542,14 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 		activity(label, activityStateWaiting)
 	case agent.EventModelRequest:
 		update.status = "thinking"
+		if event.CachePlan != nil {
+			observation := cacheObservationFromPlan(*event.CachePlan)
+			update.cache = &observation
+		}
+		if event.PredictiveBudget != nil {
+			observation := contextObservationFromBudget(*event.PredictiveBudget)
+			update.context = &observation
+		}
 		activity("Model request", "")
 	case agent.EventProviderRetry:
 		update.status = "waiting to retry"
@@ -350,6 +575,10 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 		if event.Message != nil {
 			answer := event.Message.Text
 			update.answer = &answer
+			if event.Message.Usage != nil {
+				usage := *event.Message.Usage
+				update.usage = &usage
+			}
 		}
 		update.assistantCompleted = true
 		activity("Assistant response", activityStateCompleted)
@@ -431,6 +660,132 @@ func adaptRunResult(result agent.RunResult, runErr error) presentationUpdate {
 	return update
 }
 
+func contextObservationFromEvent(
+	event agent.Event,
+	compacted bool,
+	prepared bool,
+) *contextObservation {
+	report := event.ContextCompaction
+	if report == nil {
+		return &contextObservation{hasCompaction: true, compacted: compacted, prepared: prepared}
+	}
+	var externalizedBytes int64
+	for _, object := range report.Externalized {
+		externalizedBytes = saturatingAddInt64(externalizedBytes, object.Bytes)
+	}
+	observation := &contextObservation{
+		hasCompaction:     true,
+		compacted:         compacted,
+		prepared:          prepared,
+		applied:           report.Applied,
+		reason:            contextReason(report.Reason),
+		originalBytes:     max(report.OriginalBytes, 0),
+		compiledBytes:     max(report.CompiledBytes, 0),
+		sourceMessages:    max(report.SourceMessageCount, 0),
+		recentMessages:    max(report.RecentMessageCount, 0),
+		externalized:      len(report.Externalized),
+		externalizedBytes: externalizedBytes,
+	}
+	if event.ContextCheckpoint != nil {
+		observation.generation = event.ContextCheckpoint.Generation
+		observation.generationKnown = true
+	} else if report.Validation != nil {
+		observation.generation = report.Validation.CandidateGeneration
+		observation.generationKnown = true
+	}
+	if event.PredictiveBudget != nil {
+		budget := contextObservationFromBudget(*event.PredictiveBudget)
+		observation.hasPredictive = true
+		observation.predictiveLevel = budget.predictiveLevel
+		observation.predictiveAction = budget.predictiveAction
+		observation.predictedInput = budget.predictedInput
+		observation.maximumInput = budget.maximumInput
+	}
+	return observation
+}
+
+func contextObservationFromBudget(plan agent.PredictiveBudgetPlan) contextObservation {
+	return contextObservation{
+		hasPredictive:    true,
+		predictiveLevel:  predictiveBudgetLevel(plan.Level),
+		predictiveAction: predictiveBudgetAction(plan.Action),
+		predictedInput:   max(plan.ProviderInputTokenEstimate, 0),
+		maximumInput:     max(plan.MaxInputTokens, 0),
+	}
+}
+
+func cacheObservationFromPlan(plan agent.CachePlan) cacheObservation {
+	return cacheObservation{
+		mode:               cacheMode(plan.Mode),
+		ttl:                cacheTTL(plan.TTL),
+		breakpoints:        len(plan.Breakpoints),
+		expectedReuse:      max(plan.ExpectedReuse, 0),
+		inputTokenEstimate: max(plan.InputTokenEstimate, 0),
+		tokenEstimateKind:  diagnosticText(plan.TokenEstimateKind),
+		fallbackReason:     cacheFallbackReason(plan.FallbackReason),
+	}
+}
+
+func predictiveBudgetLevel(value agent.PredictiveBudgetLevel) agent.PredictiveBudgetLevel {
+	switch value {
+	case agent.PredictiveBudgetWithin, agent.PredictiveBudgetSoft, agent.PredictiveBudgetHard:
+		return value
+	default:
+		return agent.PredictiveBudgetLevel(agent.ContextReportUnrecognizedLabel)
+	}
+}
+
+func predictiveBudgetAction(value agent.PredictiveBudgetAction) agent.PredictiveBudgetAction {
+	switch value {
+	case agent.PredictiveBudgetActionNone, agent.PredictiveBudgetActionPrepare, agent.PredictiveBudgetActionAdopt:
+		return value
+	default:
+		return agent.PredictiveBudgetAction(agent.ContextReportUnrecognizedLabel)
+	}
+}
+
+func cacheMode(value agent.CacheMode) agent.CacheMode {
+	switch value {
+	case agent.CacheModeDisabled, agent.CacheModeAdaptive, agent.CacheModeAutomatic, agent.CacheModeExplicit:
+		return value
+	default:
+		return agent.CacheMode(agent.ContextReportUnrecognizedLabel)
+	}
+}
+
+func cacheTTL(value agent.CacheTTL) agent.CacheTTL {
+	switch value {
+	case "", agent.CacheTTLFiveMinutes, agent.CacheTTLThirtyMinutes, agent.CacheTTLOneHour,
+		agent.CacheTTLTwentyFourHours:
+		return value
+	default:
+		return agent.CacheTTL(agent.ContextReportUnrecognizedLabel)
+	}
+}
+
+func contextReason(value string) string {
+	switch value {
+	case "checkpoint", "externalize_evidence", "input_limit", "raw_event_rebase",
+		"reuse_checkpoint", "validation_rollback", "predictive_budget_prepare",
+		"predictive_budget_adopt":
+		return value
+	default:
+		return agent.ContextReportUnrecognizedLabel
+	}
+}
+
+func cacheFallbackReason(value string) string {
+	switch value {
+	case "":
+		return ""
+	case "explicit_cache_unsupported", "automatic_cache_unsupported", "cache_ttl_fallback",
+		"no_eligible_cache_breakpoint", "explicit_cache_not_economical":
+		return value
+	default:
+		return agent.ContextReportUnrecognizedLabel
+	}
+}
+
 func adaptWaitEvent(event agent.Event, update *presentationUpdate) {
 	wait := event.WaitRequest
 	if wait == nil {
@@ -465,10 +820,11 @@ func adaptWaitEvent(event agent.Event, update *presentationUpdate) {
 		return
 	}
 	update.status = "waiting for approval"
+	approval.activityKey = approvalActivityKey(event.RunID, approval.requestID)
 	update.approval = &approval
 	update.activity = &runActivity{
 		sequence: event.Sequence,
-		key:      approvalActivityKey(approval.requestID),
+		key:      approval.activityKey,
 		label:    "Approval for Tool " + approval.tool,
 		state:    activityStateWaiting,
 	}
@@ -537,17 +893,54 @@ func toolName(event agent.Event) string {
 }
 
 func toolActivityKey(event agent.Event, tool string) string {
+	callID := ""
 	if event.ToolCall != nil && event.ToolCall.ID != "" {
-		return "tool:" + event.ToolCall.ID
+		callID = event.ToolCall.ID
 	}
-	if event.ToolResult != nil && event.ToolResult.CallID != "" {
-		return "tool:" + event.ToolResult.CallID
+	if callID == "" && event.ToolResult != nil && event.ToolResult.CallID != "" {
+		callID = event.ToolResult.CallID
 	}
-	return fmt.Sprintf("tool:%s:%d", tool, event.Sequence)
+	if callID == "" {
+		callID = fmt.Sprintf("%s:%d", tool, event.Sequence)
+	}
+	return presentationKey("tool", event.RunID, callID)
 }
 
-func approvalActivityKey(requestID string) string {
-	return "approval:" + requestID
+func approvalActivityKey(runID, requestID string) string {
+	return presentationKey("approval", runID, requestID)
+}
+
+func presentationKey(domain string, values ...string) string {
+	var input strings.Builder
+	input.WriteString(domain)
+	input.WriteByte(0)
+	for _, value := range values {
+		input.WriteString(strconv.Itoa(len(value)))
+		input.WriteByte(':')
+		input.WriteString(value)
+	}
+	digest := sha256.Sum256([]byte(input.String()))
+	return fmt.Sprintf("%s:%x", domain, digest)
+}
+
+func saturatingAddInt(total, value int) int {
+	if value <= 0 {
+		return total
+	}
+	if total > math.MaxInt-value {
+		return math.MaxInt
+	}
+	return total + value
+}
+
+func saturatingAddInt64(total, value int64) int64 {
+	if value <= 0 {
+		return total
+	}
+	if total > math.MaxInt64-value {
+		return math.MaxInt64
+	}
+	return total + value
 }
 
 func diagnosticText(value string) string {

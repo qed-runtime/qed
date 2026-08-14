@@ -357,6 +357,14 @@ Embedding hosts can build the same JSON-compatible structures with
 `agent.BuildContextReport`, select with `ContextReport.Snapshot`, and compare
 with `agent.DiffContextSnapshots`
 
+The TUI derives a smaller live projection from the same ordered Events. Its
+always-visible row reports compaction count, effective generation, predictive
+input allowance, latest Cache Plan mode and breakpoint count, and reported
+input usage. F2 reveals byte and message counts, externalized-object totals,
+cache TTL and Usage details, and normalized fallback labels. It never retains
+an Evidence digest or object content. Exact retrieval remains an Agent request
+to the scoped `context_search` or `context_fetch` Tool
+
 `max_input_bytes` is a provider-neutral canonical byte limit, not a tokenizer or
 the model's advertised context window. It is deliberately deterministic but
 must be calibrated conservatively for the selected model. Predictive Budgeting

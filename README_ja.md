@@ -341,6 +341,16 @@ Ctrl-Cは現在のRunだけをcancelしてchatを維持し、Escapeはactive Run
 TUIは最近のuserとassistant messageを保持し、assistant textをstream表示し、Agent、Session、Run、Tool、approval Capabilityの本文なしactivityを表示します
 Tool引数、Tool出力、raw wait payload、raw Run errorはrendering用の表示状態へ保持しません
 
+複数行ComposerはEnterで送信し、Shift-Enter、Alt-Enter、Ctrl-Oで改行します
+caretがeditor境界にある場合はUpとDownでboundedな送信履歴を呼び出します
+transcriptは可変高VirtualFeedを使い、userとassistant entryを最大2048件保持し、可視範囲とoverscanだけを構築します
+
+F2で本文を含まないContext、predictive budget、cache、scope付きEvidenceの利用可能状態を切り替えます
+TUIはEvidence本文を直接読み取らず、設定済みCapabilityとaccess audit境界を維持するためAgentへ`context_search`または`context_fetch`の利用を依頼します
+標準Session Storeを設定した場合はF6で1つ古いrecent Session、Shift-F6で1つ新しいSessionへ移動し、F7でcurrent chatへ戻ります
+過去Sessionはread-onlyで表示し、その間もactiveなcurrent Runは継続します
+既存SessionでTUIを開始すると新しいRunの開始前にbounded transcript、Composer履歴、Context statusをseedします
+
 ## 外部Extensionの開発
 
 既存Go module内へGo reference scaffoldを作成できます
@@ -569,7 +579,7 @@ go build ./...
 - Evidenceは完全なworkspace archiveではありません
 - Tool inputは上限付きJSON Schema subsetとstrictな具象argument decoderで検証しますが、完全なJSON Schema vocabularyは実装せず、別validatorは組み込み側から注入します
 - 共有tokenとcost上限はProviderがusageを遅れて返す場合や返さない場合に完全には強制できません
-- TUI composerは現在1行で、表示するtranscriptとactivity historyはそれぞれ直近256件に制限します
+- TUIはtranscriptを最大2048件、activityを256件、Composer履歴を128件、recent Session summaryを64件保持し、それ以前の内容は設定済みSession Storeへ残してview memoryへ全件保持しません
 - built-in HTTP service、GitHub Actions Adapter、SQLite Session Store、WebAssembly backendは未実装ですが、既存serverは`qed.Host`を組み込めます
 - すべてのthird-party OpenAI互換APIとの互換性は保証しません
 - `openai-codex`はexperimentalなChatGPT backend contractに追従し、現在はmodel discovery、Responses Lite、WebSocket transportを持たないfull ResponsesのSSE経路だけを利用します

@@ -1040,3 +1040,114 @@ func TestSessionStoresReplaySteeringAndFollowUpBoundaries(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionCatalogReturnsBoundedRecentContentFreeSummaries(t *testing.T) {
+	t.Parallel()
+
+	type catalogStore interface {
+		agent.SessionStore
+		session.Catalog
+	}
+	stores := map[string]func(*testing.T) catalogStore{
+		"memory": func(*testing.T) catalogStore { return session.NewMemoryStore() },
+		"jsonl": func(t *testing.T) catalogStore {
+			store, err := session.NewJSONLStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	for name, construct := range stores {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := construct(t)
+			base := time.Date(2026, time.August, 14, 1, 0, 0, 0, time.UTC)
+			appendSession := func(id, runID, text string, updated time.Time, waiting bool) {
+				t.Helper()
+				input := agent.Message{Role: agent.RoleUser, Text: text}
+				events := []agent.Event{
+					{RunID: runID, Sequence: 1, Type: agent.EventRunStarted, Time: updated.Add(-time.Second)},
+					{RunID: runID, Sequence: 2, Type: agent.EventUserMessageAdded, Time: updated, Message: &input},
+				}
+				if waiting {
+					events = append(events, agent.Event{
+						RunID: runID, Sequence: 3, Type: agent.EventRunWaiting, Time: updated,
+						WaitRequest: &agent.WaitRequest{ID: "wait-" + id, Kind: agent.WaitKindApproval},
+					})
+				} else {
+					events = append(events, agent.Event{
+						RunID: runID, Sequence: 3, Type: agent.EventRunCompleted, Time: updated,
+					})
+				}
+				if _, err := store.Append(context.Background(), id, 0, events); err != nil {
+					t.Fatalf("Append %q: %v", id, err)
+				}
+			}
+			appendSession("old", "run-old", "private old", base, false)
+			appendSession("waiting", "run-waiting", "private waiting", base.Add(time.Minute), true)
+			appendSession("new-a", "run-new-a", "private new a", base.Add(2*time.Minute), false)
+			appendSession("new-z", "run-new-z", "private new z", base.Add(2*time.Minute), false)
+
+			descriptors, err := store.RecentSessions(context.Background(), 3)
+			if err != nil {
+				t.Fatalf("RecentSessions: %v", err)
+			}
+			if len(descriptors) != 3 || descriptors[0].ID != "new-a" ||
+				descriptors[1].ID != "new-z" || descriptors[2].ID != "waiting" {
+				t.Fatalf("recent Sessions = %#v", descriptors)
+			}
+			if descriptors[0].Revision != 3 || descriptors[0].MessageCount != 1 ||
+				descriptors[0].LastRunID != "run-new-a" || descriptors[0].Waiting {
+				t.Fatalf("new descriptor = %#v", descriptors[0])
+			}
+			if !descriptors[2].Waiting {
+				t.Fatalf("waiting descriptor = %#v", descriptors[2])
+			}
+			encoded := fmt.Sprintf("%#v", descriptors)
+			for _, protected := range []string{
+				"private old", "private waiting", "private new a", "private new z",
+			} {
+				if strings.Contains(encoded, protected) {
+					t.Fatalf("Session descriptors contain protected Message %q", protected)
+				}
+			}
+			if _, err := store.RecentSessions(context.Background(), 0); err == nil {
+				t.Fatal("RecentSessions accepted a zero limit")
+			}
+			if _, err := store.RecentSessions(context.Background(), 257); err == nil {
+				t.Fatal("RecentSessions accepted a limit above the standard maximum")
+			}
+			if _, err := store.RecentSessions(nil, 1); err == nil {
+				t.Fatal("RecentSessions accepted a nil context")
+			}
+		})
+	}
+}
+
+func TestJSONLSessionCatalogIgnoresNonRegularEventEntries(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := session.NewJSONLStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := agent.Event{
+		RunID: "run-real", Sequence: 1, Type: agent.EventRunStarted,
+		Time: time.Date(2026, time.August, 14, 1, 0, 0, 0, time.UTC),
+	}
+	if _, err := store.Append(context.Background(), "real", 0, []agent.Event{event}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "outside"), filepath.Join(root, "forged.jsonl")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	descriptors, err := store.RecentSessions(context.Background(), 4)
+	if err != nil {
+		t.Fatalf("RecentSessions: %v", err)
+	}
+	if len(descriptors) != 1 || descriptors[0].ID != "real" {
+		t.Fatalf("recent Sessions = %#v", descriptors)
+	}
+}

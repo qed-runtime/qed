@@ -592,6 +592,11 @@ Sessionをreplayしますが、新しいRun IDとRuntime localのProvider、Tool
 Session Storeは`agent.Budget`を永続化しないため、複数follow-up Runで1つのbudgetを使う場合だけ同じ`*agent.Budget`を明示的に再利用します
 Session Storeが未設定の場合、Session IDはmessageを保持しないためcallerが過去contextを渡す必要があります
 
+標準MemoryとJSONL Storeは`session.Catalog`も実装します
+`RecentSessions`はSession ID、revision、message件数、最新Run identityとtime、pending wait状態だけを含むcontent-freeなdescriptorをcaller指定上限で新しい順に返します
+上限は1件から256件で返却descriptorにはmessage textを含めません
+TUIは最大64件を要求し、選択したsnapshotだけをboundedなread-only projectionへ読み込み、current Run controllerとは分離して保持します
+
 ## Evidence Store
 
 ```json

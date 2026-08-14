@@ -385,6 +385,22 @@ shows content-free Run activity with Agent, Session, Run, Tool, and approval
 capability metadata. Tool arguments, Tool output, raw wait payloads, and raw
 Run errors are not copied into the rendered view state
 
+The multiline Composer uses Enter to submit and Shift-Enter, Alt-Enter, or
+Ctrl-O to insert a line break. Up and Down recall the bounded submission
+history when the caret is at an editor boundary. The transcript uses a
+variable-height VirtualFeed, retains at most 2,048 user and assistant entries,
+and builds only the visible range plus overscan
+
+Press F2 to toggle content-free Context, predictive-budget, cache, and scoped
+Evidence availability details. Evidence content is not read directly by the
+TUI; ask the Agent to use `context_search` or `context_fetch` so the configured
+Capability and access-audit boundary remains authoritative. With a configured
+standard Session Store, F6 opens the next older recent Session, Shift-F6 moves
+newer, and F7 returns to the current chat. Historical Sessions are read-only
+and an active current Run continues while they are displayed. Starting the TUI
+with an existing Session seeds the bounded transcript, Composer recall, and
+Context status before the new Run begins
+
 ## Develop an external Extension
 
 Create a Go reference scaffold inside an existing Go module. The parent
@@ -630,7 +646,7 @@ go build ./...
 - Evidence is not a complete workspace archive
 - Tool input uses a bounded JSON Schema subset plus strict concrete decoders; embedders can inject another validator, but QED does not implement the complete JSON Schema vocabulary
 - Shared token and cost limits depend on Provider-reported usage, which may be late or absent
-- The TUI composer is currently one line and the rendered transcript and activity history are each bounded to the most recent 256 entries
+- The TUI retains at most 2,048 transcript entries, 256 activity entries, 128 Composer history entries, and 64 recent Session summaries; older content remains in the configured Session Store and is not all resident in the view
 - A built-in HTTP service, GitHub Actions adapter, SQLite Session Store, and WebAssembly backend are not implemented; existing servers can embed `qed.Host`
 - Compatibility with every third-party OpenAI-compatible API is not guaranteed
 - `openai-codex` follows an experimental ChatGPT backend contract and currently uses full Responses over SSE without model discovery, Responses Lite, or WebSocket transport

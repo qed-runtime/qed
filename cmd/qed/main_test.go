@@ -749,6 +749,7 @@ func TestTUICommandInvokesRunner(t *testing.T) {
 		_ tuiapp.StartFunc,
 		request agent.RunRequest,
 		prompt string,
+		_ tuiapp.ChatOptions,
 	) (tuiapp.Outcome, error) {
 		receivedAgentID = request.AgentID
 		receivedInstructions = request.Instructions
@@ -801,11 +802,15 @@ func TestTUICommandLoadsConfiguredAgentAndSession(t *testing.T) {
 		start tuiapp.StartFunc,
 		request agent.RunRequest,
 		_ string,
+		options tuiapp.ChatOptions,
 	) (tuiapp.Outcome, error) {
 		if start == nil {
 			t.Fatal("configured TUI starter is nil")
 		}
 		received = request
+		if options.SessionStore == nil {
+			t.Fatal("configured TUI Session Store is nil")
+		}
 		return tuiapp.Outcome{
 			Result: agent.RunResult{RunID: "tui_evidence_2", AgentID: "main", Status: agent.RunStatusCompleted},
 			Events: []agent.Event{{RunID: "tui_evidence_2", AgentID: "main", Type: agent.EventRunCompleted}},
