@@ -28,6 +28,7 @@ const (
 var (
 	chatViewportID        = tui.NewNodeID("chat-history")
 	sessionViewportID     = tui.NewNodeID("session-history")
+	chatFocusRegionID     = tui.NewNodeID("chat-focus-region")
 	composerInputID       = tui.NewNodeID("chat-composer")
 	composerViewportID    = tui.NewNodeID("chat-composer-viewport")
 	composerCaretID       = tui.NewNodeID("chat-composer-caret")
@@ -229,7 +230,7 @@ func RunWithStarterOptions(
 	terminalErr := tui.RunTerminalContextWithNoticeMapper(
 		ctx,
 		view,
-		tui.DefaultTerminalOptions(),
+		chatTerminalOptions(),
 		mapEvent,
 		mapRuntimeNotice,
 	)
@@ -242,6 +243,13 @@ func RunWithStarterOptions(
 		return outcome, view.runErr
 	}
 	return outcome, nil
+}
+
+func chatTerminalOptions() tui.TerminalOptions {
+	options := tui.DefaultTerminalOptions()
+	mouseTracking := vt.MouseTrackingPress
+	options.MouseTracking = &mouseTracking
+	return options
 }
 
 func newEventBridge(handle *agent.RunHandle) *eventBridge {
@@ -655,7 +663,16 @@ func (view *runView) chatHistoryNode(presentation *runPresentation) tui.Node[mes
 	if view.feedUnread && view.historyView == nil {
 		feed = feed.UnreadIndicator(tui.StyledText[message](" New activity below ", vt.Style{Reverse: true}))
 	}
-	return feed.Node()
+	return feed.Node().OnPointerEvent(
+		chatFocusRegionID,
+		func(pointer tui.PointerEventContext) tui.EventResult[message] {
+			event := pointer.Event()
+			if event.Kind != vt.MousePress || event.Button != vt.MouseLeft {
+				return tui.IgnoreResult[message]()
+			}
+			return tui.ConsumeResult[message]().Focus(feedID)
+		},
+	)
 }
 
 func (view *runView) composerWidget(context tui.ViewContext) widget.Composer[message] {
@@ -701,23 +718,23 @@ func (view *runView) approvalText() string {
 func (view *runView) helpText() string {
 	switch {
 	case view.historyView != nil || view.historyLoading:
-		return "F6 older  Shift-F6 newer  F7 current  F2 context  Esc quit"
+		return "Chat click: PgUp/PgDn/wheel  F6 older  Shift-F6 newer  F7 current  F2 context  Esc quit"
 	case view.presentation.pendingApproval != nil:
-		return "Approval required  Y approve  N deny  Ctrl-C cancel  F2 context  Esc quit"
+		return "Approval required  Y approve  N deny  Chat click: PgUp/PgDn/wheel  Ctrl-C cancel  F2 context  Esc quit"
 	case view.presentation.waitingUnsupported:
-		return "Input cannot be handled here  Ctrl-C cancel  F2 context  Esc quit"
+		return "Input cannot be handled here  Chat click: PgUp/PgDn/wheel  Ctrl-C cancel  F2 context  Esc quit"
 	case !view.composerEnabled:
 		if view.finished {
-			return "Run finished  F2 context  Q/Esc quit"
+			return "Run finished  Chat click: PgUp/PgDn/wheel  F2 context  Q/Esc quit"
 		}
-		return "Q/Esc quit  Ctrl-C cancel"
+		return "Chat click: PgUp/PgDn/wheel  Ctrl-C cancel  Q/Esc quit"
 	case view.finished:
 		if view.runNumber == 0 {
-			return "Enter start  F2 context  F6 Sessions  Esc quit"
+			return "Enter start  Chat click: PgUp/PgDn/wheel  F2 context  F6 Sessions  Esc quit"
 		}
-		return "Enter follow-up  F2 context  F6 Sessions  Esc quit"
+		return "Enter follow-up  Chat click: PgUp/PgDn/wheel  F2 context  F6 Sessions  Esc quit"
 	default:
-		return "Enter steer  Ctrl-C cancel  F2 context  F6 Sessions  Esc quit"
+		return "Enter steer  Chat click: PgUp/PgDn/wheel  Ctrl-C cancel  F2 context  F6 Sessions  Esc quit"
 	}
 }
 

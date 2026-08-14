@@ -137,6 +137,15 @@ func TestControlCProducesCancelMessage(t *testing.T) {
 	}
 }
 
+func TestChatTerminalOptionsEnableMouseInput(t *testing.T) {
+	t.Parallel()
+
+	options := chatTerminalOptions()
+	if options.MouseTracking == nil || *options.MouseTracking != vt.MouseTrackingPress {
+		t.Fatalf("MouseTracking = %v, want press tracking", options.MouseTracking)
+	}
+}
+
 func TestFunctionKeysMapLongChatNavigation(t *testing.T) {
 	t.Parallel()
 
@@ -563,6 +572,90 @@ func TestComposerRendersDraftBeforeSubmit(t *testing.T) {
 	rendered := surfaceText(harness.LatestSurface())
 	if !strings.Contains(rendered, draft) {
 		t.Fatalf("rendered surface does not contain Composer draft %q:\n%s", draft, rendered)
+	}
+}
+
+func TestChatAndComposerClickSwitchFocusForHistoryNavigation(t *testing.T) {
+	t.Parallel()
+
+	view := newIdleChatView(
+		context.Background(),
+		func(context.Context, agent.RunRequest) (*agent.RunHandle, error) {
+			t.Fatal("history navigation unexpectedly started a Run")
+			return nil, nil
+		},
+		agent.RunRequest{AgentID: "echo"},
+	)
+	messages := make([]agent.Message, 40)
+	for index := range messages {
+		messages[index] = agent.Message{
+			Role: agent.RoleUser,
+			Text: fmt.Sprintf("history-%02d", index),
+		}
+	}
+	view.presentation.reconcileMessages(messages)
+
+	harness, err := tuitest.New(view, tui.Size{Width: 80, Height: 20}, mapEvent)
+	if err != nil {
+		t.Fatalf("tuitest.New: %v", err)
+	}
+	defer harness.Close()
+
+	if focused, ok := harness.Interaction().Focused(); !ok || focused != composerInputID {
+		t.Fatalf("initial focus = %q, present = %t", focused, ok)
+	}
+	initial, ok := harness.ScrollState(chatViewportID)
+	if !ok || !initial.AtEnd || initial.AtStart {
+		t.Fatalf("initial chat ScrollState = %+v, present = %t", initial, ok)
+	}
+
+	if err := harness.Input([]byte("\x1b[<0;5;8M")); err != nil {
+		t.Fatalf("click chat history: %v", err)
+	}
+	if focused, ok := harness.Interaction().Focused(); !ok || focused != chatViewportID {
+		t.Fatalf("chat focus = %q, present = %t", focused, ok)
+	}
+	if err := harness.Input([]byte("\x1b[5~")); err != nil {
+		t.Fatalf("PageUp chat history: %v", err)
+	}
+	afterPageUp, ok := harness.ScrollState(chatViewportID)
+	if !ok || afterPageUp.Offset.Y >= initial.Offset.Y || afterPageUp.AtEnd {
+		t.Fatalf("chat ScrollState after PageUp = %+v, initial = %+v", afterPageUp, initial)
+	}
+	if err := harness.Input([]byte("\x1b[6~")); err != nil {
+		t.Fatalf("PageDown chat history: %v", err)
+	}
+	afterPageDown, ok := harness.ScrollState(chatViewportID)
+	if !ok || afterPageDown.Offset.Y <= afterPageUp.Offset.Y {
+		t.Fatalf("chat ScrollState after PageDown = %+v, PageUp = %+v", afterPageDown, afterPageUp)
+	}
+	if err := harness.Input([]byte("\x1b[5~")); err != nil {
+		t.Fatalf("second PageUp chat history: %v", err)
+	}
+	afterPageUp, ok = harness.ScrollState(chatViewportID)
+	if !ok || afterPageUp.Offset.Y >= afterPageDown.Offset.Y {
+		t.Fatalf("chat ScrollState after second PageUp = %+v, PageDown = %+v", afterPageUp, afterPageDown)
+	}
+
+	if err := harness.Input([]byte("\x1b[<64;5;8M")); err != nil {
+		t.Fatalf("wheel chat history: %v", err)
+	}
+	afterWheel, ok := harness.ScrollState(chatViewportID)
+	if !ok || afterWheel.Offset.Y >= afterPageUp.Offset.Y {
+		t.Fatalf("chat ScrollState after wheel = %+v, PageUp = %+v", afterWheel, afterPageUp)
+	}
+
+	if err := harness.Input([]byte("\x1b[<0;5;16M")); err != nil {
+		t.Fatalf("click Composer: %v", err)
+	}
+	if focused, ok := harness.Interaction().Focused(); !ok || focused != composerInputID {
+		t.Fatalf("Composer focus = %q, present = %t", focused, ok)
+	}
+	if err := harness.Input([]byte("draft")); err != nil {
+		t.Fatalf("type Composer draft: %v", err)
+	}
+	if view.draftText() != "draft" {
+		t.Fatalf("Composer draft = %q, want draft", view.draftText())
 	}
 }
 

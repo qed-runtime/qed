@@ -397,7 +397,12 @@ The multiline Composer uses Enter to submit and Shift-Enter, Alt-Enter, or
 Ctrl-O to insert a line break. Up and Down recall the bounded submission
 history when the caret is at an editor boundary. The transcript uses a
 variable-height VirtualFeed, retains at most 2,048 user and assistant entries,
-and builds only the visible range plus overscan
+and builds only the visible range plus overscan. Click the transcript to move
+focus from the Composer, then use PageUp or PageDown to navigate it. The mouse
+wheel scrolls the region under the pointer. Click the Composer to resume input.
+QED enables SGR press mouse tracking while the TUI is open so click and wheel
+reports reach the application. Terminal-native pointer selection may therefore
+require the terminal's own override gesture or leaving the TUI first
 
 Press F2 to toggle content-free Context, predictive-budget, cache, and scoped
 Evidence availability details. Evidence content is not read directly by the
