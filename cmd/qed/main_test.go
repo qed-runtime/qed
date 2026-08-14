@@ -78,7 +78,7 @@ func TestRunTextOutput(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run(context.Background(), []string{"run", "--prompt", "hello"}, &stdout, &stderr)
+	exitCode := run(context.Background(), []string{"run", "hello"}, &stdout, &stderr)
 
 	if exitCode != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
@@ -343,7 +343,7 @@ func TestRunVerboseWritesStructuredDiagnosticsWithoutPromptContent(t *testing.T)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run(context.Background(), []string{"--verbose", "run", "--prompt", "do-not-log-prompt"}, &stdout, &stderr)
+	exitCode := run(context.Background(), []string{"run", "-v", "do-not-log-prompt"}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
@@ -356,7 +356,7 @@ func TestRunVerboseWritesStructuredDiagnosticsWithoutPromptContent(t *testing.T)
 	}
 }
 
-func TestRunInspectReadsEvidenceBundle(t *testing.T) {
+func TestEvidenceInspectReadsEvidenceBundle(t *testing.T) {
 	t.Parallel()
 
 	storeRoot := filepath.Join(t.TempDir(), "evidence")
@@ -376,7 +376,7 @@ func TestRunInspectReadsEvidenceBundle(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exitCode := run(context.Background(), []string{
-		"run", "inspect", "run_inspect_test", "--store", storeRoot,
+		"evidence", "inspect", "run_inspect_test", "--store", storeRoot,
 	}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
@@ -614,14 +614,14 @@ func TestCacheStatusReadsPlanUsageAndCost(t *testing.T) {
 	}
 }
 
-func TestRunJSONLOutput(t *testing.T) {
+func TestExecJSONShortcutOutput(t *testing.T) {
 	t.Parallel()
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exitCode := run(
 		context.Background(),
-		[]string{"run", "--prompt", "hello", "--output", "jsonl"},
+		[]string{"exec", "--json", "hello"},
 		&stdout,
 		&stderr,
 	)
@@ -683,7 +683,7 @@ func TestRunRequiresPrompt(t *testing.T) {
 		t.Fatalf("exit code = %d, want 2", exitCode)
 	}
 	if !strings.Contains(stderr.String(), "missing-required") ||
-		!strings.Contains(stderr.String(), "--prompt") {
+		!strings.Contains(stderr.String(), "prompt") {
 		t.Errorf("stderr = %q, want structured prompt error", stderr.String())
 	}
 }
@@ -693,12 +693,12 @@ func TestRunRejectsBlankPrompt(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run(context.Background(), []string{"run", "--prompt", "   "}, &stdout, &stderr)
+	exitCode := run(context.Background(), []string{"run", "   "}, &stdout, &stderr)
 
 	if exitCode != 2 {
 		t.Fatalf("exit code = %d, want 2", exitCode)
 	}
-	if !strings.Contains(stderr.String(), "error[validation]: --prompt must not be empty") {
+	if !strings.Contains(stderr.String(), "error[validation]: prompt must not be empty") {
 		t.Errorf("stderr = %q, want blank prompt diagnostic", stderr.String())
 	}
 }
@@ -716,8 +716,9 @@ func TestRunHelpUsesNagiRenderer(t *testing.T) {
 	for _, expected := range []string{
 		"Usage:",
 		"qed run",
-		"--prompt",
+		"<PROMPT>",
 		"--output",
+		"--json",
 		"--provider",
 		"--model",
 		"--base-url",
@@ -726,6 +727,7 @@ func TestRunHelpUsesNagiRenderer(t *testing.T) {
 		"--config",
 		"--agent",
 		"--workspace",
+		"--cd",
 		"--approval",
 	} {
 		if !strings.Contains(stdout.String(), expected) {
@@ -734,6 +736,74 @@ func TestRunHelpUsesNagiRenderer(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestInteractiveCommandsInvokeTUIWithOptionalPrompt(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name       string
+		arguments  []string
+		wantPrompt string
+	}{
+		{name: "root idle", arguments: nil, wantPrompt: ""},
+		{name: "root prompted", arguments: []string{"hello"}, wantPrompt: "hello"},
+		{name: "explicit idle", arguments: []string{"tui"}, wantPrompt: ""},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var received agent.RunRequest
+			var receivedPrompt string
+			dependencies := defaultCommandDependencies()
+			dependencies.runTUI = func(
+				_ context.Context,
+				_ tuiapp.StartFunc,
+				request agent.RunRequest,
+				prompt string,
+				_ tuiapp.ChatOptions,
+			) (tuiapp.Outcome, error) {
+				received = request
+				receivedPrompt = prompt
+				return tuiapp.Outcome{}, nil
+			}
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDependencies(
+				context.Background(),
+				test.arguments,
+				&stdout,
+				&stderr,
+				dependencies,
+			)
+			if exitCode != 0 {
+				t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+			}
+			if receivedPrompt != test.wantPrompt {
+				t.Fatalf("prompt = %q, want %q", receivedPrompt, test.wantPrompt)
+			}
+			if test.wantPrompt == "" && len(received.Input) != 0 {
+				t.Fatalf("idle Run input = %#v, want empty", received.Input)
+			}
+			if test.wantPrompt != "" && (len(received.Input) != 1 || received.Input[0].Text != test.wantPrompt) {
+				t.Fatalf("prompted Run input = %#v", received.Input)
+			}
+		})
+	}
+}
+
+func TestInteractiveCommandsRejectExplicitBlankPrompt(t *testing.T) {
+	t.Parallel()
+
+	for _, arguments := range [][]string{{"   "}, {"tui", "   "}} {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		exitCode := run(context.Background(), arguments, &stdout, &stderr)
+		if exitCode != 2 || !strings.Contains(stderr.String(), "prompt must not be empty") {
+			t.Errorf("arguments/exit/stderr = %q/%d/%q", arguments, exitCode, stderr.String())
+		}
 	}
 }
 
@@ -761,7 +831,7 @@ func TestTUICommandInvokesRunner(t *testing.T) {
 	var stderr bytes.Buffer
 	exitCode := runWithDependencies(
 		context.Background(),
-		[]string{"tui", "--prompt", "hello", "--system", "be concise"},
+		[]string{"tui", "--system", "be concise", "hello"},
 		&stdout,
 		&stderr,
 		dependencies,
@@ -829,7 +899,7 @@ func TestTUICommandLoadsConfiguredAgentAndSession(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exitCode := runWithDependencies(context.Background(), []string{
-		"--verbose", "tui", "--config", configPath, "--agent", "main", "--session-id", "session-tui", "--prompt", "hello",
+		"tui", "--verbose", "--config", configPath, "--agent", "main", "--session-id", "session-tui", "hello",
 	}, &stdout, &stderr, dependencies)
 	if exitCode != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
@@ -863,7 +933,7 @@ func TestRunSessionIDRequiresConfiguredStore(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exitCode := run(context.Background(), []string{
-		"run", "--config", configPath, "--session-id", "missing-store", "--prompt", "hello",
+		"run", "--config", configPath, "--session-id", "missing-store", "hello",
 	}, &stdout, &stderr)
 	if exitCode != 1 || !strings.Contains(stderr.String(), "configuration has no Session Store") {
 		t.Fatalf("exit/stderr = %d/%q", exitCode, stderr.String())
@@ -886,12 +956,12 @@ func TestRunProviderConfigurationReachesFactory(t *testing.T) {
 		context.Background(),
 		[]string{
 			"run",
-			"--prompt", "hello",
 			"--provider", providerOpenAIResponses,
-			"--model", "test-model",
+			"-m", "test-model",
 			"--base-url", "http://127.0.0.1:8080/v1",
 			"--system", "be concise",
 			"--max-output-tokens", "64",
+			"hello",
 		},
 		&stdout,
 		&stderr,
@@ -921,10 +991,11 @@ func TestRunOpenAICodexConfigurationReachesFactory(t *testing.T) {
 	exitCode := runWithDependencies(
 		context.Background(),
 		[]string{
-			"run", "--prompt", "hello",
+			"run",
 			"--provider", providerOpenAICodex,
 			"--model", "gpt-test",
 			"--auth-profile", "personal",
+			"hello",
 		},
 		&stdout,
 		&stderr,
@@ -949,14 +1020,14 @@ func TestRunOpenAICodexRequiresAuthProfileAndRejectsCustomEndpoint(t *testing.T)
 	}{
 		{
 			name:      "missing auth profile",
-			arguments: []string{"run", "--prompt", "hello", "--provider", providerOpenAICodex, "--model", "gpt-test"},
+			arguments: []string{"run", "--provider", providerOpenAICodex, "--model", "gpt-test", "hello"},
 			want:      "--auth-profile is required",
 		},
 		{
 			name: "custom endpoint",
 			arguments: []string{
-				"run", "--prompt", "hello", "--provider", providerOpenAICodex, "--model", "gpt-test",
-				"--auth-profile", "personal", "--base-url", "https://example.invalid",
+				"run", "--provider", providerOpenAICodex, "--model", "gpt-test",
+				"--auth-profile", "personal", "--base-url", "https://example.invalid", "hello",
 			},
 			want: "--base-url is not supported",
 		},
@@ -981,7 +1052,7 @@ func TestRunModelProviderRequiresModel(t *testing.T) {
 	var stderr bytes.Buffer
 	exitCode := run(
 		context.Background(),
-		[]string{"run", "--prompt", "hello", "--provider", providerAnthropic},
+		[]string{"run", "--provider", providerAnthropic, "hello"},
 		&stdout,
 		&stderr,
 	)
@@ -1010,10 +1081,10 @@ func TestCustomBaseURLUsesOnlyExplicitCustomKey(t *testing.T) {
 		context.Background(),
 		[]string{
 			"run",
-			"--prompt", "hello",
 			"--provider", providerOpenAIChat,
 			"--model", "test-model",
 			"--base-url", "https://trusted.example/v1",
+			"hello",
 		},
 		&stdout,
 		&stderr,
@@ -1036,9 +1107,9 @@ func TestDefaultOpenAIEndpointRequiresAPIKey(t *testing.T) {
 		context.Background(),
 		[]string{
 			"run",
-			"--prompt", "hello",
 			"--provider", providerOpenAIResponses,
 			"--model", "test-model",
+			"hello",
 		},
 		&stdout,
 		&stderr,
@@ -1092,10 +1163,10 @@ func TestRunOpenAIResponsesAgainstHTTPServer(t *testing.T) {
 		context.Background(),
 		[]string{
 			"run",
-			"--prompt", "hello",
 			"--provider", providerOpenAIResponses,
 			"--model", "test-model",
 			"--base-url", server.URL + "/v1",
+			"hello",
 		},
 		&stdout,
 		&stderr,
@@ -1214,7 +1285,7 @@ func TestRunConfiguredCodingProfileAgainstOpenAIProtocol(t *testing.T) {
 	var stderr bytes.Buffer
 	exitCode := runWithInputAndDependencies(
 		context.Background(),
-		[]string{"--verbose", "run", "--config", configPath, "--workspace", workspaceRoot, "--approval", "prompt", "--prompt", "Read the note"},
+		[]string{"run", "--verbose", "--config", configPath, "--workspace", workspaceRoot, "--approval", "prompt", "Read the note"},
 		strings.NewReader("yes\n"),
 		&stdout,
 		&stderr,
@@ -1398,7 +1469,7 @@ func TestRunConfiguredOpenAIParentWithAnthropicChild(t *testing.T) {
 	var stderr bytes.Buffer
 	exitCode := run(
 		context.Background(),
-		[]string{"run", "--config", configPath, "--prompt", "Evaluate endpoints"},
+		[]string{"run", "--config", configPath, "Evaluate endpoints"},
 		&stdout,
 		&stderr,
 	)
@@ -1420,7 +1491,7 @@ func TestRunConfigConflictsWithInlineProviderOptions(t *testing.T) {
 	var stderr bytes.Buffer
 	exitCode := run(
 		context.Background(),
-		[]string{"run", "--config", "qed.json", "--provider", "echo", "--prompt", "hello"},
+		[]string{"run", "--config", "qed.json", "--provider", "echo", "hello"},
 		&stdout,
 		&stderr,
 	)
@@ -1432,6 +1503,26 @@ func TestRunConfigConflictsWithInlineProviderOptions(t *testing.T) {
 	}
 }
 
+func TestRootTUIOptionBeforeSubcommandIsRejected(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run(
+		context.Background(),
+		[]string{"--config", "qed.json", "run", "hello"},
+		&stdout,
+		&stderr,
+	)
+	if exitCode != 2 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "configures the root TUI") ||
+		!strings.Contains(stderr.String(), `after subcommand "run"`) {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
 func TestRunAgentOptionRequiresConfig(t *testing.T) {
 	t.Parallel()
 
@@ -1439,7 +1530,7 @@ func TestRunAgentOptionRequiresConfig(t *testing.T) {
 	var stderr bytes.Buffer
 	exitCode := run(
 		context.Background(),
-		[]string{"run", "--agent", "coordinator", "--prompt", "hello"},
+		[]string{"run", "--agent", "coordinator", "hello"},
 		&stdout,
 		&stderr,
 	)
@@ -1451,7 +1542,7 @@ func TestRunAgentOptionRequiresConfig(t *testing.T) {
 	}
 }
 
-func TestRunPassesExplicitWorkspaceToAgentConfiguration(t *testing.T) {
+func TestRunPassesShortCDToAgentConfiguration(t *testing.T) {
 	t.Parallel()
 
 	configPath := filepath.Join(t.TempDir(), "qed.json")
@@ -1476,7 +1567,7 @@ func TestRunPassesExplicitWorkspaceToAgentConfiguration(t *testing.T) {
 	var stderr bytes.Buffer
 	exitCode := runWithDependencies(
 		context.Background(),
-		[]string{"--verbose", "run", "--config", configPath, "--workspace", workspaceRoot, "--approval", "prompt", "--prompt", "hello"},
+		[]string{"run", "--verbose", "--config", configPath, "-C", workspaceRoot, "--approval", "prompt", "hello"},
 		&stdout,
 		&stderr,
 		dependencies,
@@ -1497,7 +1588,7 @@ func TestRunApprovalOptionRequiresConfig(t *testing.T) {
 	var stderr bytes.Buffer
 	exitCode := run(
 		context.Background(),
-		[]string{"run", "--approval", "prompt", "--prompt", "hello"},
+		[]string{"run", "--approval", "prompt", "hello"},
 		&stdout,
 		&stderr,
 	)
@@ -1516,7 +1607,7 @@ func TestRunWorkspaceOptionRequiresConfig(t *testing.T) {
 	var stderr bytes.Buffer
 	exitCode := run(
 		context.Background(),
-		[]string{"run", "--workspace", ".", "--prompt", "hello"},
+		[]string{"run", "--workspace", ".", "hello"},
 		&stdout,
 		&stderr,
 	)
@@ -1524,6 +1615,25 @@ func TestRunWorkspaceOptionRequiresConfig(t *testing.T) {
 		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "requires") || !strings.Contains(stderr.String(), "config") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunRejectsMultipleWorkspaceRoots(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run(
+		context.Background(),
+		[]string{"run", "--config", "qed.json", "--workspace", ".", "--cd", ".", "hello"},
+		&stdout,
+		&stderr,
+	)
+	if exitCode != 2 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "option-group") || !strings.Contains(stderr.String(), "workspace-root") {
 		t.Errorf("stderr = %q", stderr.String())
 	}
 }
@@ -1536,7 +1646,7 @@ func TestCanceledCommandUsesNagiCancellationStatus(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := run(ctx, []string{"run", "--prompt", "hello"}, &stdout, &stderr)
+	exitCode := run(ctx, []string{"run", "hello"}, &stdout, &stderr)
 
 	if exitCode != 130 {
 		t.Fatalf("exit code = %d, want 130", exitCode)

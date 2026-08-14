@@ -2,7 +2,7 @@
 
 QEDは1つのstrictなJSON documentからProvider profile、process分離Extension、execution Profile、Store、Agent graphを構築します
 
-このformatは`qed run`、`qed tui`、`qed session resume`で利用されます
+このformatは`qed`、`qed tui`、`qed run`、`qed session resume`で利用されます
 
 ## 完全な例
 
@@ -130,9 +130,9 @@ export PRIMARY_API_TOKEN="<token>"
 export REVIEW_API_TOKEN="<token>"
 go run ./cmd/qed run \
   --config ./qed.json \
-  --workspace . \
+  --cd . \
   --session-id review-1 \
-  --prompt "Propose a migration plan"
+  "Propose a migration plan"
 ```
 
 ## Top-level field
@@ -154,7 +154,7 @@ go run ./cmd/qed run \
 `default_agent`を省略した場合、CLIでは`--agent`が必要です
 
 すべての相対pathはJSON fileのdirectoryを基準に解決されます
-ただし`--workspace`はAdapter inputであり、既定値はcurrent directoryです
+ただし`--workspace`と同義の`--cd`または`-C`はAdapter inputであり、既定値はcurrent directoryです
 
 ## Provider profile
 
@@ -206,7 +206,7 @@ Provider profile IDはProvider identityとopaque continuation stateに含まれ�
 
 ```sh
 qed auth login --auth-profile personal
-qed run --config qed.json --prompt "Reply with a short greeting"
+qed run --config qed.json "Reply with a short greeting"
 ```
 
 credential保存、refresh、protocol制限は[ChatGPT subscription認証](chatgpt-auth_ja.md)を参照してください
@@ -626,8 +626,6 @@ Tool trace payloadはdigestで表現されますが、public Eventは通常のob
 Session dataと同様に保護してください
 
 ```sh
-qed run inspect <run-id> --store .qed/evidence
-qed run export <run-id> --store .qed/evidence
 qed evidence inspect <run-id> --store .qed/evidence
 qed evidence export <run-id> --store .qed/evidence
 qed evidence fetch sha256:<digest> --run-id <run-id> --store .qed/evidence
@@ -669,15 +667,20 @@ startup時にstateをrestoreし、reload前とorderly close時にcurrent generat
 ## CLI scopeとverbose diagnostics
 
 `--config`はinlineの`--provider`、`--model`、`--base-url`、`--auth-profile`、`--system`、`--max-output-tokens`と競合します
-`--agent`、`--workspace`、`--session-id`には`--config`が必要です
+`--agent`、`--workspace`または`--cd`、`--session-id`には`--config`が必要です
+`--workspace`と`--cd`は同じrootを選択し、同時には指定できません
 `--approval`はnon-interactiveな設定Runで利用し、設定TUIの承認には`Y`と`N`を使います
 
-root `--verbose` flagはsubcommandより前に置きます
+継承される`--verbose`または`-v` flagはsubcommandの前後どちらにも置けます
 
 ```sh
-qed --verbose run --config qed.json --prompt "inspect this project"
-qed --verbose tui --config qed.json --prompt "inspect this project"
+qed run -v --config qed.json "inspect this project"
+qed -v --config qed.json "inspect this project"
 ```
+
+`qed [PROMPT]`はTUIを開き、`qed run PROMPT`は非対話で実行します
+`qed exec PROMPT`は`run`のaliasです
+`--json`は非対話RunのJSONL shortcutで、`-m`は`--model`のshort formです
 
 booleanはすべての設定Runtimeと末端のExtension Serverへ伝搬します
 diagnosticsはstderrへ構造化出力され、content-bearing valueとsecret valueを除外します

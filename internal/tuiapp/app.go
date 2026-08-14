@@ -141,6 +141,9 @@ type runView struct {
 type StartFunc func(context.Context, agent.RunRequest) (*agent.RunHandle, error)
 
 // Run starts an Agent chat and displays its ordered events in a Nagi TUI
+//
+// An empty prompt opens an idle composer without starting a Run. The first
+// submitted message becomes the first Run input.
 func Run(ctx context.Context, runtime *agent.Runtime, agentID, instructions, prompt string) error {
 	if ctx == nil {
 		return errors.New("TUI context must not be nil")
@@ -148,20 +151,19 @@ func Run(ctx context.Context, runtime *agent.Runtime, agentID, instructions, pro
 	if runtime == nil {
 		return errors.New("TUI runtime must not be nil")
 	}
-	if strings.TrimSpace(prompt) == "" {
-		return errors.New("TUI prompt must not be empty")
-	}
-
-	return RunWithStarter(ctx, runtime.Run, agent.RunRequest{
+	request := agent.RunRequest{
 		AgentID:      agentID,
 		Instructions: instructions,
-		Input: []agent.Message{
-			{Role: agent.RoleUser, Text: prompt},
-		},
-	}, prompt)
+	}
+	if strings.TrimSpace(prompt) != "" {
+		request.Input = []agent.Message{{Role: agent.RoleUser, Text: prompt}}
+	}
+	return RunWithStarter(ctx, runtime.Run, request, prompt)
 }
 
 // RunWithStarter displays a multi-turn chat started by a Runtime or orchestration Harness
+//
+// An empty prompt opens an idle composer and defers start until submission.
 func RunWithStarter(ctx context.Context, start StartFunc, request agent.RunRequest, prompt string) error {
 	_, err := RunWithStarterOutcome(ctx, start, request, prompt)
 	return err
@@ -171,12 +173,16 @@ func RunWithStarter(ctx context.Context, start StartFunc, request agent.RunReque
 //
 // A non-empty SessionID means follow-up Runs rely on the starter's configured
 // Session Store. Without a SessionID, the TUI carries the previous Run messages
-// into the next in-memory Run request.
+// into the next in-memory Run request. An empty prompt defers the first Run
+// until the user submits a message.
 func RunWithStarterOutcome(ctx context.Context, start StartFunc, request agent.RunRequest, prompt string) (Outcome, error) {
 	return RunWithStarterOptions(ctx, start, request, prompt, ChatOptions{})
 }
 
 // RunWithStarterOptions displays a multi-turn chat with optional history navigation
+//
+// An empty prompt leaves the chat idle until the user submits its first
+// message. No Run is started while the idle chat remains open.
 func RunWithStarterOptions(
 	ctx context.Context,
 	start StartFunc,
@@ -190,9 +196,6 @@ func RunWithStarterOptions(
 	if start == nil {
 		return Outcome{}, errors.New("TUI Run starter must not be nil")
 	}
-	if strings.TrimSpace(prompt) == "" {
-		return Outcome{}, errors.New("TUI prompt must not be empty")
-	}
 	var priorSession *agent.SessionSnapshot
 	if options.SessionStore != nil && request.SessionID != "" {
 		snapshot, snapshotErr := options.SessionStore.Snapshot(ctx, request.SessionID)
@@ -202,17 +205,27 @@ func RunWithStarterOptions(
 			return Outcome{}, fmt.Errorf("load TUI Session history: %w", snapshotErr)
 		}
 	}
-	handle, err := start(ctx, request)
-	if err != nil {
-		return Outcome{}, fmt.Errorf("start run: %w", err)
+	if strings.TrimSpace(prompt) == "" && priorSession != nil && priorSession.PendingWait != nil {
+		return Outcome{}, errors.New("TUI Session has pending input; resume it before starting a new Run")
 	}
-
-	bridge := newEventBridgeForRun(handle, 1, 0)
-	view := newChatView(ctx, start, request, prompt, handle, bridge)
+	var view *runView
+	if strings.TrimSpace(prompt) == "" {
+		view = newIdleChatView(ctx, start, request)
+		if priorSession != nil {
+			view.seedIdleSession(*priorSession, request)
+		}
+	} else {
+		handle, err := start(ctx, request)
+		if err != nil {
+			return Outcome{}, fmt.Errorf("start run: %w", err)
+		}
+		bridge := newEventBridgeForRun(handle, 1, 0)
+		view = newChatView(ctx, start, request, prompt, handle, bridge)
+		if priorSession != nil {
+			view.seedCurrentSession(*priorSession, request, prompt)
+		}
+	}
 	view.options = options
-	if priorSession != nil {
-		view.seedCurrentSession(*priorSession, request, prompt)
-	}
 	terminalErr := tui.RunTerminalContextWithNoticeMapper(
 		ctx,
 		view,
@@ -360,6 +373,23 @@ func newChatView(
 	view.presentation.queueUserMessage(prompt)
 	view.attachRun(handle, bridge)
 	return view
+}
+
+func newIdleChatView(ctx context.Context, start StartFunc, request agent.RunRequest) *runView {
+	presentation := newRunPresentation("", runIdentity{agentID: request.AgentID, sessionID: request.SessionID})
+	presentation.status = "ready"
+	return &runView{
+		presentation:    presentation,
+		ctx:             ctx,
+		start:           start,
+		baseRequest:     request,
+		persistent:      request.SessionID != "",
+		composerEnabled: true,
+		composer:        widget.NewComposerStateAtEnd(""),
+		finished:        true,
+		feedAtEnd:       true,
+		nextHistoryID:   1,
+	}
 }
 
 func newRunView(
@@ -675,6 +705,9 @@ func (view *runView) helpText() string {
 		}
 		return "Q/Esc quit  Ctrl-C cancel"
 	case view.finished:
+		if view.runNumber == 0 {
+			return "Enter start  F2 context  F6 Sessions  Esc quit"
+		}
 		return "Enter follow-up  F2 context  F6 Sessions  Esc quit"
 	default:
 		return "Enter steer  Ctrl-C cancel  F2 context  F6 Sessions  Esc quit"
@@ -729,7 +762,9 @@ func (view *runView) startFollowUp() tui.Effect[message] {
 	request := view.baseRequest
 	request.Resume = nil
 	skipInputMessages := 0
-	if view.persistent {
+	if view.runNumber == 0 {
+		request.Input = append(append([]agent.Message(nil), request.Input...), agent.Message{Role: agent.RoleUser, Text: text})
+	} else if view.persistent {
 		request.Input = []agent.Message{{Role: agent.RoleUser, Text: text}}
 	} else {
 		history := append([]agent.Message(nil), view.currentResult.Messages...)

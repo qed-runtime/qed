@@ -54,7 +54,7 @@ tools are pinned in the separate `tools` module
 ## Smoke test
 
 ```sh
-go run ./cmd/qed run --prompt "hello"
+go run ./cmd/qed run "hello"
 ```
 
 Expected output
@@ -66,8 +66,14 @@ hello
 Inspect every Run Event as JSON Lines
 
 ```sh
-go run ./cmd/qed run --prompt "hello" --output jsonl
+go run ./cmd/qed exec --json "hello"
 ```
+
+`qed` opens an idle TUI, while `qed "prompt"` opens the same TUI and starts
+the first Run immediately. `exec` is an alias for the non-interactive `run`
+command. Common short options are `-m` for `--model`, `-C` for `--cd`, and
+`-v` for `--verbose`. `--workspace` and `--cd` select the same configured
+Profile workspace and cannot be supplied together
 
 The echo Provider emits the complete lifecycle, including `run.started`, user
 and model events, text deltas, and `run.completed`
@@ -95,7 +101,7 @@ access token. See [Context compilation, compression, and prompt caching](docs/co
 Enable safe structured diagnostics on stderr with the root flag
 
 ```sh
-go run ./cmd/qed --verbose run --prompt "hello"
+go run ./cmd/qed run -v "hello"
 ```
 
 Verbose mode propagates through Runtime, Extension Host, Initialize RPC, and the
@@ -120,7 +126,7 @@ export OPENAI_API_KEY="<token>"
 go run ./cmd/qed run \
   --provider openai-responses \
   --model "<model-id>" \
-  --prompt "Reply with a short greeting"
+  "Reply with a short greeting"
 ```
 
 ```sh
@@ -129,7 +135,7 @@ go run ./cmd/qed run \
   --provider anthropic \
   --model "<model-id>" \
   --max-output-tokens 1024 \
-  --prompt "Reply with a short greeting"
+  "Reply with a short greeting"
 ```
 
 For a trusted OpenAI-compatible endpoint, pass the API base URL rather than an
@@ -140,7 +146,7 @@ go run ./cmd/qed run \
   --provider openai-chat \
   --base-url "http://127.0.0.1:8080/v1" \
   --model "local-model" \
-  --prompt "hello"
+  "hello"
 ```
 
 Custom base URLs never receive the default OpenAI or Anthropic credential. Set
@@ -159,7 +165,7 @@ go run ./cmd/qed run \
   --provider openai-codex \
   --auth-profile personal \
   --model "<codex-model-id>" \
-  --prompt "Reply with a short greeting"
+  "Reply with a short greeting"
 ```
 
 For a headless machine, use `qed auth login --device-code`. Inspect profile
@@ -216,7 +222,7 @@ OpenAI-compatible coordinator can use an Anthropic subagent
 ```sh
 export PRIMARY_API_TOKEN="<token>"
 export REVIEW_API_TOKEN="<token>"
-go run ./cmd/qed run --config ./qed.json --prompt "Review this plan"
+go run ./cmd/qed run --config ./qed.json "Review this plan"
 ```
 
 Use `--agent <id>` to override `default_agent`. Configuration contains
@@ -290,9 +296,9 @@ Extension Protocol v2, including the single-binary self-exec mode
 export MODEL_API_TOKEN="<token>"
 go run ./cmd/qed run \
   --config ./qed.json \
-  --workspace . \
+  --cd . \
   --session-id work-1 \
-  --prompt "Find the failing test, fix it, and run the relevant checks"
+  "Find the failing test, fix it, and run the relevant checks"
 ```
 
 The Profile accepts workspace-relative file paths, requires digest or absence
@@ -340,7 +346,7 @@ go run ./cmd/qed run \
   --config ./qed.json \
   --approval prompt \
   --session-id work-1 \
-  --prompt "Run the relevant checks"
+  "Run the relevant checks"
 ```
 
 Approval creates `run.waiting` and `run.resumed` Events. If the process stops
@@ -355,14 +361,13 @@ Configured Runs, every completed Run in a configured TUI chat, and resumed Runs
 save a separate Evidence Bundle when an Evidence Store is configured
 
 ```sh
-go run ./cmd/qed run inspect <run-id> --store .qed/evidence
-go run ./cmd/qed run export <run-id> --store .qed/evidence
+go run ./cmd/qed evidence inspect <run-id> --store .qed/evidence
+go run ./cmd/qed evidence export <run-id> --store .qed/evidence
 go run ./cmd/qed context inspect <run-id> --store .qed/evidence
 go run ./cmd/qed context explain <run-id> --store .qed/evidence
 ```
 
-The equivalent `qed evidence inspect` and `qed evidence export` commands are
-also available. `qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after
+`qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after
 RUN_ID[@EVENT_SEQUENCE]` compares two compaction decisions without printing
 message, path, command, or Evidence object content
 `context inspect` and `context explain` also report which hierarchical
@@ -371,14 +376,17 @@ Checkpoint levels entered each compiled model view
 ## Experimental TUI
 
 ```sh
-go run ./cmd/qed tui --prompt "hello"
+go run ./cmd/qed
+go run ./cmd/qed "hello"
 ```
 
-The TUI also accepts `--config`, `--agent`, `--workspace`, and `--session-id`
-and uses the same configured Agent graph. Type a message and press Enter to
-steer an active Run or start a follow-up after it finishes. When a Run waits
-for approval, press `Y` to approve or `N` to deny. Ctrl-C cancels only the
-current Run and keeps the chat open; Escape exits and cancels an active Run
+The explicit `qed tui [PROMPT]` form is also available. The TUI accepts
+`--config`, `--agent`, `--workspace` or `--cd`, and `--session-id`, and uses
+the same configured Agent graph. Without a prompt it waits without starting a
+Run. Type a message and press Enter to start the first Run, steer an active Run,
+or start a follow-up after it finishes. When a Run waits for approval, press
+`Y` to approve or `N` to deny. Ctrl-C cancels only the current Run and keeps the
+chat open; Escape exits and cancels an active Run
 
 The view keeps recent user and assistant messages, streams assistant text, and
 shows content-free Run activity with Agent, Session, Run, Tool, and approval

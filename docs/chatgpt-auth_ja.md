@@ -46,7 +46,7 @@ qed run \
   --provider openai-codex \
   --auth-profile personal \
   --model "<codex-model-id>" \
-  --prompt "Reply with a short greeting"
+  "Reply with a short greeting"
 ```
 
 同等のProvider profileは次のとおりです

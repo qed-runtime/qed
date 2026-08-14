@@ -3,7 +3,7 @@
 QED constructs Provider profiles, process-isolated Extensions, execution
 Profiles, Stores, and an Agent graph from one strict JSON document
 
-The format is used by `qed run`, `qed tui`, and `qed session resume`
+The format is used by `qed`, `qed tui`, `qed run`, and `qed session resume`
 
 ## Complete example
 
@@ -131,9 +131,9 @@ export PRIMARY_API_TOKEN="<token>"
 export REVIEW_API_TOKEN="<token>"
 go run ./cmd/qed run \
   --config ./qed.json \
-  --workspace . \
+  --cd . \
   --session-id review-1 \
-  --prompt "Propose a migration plan"
+  "Propose a migration plan"
 ```
 
 ## Top-level fields
@@ -155,8 +155,8 @@ go run ./cmd/qed run \
 If `default_agent` is absent, the CLI requires `--agent`
 
 All relative paths are resolved against the directory containing the JSON file,
-except `--workspace`, which is an Adapter input and defaults to the current
-directory
+except `--workspace` and its `--cd`/`-C` equivalent, which are Adapter inputs
+and default to the current directory
 
 ## Provider profiles
 
@@ -213,7 +213,7 @@ named profile must already exist when configuration is loaded
 
 ```sh
 qed auth login --auth-profile personal
-qed run --config qed.json --prompt "Reply with a short greeting"
+qed run --config qed.json "Reply with a short greeting"
 ```
 
 See [ChatGPT subscription authentication](chatgpt-auth.md) for credential
@@ -682,7 +682,7 @@ usage, config/workspace digests, and host-owned Tool trace records. The same
 Store keeps authorization-bound content-addressed objects used by context
 compression. Object references bind tenant, Session or ephemeral Run,
 execution Profile, required capabilities, and sensitivity without storing the
-raw scope values. Inspect or export Bundles with either command family
+raw scope values. Inspect or export Bundles with the `evidence` command
 
 Tool trace payloads are represented by digests, but public Events retain their
 normal observable payload. A Bundle may therefore contain prompts, assistant
@@ -690,8 +690,6 @@ messages, Tool arguments, Tool output, wait payloads, and errors. Store it with
 the same care as Session data
 
 ```sh
-qed run inspect <run-id> --store .qed/evidence
-qed run export <run-id> --store .qed/evidence
 qed evidence inspect <run-id> --store .qed/evidence
 qed evidence export <run-id> --store .qed/evidence
 qed evidence fetch sha256:<digest> --run-id <run-id> --store .qed/evidence
@@ -739,16 +737,21 @@ is separate from Agent Sessions and Evidence
 ## CLI scope and verbose diagnostics
 
 `--config` conflicts with inline `--provider`, `--model`, `--base-url`,
-`--auth-profile`, `--system`, and `--max-output-tokens`. `--agent`, `--workspace`, and
-`--session-id` require `--config`. `--approval` is available on non-interactive
-configured Runs; configured TUI approval uses `Y` and `N`
+`--auth-profile`, `--system`, and `--max-output-tokens`. `--agent`, `--workspace`
+or `--cd`, and `--session-id` require `--config`. `--workspace` and `--cd`
+select the same root and cannot be combined. `--approval` is available on
+non-interactive configured Runs; configured TUI approval uses `Y` and `N`
 
-Place the root `--verbose` flag before the subcommand
+The inherited `--verbose`/`-v` flag can appear before or after a subcommand
 
 ```sh
-qed --verbose run --config qed.json --prompt "inspect this project"
-qed --verbose tui --config qed.json --prompt "inspect this project"
+qed run -v --config qed.json "inspect this project"
+qed -v --config qed.json "inspect this project"
 ```
+
+`qed [PROMPT]` opens the TUI, `qed run PROMPT` runs non-interactively, and
+`qed exec PROMPT` is an alias for `run`. `--json` is the JSONL shortcut for a
+non-interactive Run, and `-m` is the short form of `--model`
 
 The boolean propagates to every configured Runtime and the final Extension
 Server. Diagnostics are structured on stderr and exclude content-bearing or

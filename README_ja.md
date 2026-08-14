@@ -43,7 +43,7 @@ NagiはCLIとTUI Adapter内に限定され、その型はRuntime API境界を越
 ## Smoke test
 
 ```sh
-go run ./cmd/qed run --prompt "hello"
+go run ./cmd/qed run "hello"
 ```
 
 期待する出力
@@ -55,8 +55,13 @@ hello
 すべてのRun EventをJSON Linesで確認できます
 
 ```sh
-go run ./cmd/qed run --prompt "hello" --output jsonl
+go run ./cmd/qed exec --json "hello"
 ```
+
+`qed`は入力待ちのTUIを開き、`qed "prompt"`は同じTUIを開いて最初のRunをすぐ開始します
+`exec`は非対話`run` commandのaliasです
+共通short optionは`--model`の`-m`、`--cd`の`-C`、`--verbose`の`-v`です
+`--workspace`と`--cd`は同じ設定Profile workspaceを選択し、同時には指定できません
 
 echo Providerは`run.started`、userとmodelのEvent、text delta、`run.completed`を含む完全なlifecycleを出力します
 
@@ -80,7 +85,7 @@ content digest自体はaccess tokenではありません
 root flagでstderrへの安全な構造化diagnosticsを有効にできます
 
 ```sh
-go run ./cmd/qed --verbose run --prompt "hello"
+go run ./cmd/qed run -v "hello"
 ```
 
 verbose modeはRuntime、Extension Host、Initialize RPC、Extension Serverへ伝搬します
@@ -103,7 +108,7 @@ export OPENAI_API_KEY="<token>"
 go run ./cmd/qed run \
   --provider openai-responses \
   --model "<model-id>" \
-  --prompt "Reply with a short greeting"
+  "Reply with a short greeting"
 ```
 
 ```sh
@@ -112,7 +117,7 @@ go run ./cmd/qed run \
   --provider anthropic \
   --model "<model-id>" \
   --max-output-tokens 1024 \
-  --prompt "Reply with a short greeting"
+  "Reply with a short greeting"
 ```
 
 信頼できるOpenAI互換endpointでは、operation URLではなくAPI base URLを渡します
@@ -122,7 +127,7 @@ go run ./cmd/qed run \
   --provider openai-chat \
   --base-url "http://127.0.0.1:8080/v1" \
   --model "local-model" \
-  --prompt "hello"
+  "hello"
 ```
 
 custom base URLへ既定のOpenAIまたはAnthropic credentialを送りません
@@ -140,7 +145,7 @@ go run ./cmd/qed run \
   --provider openai-codex \
   --auth-profile personal \
   --model "<codex-model-id>" \
-  --prompt "Reply with a short greeting"
+  "Reply with a short greeting"
 ```
 
 headless環境では`qed auth login --device-code`を利用します
@@ -194,7 +199,7 @@ Provider endpoint、protocol、model、credential参照を1つのprofileとし�
 ```sh
 export PRIMARY_API_TOKEN="<token>"
 export REVIEW_API_TOKEN="<token>"
-go run ./cmd/qed run --config ./qed.json --prompt "Review this plan"
+go run ./cmd/qed run --config ./qed.json "Review this plan"
 ```
 
 `--agent <id>`で`default_agent`を1回の実行だけ上書きできます
@@ -265,9 +270,9 @@ checked-in `extensions.lock`はこのbinary向けに再利用可能な`qed.works
 export MODEL_API_TOKEN="<token>"
 go run ./cmd/qed run \
   --config ./qed.json \
-  --workspace . \
+  --cd . \
   --session-id work-1 \
-  --prompt "Find the failing test, fix it, and run the relevant checks"
+  "Find the failing test, fix it, and run the relevant checks"
 ```
 
 Profileはworkspace相対pathを受け取り、編集時にdigestまたはabsence preconditionを必須とし、capability decisionとTool digestをhost所有Evidenceへ記録します
@@ -304,7 +309,7 @@ go run ./cmd/qed run \
   --config ./qed.json \
   --approval prompt \
   --session-id work-1 \
-  --prompt "Run the relevant checks"
+  "Run the relevant checks"
 ```
 
 承認は`run.waiting`と`run.resumed` Eventを生成します
@@ -317,24 +322,26 @@ go run ./cmd/qed session resume work-1 --config ./qed.json
 Evidence Storeが設定されている場合、設定Run、設定TUI chat内で完了した各Run、resume Runは個別のEvidence Bundleを保存します
 
 ```sh
-go run ./cmd/qed run inspect <run-id> --store .qed/evidence
-go run ./cmd/qed run export <run-id> --store .qed/evidence
+go run ./cmd/qed evidence inspect <run-id> --store .qed/evidence
+go run ./cmd/qed evidence export <run-id> --store .qed/evidence
 go run ./cmd/qed context inspect <run-id> --store .qed/evidence
 go run ./cmd/qed context explain <run-id> --store .qed/evidence
 ```
 
-同じ機能を`qed evidence inspect`と`qed evidence export`でも利用できます
 `qed context diff --before RUN_ID[@EVENT_SEQUENCE] --after RUN_ID[@EVENT_SEQUENCE]`はmessage、path、command、Evidence object contentを出力せず2つのcompaction判断を比較します
 `context inspect`と`context explain`では各compiled model viewへ入った階層Checkpoint levelも確認できます
 
 ## 実験的TUI
 
 ```sh
-go run ./cmd/qed tui --prompt "hello"
+go run ./cmd/qed
+go run ./cmd/qed "hello"
 ```
 
-TUIは`--config`、`--agent`、`--workspace`、`--session-id`にも対応し、同じ設定Agent graphを利用します
-messageを入力してEnterを押すとactive Runへsteeringし、完了後はfollow-upを開始します
+明示的な`qed tui [PROMPT]`形式も利用できます
+TUIは`--config`、`--agent`、`--workspace`または`--cd`、`--session-id`にも対応し、同じ設定Agent graphを利用します
+promptなしではRunを開始せず入力を待ちます
+messageを入力してEnterを押すと最初のRunを開始し、active Runへsteeringし、完了後はfollow-upを開始します
 Runが承認待ちになった場合は`Y`で許可、`N`で拒否します
 Ctrl-Cは現在のRunだけをcancelしてchatを維持し、Escapeはactive RunをcancelしてTUIを終了します
 

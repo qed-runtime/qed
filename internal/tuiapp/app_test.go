@@ -479,6 +479,150 @@ func TestMalformedApprovalCannotBeAcceptedOrRendered(t *testing.T) {
 	}
 }
 
+func TestIdleChatStartsFirstRunOnSubmit(t *testing.T) {
+	t.Parallel()
+
+	runtime, err := agent.NewRuntime(agent.Options{Provider: echo.New()})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	starts := 0
+	start := func(ctx context.Context, request agent.RunRequest) (*agent.RunHandle, error) {
+		starts++
+		return runtime.Run(ctx, request)
+	}
+	view := newIdleChatView(context.Background(), start, agent.RunRequest{AgentID: "echo"})
+	harness, err := tuitest.New(view, tui.Size{Width: 100, Height: 30}, mapEvent)
+	if err != nil {
+		t.Fatalf("tuitest.New: %v", err)
+	}
+	defer closeChatHarness(view, harness)
+
+	if starts != 0 || view.runNumber != 0 || !view.finished {
+		t.Fatalf("idle state = starts %d run %d finished %t", starts, view.runNumber, view.finished)
+	}
+	rendered := surfaceText(harness.LatestSurface())
+	if !strings.Contains(rendered, "Status: ready") || !strings.Contains(rendered, "Enter start") {
+		t.Fatalf("idle chat is not rendered as ready:\n%s", rendered)
+	}
+	if _, err := harness.RequestFocus(composerInputID); err != nil {
+		t.Fatalf("focus composer: %v", err)
+	}
+	if err := harness.Input([]byte("first message\r")); err != nil {
+		t.Fatalf("submit first message: %v", err)
+	}
+	if starts != 1 || view.runNumber != 1 {
+		t.Fatalf("started state = starts %d run %d", starts, view.runNumber)
+	}
+	waitForChat(t, harness, func() bool { return view.finished }, "first Run")
+
+	outcome := view.Outcome()
+	if len(outcome.Runs) != 1 || len(outcome.Result.Messages) != 2 ||
+		outcome.Result.Messages[0].Text != "first message" ||
+		outcome.Result.Messages[1].Text != "first message" {
+		t.Fatalf("idle chat Outcome = %#v", outcome)
+	}
+	rendered = surfaceText(harness.LatestSurface())
+	for _, expected := range []string{"You: first message", "Assistant: first message", "Enter follow-up"} {
+		if !strings.Contains(rendered, expected) {
+			t.Errorf("rendered surface does not contain %q:\n%s", expected, rendered)
+		}
+	}
+}
+
+func TestIdleChatRejectsSessionWithPendingInput(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewMemoryStore()
+	wait := agent.WaitRequest{ID: "pending-input", Kind: agent.WaitKindApproval}
+	if _, err := store.Append(context.Background(), "waiting-session", 0, []agent.Event{{
+		Type:        agent.EventRunWaiting,
+		WaitRequest: &wait,
+	}}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	starts := 0
+	start := func(context.Context, agent.RunRequest) (*agent.RunHandle, error) {
+		starts++
+		return nil, errors.New("unexpected start")
+	}
+	_, err := RunWithStarterOptions(
+		context.Background(),
+		start,
+		agent.RunRequest{AgentID: "echo", SessionID: "waiting-session"},
+		"",
+		ChatOptions{SessionStore: store},
+	)
+	if err == nil || !strings.Contains(err.Error(), "resume it before starting a new Run") {
+		t.Fatalf("RunWithStarterOptions error = %v", err)
+	}
+	if starts != 0 {
+		t.Fatalf("Run starts = %d, want 0", starts)
+	}
+}
+
+func TestIdleChatContinuesExistingSession(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewMemoryStore()
+	runtime, err := agent.NewRuntime(agent.Options{Provider: echo.New(), SessionStore: store})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	request := agent.RunRequest{
+		AgentID:   "echo",
+		SessionID: "idle-existing-session",
+		Input:     []agent.Message{{Role: agent.RoleUser, Text: "first"}},
+	}
+	handle, err := runtime.Run(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for range handle.Events() {
+	}
+	if result, waitErr := handle.Wait(); waitErr != nil || result.Status != agent.RunStatusCompleted {
+		t.Fatalf("Wait = %#v, %v", result, waitErr)
+	}
+	snapshot, err := store.Snapshot(context.Background(), request.SessionID)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	idleRequest := agent.RunRequest{AgentID: "echo", SessionID: request.SessionID}
+	view := newIdleChatView(context.Background(), runtime.Run, idleRequest)
+	view.seedIdleSession(snapshot, idleRequest)
+	harness, err := tuitest.New(view, tui.Size{Width: 100, Height: 30}, mapEvent)
+	if err != nil {
+		t.Fatalf("tuitest.New: %v", err)
+	}
+	defer closeChatHarness(view, harness)
+	rendered := surfaceText(harness.LatestSurface())
+	if !strings.Contains(rendered, "You: first") || !strings.Contains(rendered, "Status: ready") {
+		t.Fatalf("existing idle Session is not seeded:\n%s", rendered)
+	}
+	if _, err := harness.RequestFocus(composerInputID); err != nil {
+		t.Fatalf("focus composer: %v", err)
+	}
+	if err := harness.Input([]byte("second\r")); err != nil {
+		t.Fatalf("submit continuation: %v", err)
+	}
+	waitForChat(t, harness, func() bool { return view.finished }, "continued Run")
+
+	snapshot, err = store.Snapshot(context.Background(), request.SessionID)
+	if err != nil {
+		t.Fatalf("continued Snapshot: %v", err)
+	}
+	wantMessages := []agent.Message{
+		{Role: agent.RoleUser, Text: "first"},
+		{Role: agent.RoleAssistant, Text: "first", StopReason: agent.StopReasonEndTurn},
+		{Role: agent.RoleUser, Text: "second"},
+		{Role: agent.RoleAssistant, Text: "second", StopReason: agent.StopReasonEndTurn},
+	}
+	if !equalChatMessages(snapshot.Messages, wantMessages) {
+		t.Fatalf("continued Session Messages = %#v", snapshot.Messages)
+	}
+}
+
 func TestChatFollowUpUsesPersistentSession(t *testing.T) {
 	t.Parallel()
 

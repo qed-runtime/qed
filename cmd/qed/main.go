@@ -41,8 +41,9 @@ import (
 )
 
 const (
-	promptValueID            = "prompt"
+	promptArgumentID         = "prompt"
 	outputValueID            = "output"
+	jsonOutputValueID        = "json"
 	providerValueID          = "provider"
 	modelValueID             = "model"
 	baseURLValueID           = "base-url"
@@ -54,6 +55,7 @@ const (
 	configValueID            = "config"
 	agentValueID             = "agent"
 	workspaceValueID         = "workspace"
+	cdValueID                = "cd"
 	approvalValueID          = "approval"
 	sessionIDValueID         = "session-id"
 	sessionIDArgumentID      = "session-id-argument"
@@ -270,14 +272,18 @@ func defaultCommandDependencies() commandDependencies {
 }
 
 func application(dependencies commandDependencies) *cli.Command {
-	return cli.NewCommand("qed").
+	command := cli.NewCommand("qed").
 		About("Run embeddable QED agents").
 		Option(
 			cli.Flag(verboseValueID).
 				Long("verbose").
+				Short('v').
+				Inherited().
 				Help("Write structured debug diagnostics to stderr"),
 		).
-		RequireSubcommand().
+		Validator(validateRootInteractiveOptionScope)
+	command = withInteractiveAgentOptions(command, dependencies, "qed")
+	return command.
 		Subcommand(runAgentCommand(dependencies)).
 		Subcommand(runTUICommand(dependencies)).
 		Subcommand(authCommand(dependencies)).
@@ -902,11 +908,12 @@ func newDebugLogger(enabled bool, writer io.Writer, component string) *slog.Logg
 
 func runAgentCommand(dependencies commandDependencies) *cli.Command {
 	command := cli.NewCommand("run").
+		Alias("exec").
 		About("Run one non-interactive Agent turn").
-		Option(
-			cli.ValueOption(promptValueID).
-				Long("prompt").
+		Argument(
+			cli.Positional(promptArgumentID).
 				Parser(cli.StringParser()).
+				Required().
 				Help("User prompt"),
 		).
 		Option(
@@ -915,6 +922,12 @@ func runAgentCommand(dependencies commandDependencies) *cli.Command {
 				Parser(cli.PossibleValuesParser("text", "jsonl")).
 				Default("text").
 				Help("Output format"),
+		).
+		Option(
+			cli.Flag(jsonOutputValueID).
+				Long("json").
+				ConflictsSupplied(outputValueID).
+				Help("Write the Run Event stream as JSONL"),
 		).
 		Option(
 			cli.ValueOption(configValueID).
@@ -943,6 +956,15 @@ func runAgentCommand(dependencies commandDependencies) *cli.Command {
 				Help("Workspace root for configured Profiles, defaulting to the current directory"),
 		).
 		Option(
+			cli.ValueOption(cdValueID).
+				Long("cd").
+				Short('C').
+				Parser(cli.StringParser()).
+				RequiresSupplied(configValueID).
+				Help("Use this directory as the configured Profile workspace"),
+		).
+		OptionGroup(cli.AtMostOne("workspace-root", workspaceValueID, cdValueID)).
+		Option(
 			cli.ValueOption(approvalValueID).
 				Long("approval").
 				Parser(cli.PossibleValuesParser("deny", "prompt")).
@@ -958,23 +980,24 @@ func runAgentCommand(dependencies commandDependencies) *cli.Command {
 				Help("Persist this turn in the configured Session Store"),
 		)
 	command = withProviderOptions(command).
-		Validator(validatePrompt).
+		Validator(validateRequiredPrompt).
 		Validator(validateAgentConfigOptions).
 		Validator(validateProviderOptions).
-		Example("text output", "qed run --prompt hello").
-		Example("configured Agent", "qed run --config qed.json --agent coordinator --workspace . --prompt hello").
-		Example("interactive approval", "qed run --config qed.json --approval prompt --prompt hello").
-		Example("OpenAI response", "qed run --provider openai-responses --model MODEL --prompt hello").
-		Example("ChatGPT Codex response", "qed run --provider openai-codex --auth-profile personal --model MODEL --prompt hello").
-		Example("event output", "qed run --prompt hello --output jsonl").
+		Example("text output", `qed run "hello"`).
+		Example("configured Agent", `qed run --config qed.json --agent coordinator --cd . "hello"`).
+		Example("interactive approval", `qed run --config qed.json --approval prompt "hello"`).
+		Example("OpenAI response", `qed run --provider openai-responses --model MODEL "hello"`).
+		Example("ChatGPT Codex response", `qed run --provider openai-codex --auth-profile personal --model MODEL "hello"`).
+		Example("event output", `qed exec --json "hello"`).
 		Handle(func(commandContext *cli.Context, invocation *cli.Invocation) (cli.Outcome, error) {
-			prompt, diagnostic := requiredString(invocation, promptValueID)
-			if diagnostic != nil {
-				return cli.Outcome{}, diagnostic
-			}
+			prompt := optionalString(invocation, promptArgumentID)
 			output, diagnostic := requiredString(invocation, outputValueID)
 			if diagnostic != nil {
 				return cli.Outcome{}, diagnostic
+			}
+			jsonOutput, _ := invocation.Flag(jsonOutputValueID)
+			if jsonOutput {
+				output = "jsonl"
 			}
 
 			configPath := optionalString(invocation, configValueID)
@@ -992,7 +1015,7 @@ func runAgentCommand(dependencies commandDependencies) *cli.Command {
 					terminalApprover = configuredApprover
 					approver = capability.WaitApprover{}
 				}
-				workspaceRoot := optionalString(invocation, workspaceValueID)
+				workspaceRoot := configuredWorkspaceRoot(invocation)
 				if workspaceRoot == "" {
 					workspaceRoot = commandContext.CurrentDirectory()
 				}
@@ -1082,21 +1105,28 @@ func runAgentCommand(dependencies commandDependencies) *cli.Command {
 				return cli.Outcome{}, err
 			}
 			return cli.Success(), nil
-		}).
-		Subcommand(inspectEvidenceCommand()).
-		Subcommand(exportEvidenceCommand())
+		})
 	return command
 }
 
 func runTUICommand(dependencies commandDependencies) *cli.Command {
-	command := cli.NewCommand("tui").
-		About("Run a multi-turn Agent chat in an interactive terminal").
-		Option(
-			cli.ValueOption(promptValueID).
-				Long("prompt").
+	return withInteractiveAgentOptions(
+		cli.NewCommand("tui").About("Run a multi-turn Agent chat in an interactive terminal"),
+		dependencies,
+		"qed tui",
+	)
+}
+
+func withInteractiveAgentOptions(
+	command *cli.Command,
+	dependencies commandDependencies,
+	exampleCommand string,
+) *cli.Command {
+	command = command.
+		Argument(
+			cli.Positional(promptArgumentID).
 				Parser(cli.StringParser()).
-				Required().
-				Help("User prompt"),
+				Help("Optional initial user prompt"),
 		).
 		Option(
 			cli.ValueOption(configValueID).
@@ -1125,6 +1155,15 @@ func runTUICommand(dependencies commandDependencies) *cli.Command {
 				Help("Workspace root for configured Profiles, defaulting to the current directory"),
 		).
 		Option(
+			cli.ValueOption(cdValueID).
+				Long("cd").
+				Short('C').
+				Parser(cli.StringParser()).
+				RequiresSupplied(configValueID).
+				Help("Use this directory as the configured Profile workspace"),
+		).
+		OptionGroup(cli.AtMostOne("workspace-root", workspaceValueID, cdValueID)).
+		Option(
 			cli.ValueOption(sessionIDValueID).
 				Long("session-id").
 				Parser(cli.StringParser()).
@@ -1132,18 +1171,16 @@ func runTUICommand(dependencies commandDependencies) *cli.Command {
 				Help("Persist this chat in the configured Session Store"),
 		)
 	command = withProviderOptions(command).
-		Validator(validatePrompt).
+		Validator(validateOptionalPrompt).
 		Validator(validateAgentConfigOptions).
 		Validator(validateProviderOptions).
-		Example("interactive Agent chat", "qed tui --prompt hello").
+		Example("empty chat", exampleCommand).
+		Example("prompted chat", exampleCommand+` "hello"`).
 		Handle(func(commandContext *cli.Context, invocation *cli.Invocation) (cli.Outcome, error) {
-			prompt, diagnostic := requiredString(invocation, promptValueID)
-			if diagnostic != nil {
-				return cli.Outcome{}, diagnostic
-			}
+			prompt := optionalString(invocation, promptArgumentID)
 			configPath := optionalString(invocation, configValueID)
 			if configPath != "" {
-				workspaceRoot := optionalString(invocation, workspaceValueID)
+				workspaceRoot := configuredWorkspaceRoot(invocation)
 				if workspaceRoot == "" {
 					workspaceRoot = commandContext.CurrentDirectory()
 				}
@@ -1184,7 +1221,7 @@ func runTUICommand(dependencies commandDependencies) *cli.Command {
 					agent.RunRequest{
 						AgentID:   agentID,
 						SessionID: sessionID,
-						Input:     []agent.Message{{Role: agent.RoleUser, Text: prompt}},
+						Input:     initialPromptMessages(prompt),
 					},
 					prompt,
 					tuiapp.ChatOptions{SessionStore: configured.SessionStore},
@@ -1236,7 +1273,7 @@ func runTUICommand(dependencies commandDependencies) *cli.Command {
 				agent.RunRequest{
 					AgentID:      config.provider,
 					Instructions: config.instructions,
-					Input:        []agent.Message{{Role: agent.RoleUser, Text: prompt}},
+					Input:        initialPromptMessages(prompt),
 				},
 				prompt,
 				tuiapp.ChatOptions{},
@@ -1944,6 +1981,7 @@ func withProviderOptions(command *cli.Command) *cli.Command {
 		Option(
 			cli.ValueOption(modelValueID).
 				Long("model").
+				Short('m').
 				Parser(cli.StringParser()).
 				Help("Exact model identifier for a model-backed Provider"),
 		).
@@ -1974,23 +2012,61 @@ func withProviderOptions(command *cli.Command) *cli.Command {
 		)
 }
 
-func validatePrompt(invocation *cli.Invocation) *cli.Diagnostic {
-	path := invocation.CommandPath()
-	if len(path) > 0 && path[len(path)-1] != "run" {
-		return nil
-	}
-	prompt, ok := cli.ValueAs[string](invocation, promptValueID)
+func validateRequiredPrompt(invocation *cli.Invocation) *cli.Diagnostic {
+	prompt, ok := cli.ValueAs[string](invocation, promptArgumentID)
 	if !ok {
-		return cli.NewDiagnostic(cli.CodeMissingRequired, `required option "--prompt" is missing`).
-			WithCategory(cli.CategoryUsage).
-			WithTarget(cli.OptionTarget(promptValueID))
+		return nil
 	}
 	if strings.TrimSpace(prompt) != "" {
 		return nil
 	}
-	return cli.NewDiagnostic(cli.CodeValidation, "--prompt must not be empty").
+	return cli.NewDiagnostic(cli.CodeValidation, "prompt must not be empty").
 		WithCategory(cli.CategoryUsage).
-		WithTarget(cli.OptionTarget(promptValueID))
+		WithTarget(cli.ArgumentTarget(promptArgumentID))
+}
+
+func validateRootInteractiveOptionScope(invocation *cli.Invocation) *cli.Diagnostic {
+	path := invocation.CommandPath()
+	if len(path) <= 1 {
+		return nil
+	}
+	for _, option := range []struct {
+		id   string
+		name string
+	}{
+		{id: configValueID, name: "--config"},
+		{id: agentValueID, name: "--agent"},
+		{id: workspaceValueID, name: "--workspace"},
+		{id: cdValueID, name: "--cd"},
+		{id: sessionIDValueID, name: "--session-id"},
+		{id: providerValueID, name: "--provider"},
+		{id: modelValueID, name: "--model"},
+		{id: baseURLValueID, name: "--base-url"},
+		{id: authProfileValueID, name: "--auth-profile"},
+		{id: instructionsValueID, name: "--system"},
+		{id: maxOutputTokensValueID, name: "--max-output-tokens"},
+	} {
+		if !invocation.Supplied(option.id) {
+			continue
+		}
+		return cli.NewDiagnostic(
+			cli.CodeValidation,
+			fmt.Sprintf("%s configures the root TUI; place it after subcommand %q", option.name, path[1]),
+		).
+			WithCategory(cli.CategoryUsage).
+			WithTarget(cli.OptionTarget(option.id))
+	}
+	return nil
+}
+
+func validateOptionalPrompt(invocation *cli.Invocation) *cli.Diagnostic {
+	prompt, ok := cli.ValueAs[string](invocation, promptArgumentID)
+	if !ok || strings.TrimSpace(prompt) != "" {
+		return nil
+	}
+	return cli.NewDiagnostic(cli.CodeValidation, "prompt must not be empty").
+		WithCategory(cli.CategoryUsage).
+		WithTarget(cli.ArgumentTarget(promptArgumentID))
 }
 
 func validateProviderOptions(invocation *cli.Invocation) *cli.Diagnostic {
@@ -2068,6 +2144,14 @@ func validateAgentConfigOptions(invocation *cli.Invocation) *cli.Diagnostic {
 				WithTarget(cli.OptionTarget(workspaceValueID))
 		}
 	}
+	if invocation.Supplied(cdValueID) {
+		workspaceRoot, _ := cli.ValueAs[string](invocation, cdValueID)
+		if strings.TrimSpace(workspaceRoot) == "" {
+			return cli.NewDiagnostic(cli.CodeValidation, "--cd must not be empty").
+				WithCategory(cli.CategoryUsage).
+				WithTarget(cli.OptionTarget(cdValueID))
+		}
+	}
 	if invocation.Supplied(sessionIDValueID) {
 		sessionID, _ := cli.ValueAs[string](invocation, sessionIDValueID)
 		if strings.TrimSpace(sessionID) != sessionID || sessionID == "" {
@@ -2135,6 +2219,20 @@ func runtimeConfiguration(
 func optionalString(invocation *cli.Invocation, valueID string) string {
 	value, _ := cli.ValueAs[string](invocation, valueID)
 	return value
+}
+
+func configuredWorkspaceRoot(invocation *cli.Invocation) string {
+	if invocation.Supplied(cdValueID) {
+		return optionalString(invocation, cdValueID)
+	}
+	return optionalString(invocation, workspaceValueID)
+}
+
+func initialPromptMessages(prompt string) []agent.Message {
+	if prompt == "" {
+		return nil
+	}
+	return []agent.Message{{Role: agent.RoleUser, Text: prompt}}
 }
 
 func requiredString(invocation *cli.Invocation, valueID string) (string, *cli.Diagnostic) {

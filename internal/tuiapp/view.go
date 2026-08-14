@@ -279,7 +279,22 @@ func (view *runView) seedCurrentSession(
 	presentation.status = "starting"
 	presentation.queueUserMessage(prompt)
 	view.presentation = presentation
+	view.seedComposerHistory(snapshot)
+	view.recordComposerHistory(prompt)
+}
 
+func (view *runView) seedIdleSession(snapshot agent.SessionSnapshot, request agent.RunRequest) {
+	presentation := presentationFromSnapshot(snapshot)
+	presentation.identity.runID = ""
+	presentation.identity.agentID = diagnosticText(request.AgentID)
+	presentation.identity.sessionID = diagnosticText(request.SessionID)
+	presentation.status = "ready"
+	view.presentation = presentation
+	view.baseRequest.Input = nil
+	view.seedComposerHistory(snapshot)
+}
+
+func (view *runView) seedComposerHistory(snapshot agent.SessionSnapshot) {
 	view.composerHistory, _ = widget.NewComposerHistory(nil)
 	view.composer = widget.NewComposerStateAtEnd("")
 	view.nextHistoryID = 1
@@ -295,5 +310,4 @@ func (view *runView) seedCurrentSession(
 	for index := len(prior) - 1; index >= 0; index-- {
 		view.recordComposerHistory(prior[index])
 	}
-	view.recordComposerHistory(prompt)
 }

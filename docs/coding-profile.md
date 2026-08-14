@@ -165,7 +165,7 @@ go run ./cmd/qed run \
   --config ./qed.json \
   --workspace . \
   --session-id coding-1 \
-  --prompt "Fix the failing test and run the relevant checks"
+  "Fix the failing test and run the relevant checks"
 ```
 
 The workspace is an Adapter input rather than a machine-specific value in the

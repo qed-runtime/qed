@@ -135,7 +135,7 @@ go run ./cmd/qed run \
   --config ./qed.json \
   --workspace . \
   --session-id coding-1 \
-  --prompt "Fix the failing test and run the relevant checks"
+  "Fix the failing test and run the relevant checks"
 ```
 
 workspaceはJSON file内のmachine固有値ではなくAdapter inputです
