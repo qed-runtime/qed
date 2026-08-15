@@ -21,6 +21,14 @@ type DynamicCapabilities interface {
 	RequiredCapabilities(ctx context.Context, call agent.ToolCall) ([]capability.Name, error)
 }
 
+// ApprovalPreviewer describes one validated Tool invocation before approval
+//
+// Preview generation must not mutate external state. The host validates and
+// binds the returned content to the exact Tool arguments before displaying it
+type ApprovalPreviewer interface {
+	ApprovalPreview(ctx context.Context, call agent.ToolCall) (*capability.ApprovalPreview, error)
+}
+
 // ToolOptions configures one host-side Extension Tool Proxy
 type ToolOptions struct {
 	Tool agent.Tool
@@ -133,10 +141,13 @@ func (proxy *ToolProxy) Execute(ctx context.Context, call agent.ToolCall) (resul
 	}
 
 	request := capability.Request{
-		CallID:       call.ID,
-		Tool:         call.Name,
-		Capabilities: capabilities,
-		Arguments:    append([]byte(nil), call.Arguments...),
+		CallID:              call.ID,
+		Tool:                call.Name,
+		Capabilities:        capabilities,
+		Arguments:           append([]byte(nil), call.Arguments...),
+		ArgumentsDigest:     digest(call.Arguments),
+		ExtensionID:         definition.ExtensionID,
+		ExtensionGeneration: definition.ExtensionGeneration,
 	}
 	decision, err = proxy.policy.Evaluate(ctx, request)
 	if err != nil {
@@ -150,6 +161,11 @@ func (proxy *ToolProxy) Execute(ctx context.Context, call agent.ToolCall) (resul
 		if proxy.approver == nil {
 			return agent.ToolResult{}, fmt.Errorf("%w for Tool %q: %s", capability.ErrApprovalRequired, call.Name, decision.Reason)
 		}
+		preview, previewErr := proxy.approvalPreview(ctx, call)
+		if previewErr != nil {
+			return agent.ToolResult{}, fmt.Errorf("preview Tool %q for approval: %w", call.Name, previewErr)
+		}
+		request.Preview = preview
 		approved, approveErr := proxy.approver.Approve(ctx, request)
 		if approveErr != nil {
 			return agent.ToolResult{}, fmt.Errorf("approve Tool %q: %w", call.Name, approveErr)
@@ -177,6 +193,21 @@ func (proxy *ToolProxy) Execute(ctx context.Context, call agent.ToolCall) (resul
 	result.CallID = call.ID
 	result.Name = call.Name
 	return result, resultErr
+}
+
+func (proxy *ToolProxy) approvalPreview(ctx context.Context, call agent.ToolCall) (*capability.ApprovalPreview, error) {
+	previewer, ok := proxy.tool.(ApprovalPreviewer)
+	if !ok {
+		return nil, nil
+	}
+	preview, err := previewer.ApprovalPreview(ctx, call)
+	if err != nil {
+		return nil, err
+	}
+	if err := capability.ValidateApprovalPreview(preview); err != nil {
+		return nil, err
+	}
+	return capability.CloneApprovalPreview(preview), nil
 }
 
 func (proxy *ToolProxy) requiredCapabilities(ctx context.Context, call agent.ToolCall) ([]capability.Name, error) {

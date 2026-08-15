@@ -79,3 +79,26 @@ func TestToolResultContextOperationRoundTrip(t *testing.T) {
 		t.Fatalf("Tool result = %#v", result)
 	}
 }
+
+func TestApprovalPreviewRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	encoded, err := protocol.Marshal(protocol.ApprovalPreviewResponse{Preview: &protocol.ApprovalPreview{
+		Summary: "Run workspace verification",
+		Details: []protocol.ApprovalPreviewDetail{
+			{Label: "argv", Value: `["go","test","./..."]`},
+			{Label: "cwd", Value: "."},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response protocol.ApprovalPreviewResponse
+	if err := protocol.Unmarshal(encoded, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Preview == nil || response.Preview.Summary != "Run workspace verification" ||
+		len(response.Preview.Details) != 2 || response.Preview.Details[0].Label != "argv" {
+		t.Fatalf("ApprovalPreviewResponse = %#v", response)
+	}
+}

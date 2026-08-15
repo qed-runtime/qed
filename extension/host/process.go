@@ -673,6 +673,24 @@ func (tool *remoteTool) Definition() agent.ToolDefinition {
 	return definition
 }
 
+func (tool *remoteTool) ApprovalPreview(ctx context.Context, call agent.ToolCall) (*capability.ApprovalPreview, error) {
+	var response protocol.ApprovalPreviewResponse
+	if err := tool.process.call(ctx, protocol.MethodApprovalPreview, protocol.ApprovalPreviewRequest{
+		Call: toProtocolToolCall(call),
+	}, &response); err != nil {
+		var rpcError *protocol.RPCError
+		if errors.As(err, &rpcError) && rpcError.Code == protocol.ErrorCodeMethodNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	preview := toCapabilityApprovalPreview(response.Preview)
+	if err := capability.ValidateApprovalPreview(preview); err != nil {
+		return nil, fmt.Errorf("Extension returned invalid approval preview: %w", err)
+	}
+	return preview, nil
+}
+
 func (tool *remoteTool) Execute(ctx context.Context, call agent.ToolCall) (agent.ToolResult, error) {
 	run := protocol.RunInfo{}
 	if info, ok := agent.RunInfoFromContext(ctx); ok {
@@ -708,6 +726,20 @@ func toAgentContextOperation(operation *protocol.ContextOperation) *agent.Contex
 		return nil
 	}
 	return &agent.ContextOperation{Kind: agent.ContextOperationKind(operation.Kind)}
+}
+
+func toCapabilityApprovalPreview(preview *protocol.ApprovalPreview) *capability.ApprovalPreview {
+	if preview == nil {
+		return nil
+	}
+	result := &capability.ApprovalPreview{
+		Summary: preview.Summary,
+		Details: make([]capability.ApprovalPreviewDetail, len(preview.Details)),
+	}
+	for index, detail := range preview.Details {
+		result.Details[index] = capability.ApprovalPreviewDetail{Label: detail.Label, Value: detail.Value}
+	}
+	return result
 }
 
 type dynamicRemoteTool struct {

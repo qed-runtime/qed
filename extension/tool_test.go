@@ -77,11 +77,18 @@ func TestToolProxyRequiresAndRecordsApproval(t *testing.T) {
 	}
 
 	recorder := &evidence.MemoryRecorder{}
+	previewing := &previewingRecordingTool{}
 	withApprover, err := extension.NewTool(extension.ToolOptions{
-		Tool:   recordingTool{},
+		Tool:   previewing,
 		Policy: policy,
 		Approver: capability.ApproverFunc(func(_ context.Context, request capability.Request) (bool, error) {
-			return request.Tool == "record", nil
+			if request.Tool != "record" || request.ArgumentsDigest == "" ||
+				request.ExtensionID != "example.preview" || request.ExtensionGeneration != 7 ||
+				request.Preview == nil || request.Preview.Summary != "Record one value" ||
+				len(request.Preview.Details) != 1 || request.Preview.Details[0].Value != "approved" {
+				t.Fatalf("approval request = %#v", request)
+			}
+			return true, nil
 		}),
 		Recorder: recorder,
 	})
@@ -95,6 +102,38 @@ func TestToolProxyRequiresAndRecordsApproval(t *testing.T) {
 	records := recorder.ToolInvocations()
 	if len(records) != 1 || records[0].PolicyOutcome != "allow" || records[0].PolicyReason != "approval was granted" {
 		t.Fatalf("Evidence = %#v", records)
+	}
+	if previewing.previewCalls != 1 || previewing.executeCalls != 1 {
+		t.Fatalf("Tool calls = preview:%d execute:%d", previewing.previewCalls, previewing.executeCalls)
+	}
+}
+
+func TestToolProxyRejectsUnsafeApprovalPreviewBeforePrompt(t *testing.T) {
+	t.Parallel()
+
+	policy, err := capability.NewStaticPolicy(capability.StaticPolicyOptions{Ask: []capability.Name{capability.FilesystemRead}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approverCalls := 0
+	tool := &unsafePreviewTool{}
+	proxy, err := extension.NewTool(extension.ToolOptions{
+		Tool:   tool,
+		Policy: policy,
+		Approver: capability.ApproverFunc(func(context.Context, capability.Request) (bool, error) {
+			approverCalls++
+			return true, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = proxy.Execute(context.Background(), agent.ToolCall{ID: "unsafe", Name: "unsafe", Arguments: json.RawMessage(`{}`)})
+	if err == nil || !strings.Contains(err.Error(), "terminal control data") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if approverCalls != 0 || tool.executeCalls != 0 {
+		t.Fatalf("unsafe preview reached approval or execution = %d/%d", approverCalls, tool.executeCalls)
 	}
 }
 
@@ -169,6 +208,65 @@ func TestToolProxyRejectsInvalidContextOperation(t *testing.T) {
 
 type recordingTool struct {
 	operation *agent.ContextOperation
+}
+
+type previewingRecordingTool struct {
+	previewCalls int
+	executeCalls int
+}
+
+type unsafePreviewTool struct {
+	executeCalls int
+}
+
+func (*unsafePreviewTool) Definition() agent.ToolDefinition {
+	return agent.ToolDefinition{Name: "unsafe", Capabilities: []string{string(capability.FilesystemRead)}}
+}
+
+func (*unsafePreviewTool) ApprovalPreview(context.Context, agent.ToolCall) (*capability.ApprovalPreview, error) {
+	return &capability.ApprovalPreview{Summary: "unsafe\x1b[31m"}, nil
+}
+
+func (tool *unsafePreviewTool) Execute(context.Context, agent.ToolCall) (agent.ToolResult, error) {
+	tool.executeCalls++
+	return agent.ToolResult{Output: "unexpected"}, nil
+}
+
+func (*previewingRecordingTool) Definition() agent.ToolDefinition {
+	return agent.ToolDefinition{
+		Name:                "record",
+		Capabilities:        []string{string(capability.FilesystemRead)},
+		ExtensionID:         "example.preview",
+		ExtensionGeneration: 7,
+	}
+}
+
+func (tool *previewingRecordingTool) ApprovalPreview(
+	_ context.Context,
+	call agent.ToolCall,
+) (*capability.ApprovalPreview, error) {
+	tool.previewCalls++
+	var input struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(call.Arguments, &input); err != nil {
+		return nil, err
+	}
+	return &capability.ApprovalPreview{
+		Summary: "Record one value",
+		Details: []capability.ApprovalPreviewDetail{{Label: "value", Value: input.Value}},
+	}, nil
+}
+
+func (tool *previewingRecordingTool) Execute(_ context.Context, call agent.ToolCall) (agent.ToolResult, error) {
+	tool.executeCalls++
+	var input struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(call.Arguments, &input); err != nil {
+		return agent.ToolResult{}, err
+	}
+	return agent.ToolResult{Output: input.Value}, nil
 }
 
 func (recordingTool) Definition() agent.ToolDefinition {

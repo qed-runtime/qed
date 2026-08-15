@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -82,6 +83,12 @@ type runCommandTool struct {
 	environment    []string
 }
 
+type runCommandInput struct {
+	Argv      []string `json:"argv"`
+	CWD       string   `json:"cwd,omitempty"`
+	TimeoutMS int64    `json:"timeout_ms,omitempty"`
+}
+
 func (tool *runCommandTool) Definition() agent.ToolDefinition {
 	return agent.ToolDefinition{
 		Name:         RunCommandToolName,
@@ -91,32 +98,43 @@ func (tool *runCommandTool) Definition() agent.ToolDefinition {
 	}
 }
 
+// ApprovalPreview describes the exact argv, workspace-relative directory, and
+// effective timeout without executing the command
+func (tool *runCommandTool) ApprovalPreview(ctx context.Context, call agent.ToolCall) (*capability.ApprovalPreview, error) {
+	if ctx == nil {
+		return nil, errors.New("run_command preview context must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	input, timeout, err := tool.decode(call.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	release := tool.workspace.AcquireRead()
+	_, err = tool.workspace.ResolveDirectory(input.CWD)
+	release()
+	if err != nil {
+		return nil, fmt.Errorf("resolve run_command preview cwd: %w", err)
+	}
+	argv, err := json.Marshal(input.Argv)
+	if err != nil {
+		return nil, fmt.Errorf("encode run_command preview argv: %w", err)
+	}
+	return &capability.ApprovalPreview{
+		Summary: "Run an executable directly in the workspace",
+		Details: []capability.ApprovalPreviewDetail{
+			{Label: "argv", Value: string(argv)},
+			{Label: "cwd", Value: filepathSlash(filepath.Clean(input.CWD))},
+			{Label: "timeout", Value: strconv.FormatInt(timeout.Milliseconds(), 10) + "ms"},
+		},
+	}, nil
+}
+
 func (tool *runCommandTool) Execute(ctx context.Context, call agent.ToolCall) (agent.ToolResult, error) {
-	var input struct {
-		Argv      []string `json:"argv"`
-		CWD       string   `json:"cwd,omitempty"`
-		TimeoutMS int64    `json:"timeout_ms,omitempty"`
-	}
-	if err := jsonstrict.Decode(call.Arguments, maximumArgumentBytes, &input); err != nil {
-		return agent.ToolResult{}, fmt.Errorf("decode run_command arguments: %w", err)
-	}
-	if len(input.Argv) == 0 {
-		return agent.ToolResult{}, errors.New("run_command argv must not be empty")
-	}
-	for index, argument := range input.Argv {
-		if argument == "" || !utf8.ValidString(argument) || strings.IndexByte(argument, 0) >= 0 {
-			return agent.ToolResult{}, fmt.Errorf("run_command argv[%d] must be non-empty valid UTF-8 without NUL", index)
-		}
-	}
-	if input.CWD == "" {
-		input.CWD = "."
-	}
-	timeout := tool.defaultTimeout
-	if input.TimeoutMS != 0 {
-		if input.TimeoutMS < 0 || input.TimeoutMS > int64(tool.maximumTimeout/time.Millisecond) {
-			return agent.ToolResult{}, fmt.Errorf("run_command timeout_ms must be between 1 and %d", tool.maximumTimeout/time.Millisecond)
-		}
-		timeout = time.Duration(input.TimeoutMS) * time.Millisecond
+	input, timeout, err := tool.decode(call.Arguments)
+	if err != nil {
+		return agent.ToolResult{}, err
 	}
 
 	release := tool.workspace.AcquireWrite()
@@ -157,6 +175,35 @@ func (tool *runCommandTool) Execute(ctx context.Context, call agent.ToolCall) (a
 		IsError:          !response.Success,
 		ContextOperation: classifyContextOperation(input.Argv),
 	}, nil
+}
+
+func (tool *runCommandTool) decode(arguments json.RawMessage) (runCommandInput, time.Duration, error) {
+	var input runCommandInput
+	if err := jsonstrict.Decode(arguments, maximumArgumentBytes, &input); err != nil {
+		return runCommandInput{}, 0, fmt.Errorf("decode run_command arguments: %w", err)
+	}
+	if len(input.Argv) == 0 {
+		return runCommandInput{}, 0, errors.New("run_command argv must not be empty")
+	}
+	for index, argument := range input.Argv {
+		if argument == "" || !utf8.ValidString(argument) || strings.IndexByte(argument, 0) >= 0 {
+			return runCommandInput{}, 0, fmt.Errorf("run_command argv[%d] must be non-empty valid UTF-8 without NUL", index)
+		}
+	}
+	if input.CWD == "" {
+		input.CWD = "."
+	}
+	timeout := tool.defaultTimeout
+	if input.TimeoutMS != 0 {
+		if input.TimeoutMS < 0 || input.TimeoutMS > int64(tool.maximumTimeout/time.Millisecond) {
+			return runCommandInput{}, 0, fmt.Errorf(
+				"run_command timeout_ms must be between 1 and %d",
+				tool.maximumTimeout/time.Millisecond,
+			)
+		}
+		timeout = time.Duration(input.TimeoutMS) * time.Millisecond
+	}
+	return input, timeout, nil
 }
 
 func classifyContextOperation(argv []string) *agent.ContextOperation {

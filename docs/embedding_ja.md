@@ -140,6 +140,10 @@ outcome, err := host.Run(request.Context(), agent.RunRequest{
 handler errorはRunをcancelします
 handlerはlow-level handleを受け取るため、process内のapproval Adapterからwaiting Runをresumeしたり、Event drainを止めずにsteeringをqueueしたりできます
 
+Tool承認ではcustom `capability.Approver`がPolicy評価用の正確なargumentに加え、optionalでboundedな`ApprovalPreview`、full argument digest、pin済みExtension identityを受け取ります
+Approverはpreviewを表示してcontent-bearing dataとして保護し、raw `Request.Arguments`をlogへ出さないでください
+`capability.WaitApprover`はraw argumentを除外し、preview、digest、Extension identityを`run.waiting` payloadへ永続化するため、別processでも同じ対象を判断できます
+
 terminal `RunResult.ContextLedger`は受理済みEvent履歴から作るdeterministicな5 Ledger viewです
 `agent.BuildContextLedger`はordered Eventから同じviewを再構築し、`agent.ValidateContextLedger`はderived stateの改ざんを拒否します
 Constraint entryが正確なuser textを保持するためLedgerはcontent-bearingであり、Session Eventと同等に保護して保存および転送する必要があります

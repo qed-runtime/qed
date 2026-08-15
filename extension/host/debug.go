@@ -109,6 +109,7 @@ func allowedProtocolMethod(method protocol.Method) bool {
 		protocol.MethodDescribe,
 		protocol.MethodInitialize,
 		protocol.MethodRequiredCapabilities,
+		protocol.MethodApprovalPreview,
 		protocol.MethodInvokeTool,
 		protocol.MethodHandleEvent,
 		protocol.MethodInvokeCommand,

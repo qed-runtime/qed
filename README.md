@@ -353,6 +353,19 @@ Approval creates `run.waiting` and `run.resumed` Events. If the process stops
 while a JSONL Session is waiting, resume the exact pending Tool call without
 repeating the preceding Provider request
 
+When a Tool implements `extension.ApprovalPreviewer`, the Host asks it for a
+bounded, side-effect-free description only after Policy returns `ask`. The Host
+validates the preview and binds it to the exact argument digest, Extension ID,
+and pinned generation before the approval is persisted or displayed. Raw Tool
+arguments remain outside the wait payload. The built-in `apply_patch` preview
+shows validated file operations and line counts, while `run_command` shows the
+exact argv, workspace-relative directory, and effective timeout. An Extension
+without preview support remains usable and is shown as unavailable detail
+
+Approval previews are content-bearing and may contain paths or command
+arguments. Protect Session Events that contain them and do not place secrets in
+command arguments
+
 ```sh
 go run ./cmd/qed session resume work-1 --config ./qed.json
 ```
@@ -389,9 +402,13 @@ or start a follow-up after it finishes. When a Run waits for approval, press
 chat open; Escape exits and cancels an active Run
 
 The view keeps recent user and assistant messages, streams assistant text, and
-shows content-free Run activity with Agent, Session, Run, Tool, and approval
-capability metadata. Tool arguments, Tool output, raw wait payloads, and raw
-Run errors are not copied into the rendered view state
+shows Run activity with Agent, Session, Run, Tool, and approval capability
+metadata. During approval it also shows the bounded Tool-supplied preview,
+Extension generation, and argument digest. Failed Tool activity uses a small
+allowlist of safe failure classifications such as invalid patch, stale file,
+command failure, timeout, or permission denial. Raw Tool arguments, Tool
+output, raw wait payloads, and raw Run errors are not copied into rendered view
+state
 
 The multiline Composer uses Enter to submit and Shift-Enter, Alt-Enter, or
 Ctrl-O to insert a line break. Up and Down recall the bounded submission

@@ -274,6 +274,8 @@ func (state *state) handle(ctx context.Context, envelope protocol.Envelope) (any
 		return state.describe(envelope.Params)
 	case protocol.MethodRequiredCapabilities:
 		return state.requiredCapabilities(ctx, envelope.Params)
+	case protocol.MethodApprovalPreview:
+		return state.approvalPreview(ctx, envelope.Params)
 	case protocol.MethodInvokeTool:
 		return state.invokeTool(ctx, envelope.Params)
 	case protocol.MethodHandleEvent:
@@ -467,6 +469,47 @@ func (state *state) requiredCapabilities(ctx context.Context, params json.RawMes
 		return protocol.RequiredCapabilitiesResponse{Capabilities: result}, nil
 	}
 	return protocol.RequiredCapabilitiesResponse{}, nil
+}
+
+func (state *state) approvalPreview(ctx context.Context, params json.RawMessage) (any, *protocol.RPCError) {
+	var request protocol.ApprovalPreviewRequest
+	if err := protocol.Unmarshal(params, &request); err != nil {
+		return nil, rpcErrorFrom(protocol.ErrorCodeInvalidParams, err)
+	}
+	tool, call, finish, rpcFailure := state.beginToolCall(request.Call)
+	if rpcFailure != nil {
+		return nil, rpcFailure
+	}
+	defer finish()
+	previewer, ok := tool.(extension.ApprovalPreviewer)
+	if !ok {
+		return protocol.ApprovalPreviewResponse{}, nil
+	}
+	preview, err := previewer.ApprovalPreview(ctx, call)
+	if err != nil {
+		return nil, mapCallError(err)
+	}
+	if err := capability.ValidateApprovalPreview(preview); err != nil {
+		return nil, rpcErrorFrom(protocol.ErrorCodeExtensionRejected, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, mapCallError(err)
+	}
+	return protocol.ApprovalPreviewResponse{Preview: toProtocolApprovalPreview(preview)}, nil
+}
+
+func toProtocolApprovalPreview(preview *capability.ApprovalPreview) *protocol.ApprovalPreview {
+	if preview == nil {
+		return nil
+	}
+	result := &protocol.ApprovalPreview{
+		Summary: preview.Summary,
+		Details: make([]protocol.ApprovalPreviewDetail, len(preview.Details)),
+	}
+	for index, detail := range preview.Details {
+		result.Details[index] = protocol.ApprovalPreviewDetail{Label: detail.Label, Value: detail.Value}
+	}
+	return result
 }
 
 func (state *state) invokeTool(ctx context.Context, params json.RawMessage) (any, *protocol.RPCError) {

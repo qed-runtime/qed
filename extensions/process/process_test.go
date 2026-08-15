@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/qed-runtime/qed/agent"
+	"github.com/qed-runtime/qed/extension"
 	processextension "github.com/qed-runtime/qed/extensions/process"
 	"github.com/qed-runtime/qed/workspace"
 )
@@ -43,6 +44,44 @@ func TestRunCommandReturnsSeparatedBoundedOutput(t *testing.T) {
 	if !result.IsError || response.ExitCode != 3 || response.Success || response.Stdout != "stdo" || response.Stderr != "stde" ||
 		!response.StdoutTruncated || !response.StderrTruncated {
 		t.Fatalf("result/response = %#v / %#v", result, response)
+	}
+}
+
+func TestRunCommandApprovalPreviewShowsExactInvocationWithoutExecution(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tool := newTool(t, root, processextension.Options{
+		DefaultTimeout: 45 * time.Second,
+		MaximumTimeout: time.Minute,
+	})
+	previewer, ok := tool.(extension.ApprovalPreviewer)
+	if !ok {
+		t.Fatal("run_command does not expose ApprovalPreviewer")
+	}
+	arguments, err := json.Marshal(map[string]any{
+		"argv":       []string{"go", "test", "./internal/clistorage"},
+		"cwd":        "nested/.",
+		"timeout_ms": 30000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := previewer.ApprovalPreview(context.Background(), agent.ToolCall{Arguments: arguments})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview == nil || preview.Summary != "Run an executable directly in the workspace" || len(preview.Details) != 3 ||
+		preview.Details[0].Label != "argv" || preview.Details[0].Value != `["go","test","./internal/clistorage"]` ||
+		preview.Details[1].Label != "cwd" || preview.Details[1].Value != "nested" ||
+		preview.Details[2].Label != "timeout" || preview.Details[2].Value != "30000ms" {
+		t.Fatalf("ApprovalPreview() = %#v", preview)
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 1 || entries[0].Name() != "nested" {
+		t.Fatalf("preview changed workspace = %#v, %v", entries, err)
 	}
 }
 

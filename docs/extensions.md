@@ -93,6 +93,7 @@ Requests are multiplexed and responses may arrive out of order
 | `initialize` | Supply workspace, selected environment, opaque configuration, and verbose state |
 | `describe` | Register capabilities, Tools, Hooks, and Commands |
 | `required_capabilities` | Resolve Tool invocation-specific capabilities before authorization |
+| `approval_preview` | Return an optional bounded, side-effect-free description before approval |
 | `invoke_tool` | Execute an authorized Tool call with Run identity |
 | `handle_event` | Deliver one selected Run Event to a Hook |
 | `invoke_command` | Execute an authorized host-requested Command |
@@ -114,6 +115,22 @@ Each Tool declares a name, description, input schema, static capabilities, and
 whether it has invocation-specific capabilities. The Host asks for dynamic
 capabilities, evaluates the combined set through `capability.Policy`, obtains
 approval if required, and sends `invoke_tool` only after authorization
+
+A Tool may implement `extension.ApprovalPreviewer` to describe an invocation
+after Policy returns `ask` and before the Approver decides. Preview generation
+must validate the proposed operation without mutating external state. The Host
+accepts only valid UTF-8 without terminal control data, with a 512-byte summary,
+at most 64 labeled details, a 4 KiB per-value limit, and a 6 KiB aggregate text
+limit. It clones the result and binds the preview, exact argument digest,
+Extension identity, and pinned generation into the approval wait ID. Raw Tool
+arguments remain outside that wait payload
+
+Process-isolated Extensions expose the same optional contract through
+`approval_preview`. A peer without that method remains compatible and produces
+an unavailable-detail approval instead. Preview content may contain paths,
+commands, or other sensitive invocation metadata and must be protected like the
+corresponding Tool Call. A preview is descriptive input to a human decision,
+not proof that an Extension executable is trustworthy
 
 Runtime validates Provider-supplied arguments before dynamic capability
 resolution, Policy, approval, or Tool execution. The Extension server validates

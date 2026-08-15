@@ -23,6 +23,8 @@ import (
 	"github.com/qed-runtime/qed/session"
 )
 
+const testApprovalArgumentsDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func TestRunEventsReachView(t *testing.T) {
 	t.Parallel()
 
@@ -189,7 +191,7 @@ func TestSessionHistoryExcludesLiveAndDuplicateDescriptors(t *testing.T) {
 	}
 }
 
-func TestApprovalKeysResumePendingRunWithoutExposingPayload(t *testing.T) {
+func TestApprovalKeysResumePendingRunWithBoundPreview(t *testing.T) {
 	t.Parallel()
 
 	var response agent.WaitResponse
@@ -206,21 +208,30 @@ func TestApprovalKeysResumePendingRunWithoutExposingPayload(t *testing.T) {
 		WaitRequest: &agent.WaitRequest{
 			ID: "approval-1", Kind: agent.WaitKindApproval,
 			Prompt:  "payload prompt must not be rendered",
-			Payload: json.RawMessage(`{"tool":"read_file","capabilities":["workspace.read"]}`),
+			Payload: json.RawMessage(`{"tool":"read_file","capabilities":["workspace.read"],"arguments_digest":"` + testApprovalArgumentsDigest + `","extension_id":"qed.workspace","extension_generation":2,"preview":{"summary":"Read one workspace file","details":[{"label":"path","value":"README.md"}]}}`),
 		},
 	})})
 	if view.presentation.pendingApproval == nil ||
 		view.presentation.pendingApproval.tool != "read_file" ||
 		len(view.presentation.pendingApproval.capabilities) != 1 ||
-		view.presentation.pendingApproval.capabilities[0] != "workspace.read" {
+		view.presentation.pendingApproval.capabilities[0] != "workspace.read" ||
+		view.presentation.pendingApproval.argumentsDigest != testApprovalArgumentsDigest ||
+		view.presentation.pendingApproval.extensionID != "qed.workspace" ||
+		view.presentation.pendingApproval.extensionGeneration != 2 ||
+		view.presentation.pendingApproval.summary != "Read one workspace file" ||
+		len(view.presentation.pendingApproval.details) != 1 ||
+		view.presentation.pendingApproval.details[0].value != "README.md" {
 		t.Fatalf("pending approval = %#v", view.presentation.pendingApproval)
 	}
-	harness, err := tuitest.New(view, tui.Size{Width: 90, Height: 14}, mapEvent)
+	harness, err := tuitest.New(view, tui.Size{Width: 100, Height: 16}, mapEvent)
 	if err != nil {
 		t.Fatalf("tuitest.New: %v", err)
 	}
 	rendered := surfaceText(harness.LatestSurface())
-	if !strings.Contains(rendered, "Approval: Tool read_file [workspace.read]") ||
+	if !strings.Contains(rendered, "Approval: Tool read_file [workspace.read] via qed.workspace@2") ||
+		!strings.Contains(rendered, "Action: Read one workspace file") ||
+		!strings.Contains(rendered, "path: README.md") ||
+		!strings.Contains(rendered, "Arguments: "+testApprovalArgumentsDigest) ||
 		strings.Contains(rendered, "payload prompt must not be rendered") ||
 		strings.Contains(rendered, "approval-1") {
 		t.Fatalf("approval surface violates display contract:\n%s", rendered)
@@ -242,7 +253,9 @@ func TestApprovalKeysResumePendingRunWithoutExposingPayload(t *testing.T) {
 	if view.presentation.pendingApproval != nil || view.presentation.status != "resuming" {
 		t.Fatalf("view state = pending %#v status %q", view.presentation.pendingApproval, view.presentation.status)
 	}
-	if len(view.presentation.activities) != 1 || view.presentation.activities[0].state != activityStateApproved {
+	if len(view.presentation.activities) != 1 ||
+		view.presentation.activities[0].label != "Approval for Tool read_file: path README.md" ||
+		view.presentation.activities[0].state != activityStateApproved {
 		t.Fatalf("approval activity = %#v", view.presentation.activities)
 	}
 }
@@ -353,6 +366,71 @@ func TestAdapterMapsContentAndContentFreeDiagnostics(t *testing.T) {
 	}
 }
 
+func TestAdapterClassifiesToolFailuresWithoutRenderingRawOutput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		tool   string
+		result agent.ToolResult
+		want   string
+	}{
+		{
+			name: "invalid patch", tool: "apply_patch",
+			result: agent.ToolResult{IsError: true, Output: "Extension RPC error: parse apply_patch patch: secret-path"},
+			want:   "invalid patch",
+		},
+		{
+			name: "stale file", tool: "apply_patch",
+			result: agent.ToolResult{IsError: true, Output: "secret-path does not match the current file"},
+			want:   "file changed since it was read",
+		},
+		{
+			name: "command failure", tool: "run_command",
+			result: agent.ToolResult{IsError: true, Output: `{"argv":["secret-command"],"cwd":".","exit_code":2,"success":false,"stdout":"secret-output","stderr":"secret-error","stdout_truncated":false,"stderr_truncated":false,"timed_out":false,"duration_ms":1}`},
+			want:   "command exited unsuccessfully",
+		},
+		{
+			name: "command timeout", tool: "run_command",
+			result: agent.ToolResult{IsError: true, Output: `{"argv":["secret-command"],"cwd":".","exit_code":-1,"success":false,"stdout":"","stderr":"","stdout_truncated":false,"stderr_truncated":false,"timed_out":true,"duration_ms":1}`},
+			want:   "command timed out",
+		},
+		{
+			name: "denied", tool: "apply_patch",
+			result: agent.ToolResult{
+				IsError: true,
+				Output:  "capability denied for secret-path",
+				Policy:  &agent.ToolPolicyDecision{Outcome: "deny"},
+			},
+			want: "permission denied",
+		},
+		{
+			name: "unknown", tool: "third_party_tool",
+			result: agent.ToolResult{IsError: true, Output: "private failure detail"},
+			want:   "execution error",
+		},
+	}
+	for index, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			update := adaptRunEvent(agent.Event{
+				RunID: "run-failure", Sequence: uint64(index + 1), Type: agent.EventToolCompleted,
+				ToolCall:   &agent.ToolCall{ID: testCase.name, Name: testCase.tool},
+				ToolResult: &testCase.result,
+			})
+			if update.activity == nil || update.activity.label != "Tool "+testCase.tool+": "+testCase.want ||
+				update.activity.state != activityStateFailed || update.status != "tool failed: "+testCase.want {
+				t.Fatalf("adaptRunEvent() = %#v", update)
+			}
+			for _, protected := range []string{"secret-path", "secret-command", "secret-output", "secret-error", "private failure detail"} {
+				if strings.Contains(update.activity.label, protected) || strings.Contains(update.status, protected) {
+					t.Fatalf("safe failure contains %q: %#v", protected, update)
+				}
+			}
+		})
+	}
+}
+
 func TestAdapterScopesToolAndApprovalActivitiesByRun(t *testing.T) {
 	t.Parallel()
 
@@ -384,7 +462,7 @@ func TestAdapterScopesToolAndApprovalActivitiesByRun(t *testing.T) {
 	wait := &agent.WaitRequest{
 		ID:      "shared-approval",
 		Kind:    agent.WaitKindApproval,
-		Payload: json.RawMessage(`{"tool":"read_file","capabilities":["workspace.read"]}`),
+		Payload: json.RawMessage(`{"tool":"read_file","capabilities":["workspace.read"],"arguments_digest":"` + testApprovalArgumentsDigest + `"}`),
 	}
 	for index, runID := range []string{"run-first", "run-second"} {
 		presentation.apply(adaptRunEvent(agent.Event{
@@ -485,6 +563,36 @@ func TestMalformedApprovalCannotBeAcceptedOrRendered(t *testing.T) {
 		if strings.Contains(rendered, excluded) {
 			t.Errorf("rendered surface contains rejected approval value %q:\n%s", excluded, rendered)
 		}
+	}
+}
+
+func TestApprovalDecoderAcceptsEscapedBoundedPreview(t *testing.T) {
+	t.Parallel()
+
+	payload, err := json.Marshal(map[string]any{
+		"tool":             "run_command",
+		"capabilities":     []string{"process.execute"},
+		"arguments_digest": testApprovalArgumentsDigest,
+		"preview": map[string]any{
+			"summary": "Run one command",
+			"details": []map[string]string{{"label": "argv", "value": strings.Repeat("<", 4<<10)}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) <= 16<<10 {
+		t.Fatalf("escaped fixture is unexpectedly small: %d", len(payload))
+	}
+	prompt, err := decodeApprovalPrompt(agent.WaitRequest{
+		ID: "escaped-preview", Kind: agent.WaitKindApproval, Payload: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prompt.summary != "Run one command" || len(prompt.details) != 1 ||
+		!strings.HasSuffix(prompt.details[0].value, "...") {
+		t.Fatalf("decodeApprovalPrompt() = %#v", prompt)
 	}
 }
 
@@ -927,7 +1035,10 @@ func TestChatApprovesToolAndResumesRun(t *testing.T) {
 
 	waitForChat(t, harness, func() bool { return view.presentation.pendingApproval != nil }, "approval wait")
 	rendered := surfaceText(harness.LatestSurface())
-	if !strings.Contains(rendered, "Approval: Tool approval_tool [workspace.read]") {
+	if !strings.Contains(rendered, "Approval: Tool approval_tool [workspace.read]") ||
+		!strings.Contains(rendered, "Action: Read approval fixture") ||
+		!strings.Contains(rendered, "path: fixture.txt") ||
+		!strings.Contains(rendered, "Arguments: "+testApprovalArgumentsDigest) {
 		t.Fatalf("approval is not rendered:\n%s", rendered)
 	}
 	if err := harness.Input([]byte("y")); err != nil {
@@ -1394,7 +1505,7 @@ func TestApprovalWaitReturnsFromSessionHistoryToCurrentRun(t *testing.T) {
 		Type: agent.EventRunWaiting,
 		WaitRequest: &agent.WaitRequest{
 			ID: "approval-current", Kind: agent.WaitKindApproval,
-			Payload: json.RawMessage(`{"tool":"read_file","capabilities":["workspace.read"]}`),
+			Payload: json.RawMessage(`{"tool":"read_file","capabilities":["workspace.read"],"arguments_digest":"` + testApprovalArgumentsDigest + `"}`),
 		},
 	})})
 	if view.historyView != nil || view.historySession.ID != "" ||
@@ -1419,7 +1530,7 @@ func TestApprovalWaitCancelsPendingSessionHistoryLoad(t *testing.T) {
 		Type: agent.EventRunWaiting,
 		WaitRequest: &agent.WaitRequest{
 			ID: "approval-current", Kind: agent.WaitKindApproval,
-			Payload: json.RawMessage(`{"tool":"read_file","capabilities":["workspace.read"]}`),
+			Payload: json.RawMessage(`{"tool":"read_file","capabilities":["workspace.read"],"arguments_digest":"` + testApprovalArgumentsDigest + `"}`),
 		},
 	})})
 	if view.historyLoading || view.historyRequest != 5 || view.presentation.pendingApproval == nil ||
@@ -1534,7 +1645,7 @@ func (tuiApprovalTool) Execute(ctx context.Context, _ agent.ToolCall) (agent.Too
 		Kind:   agent.WaitKindApproval,
 		Prompt: "content not rendered",
 		Payload: json.RawMessage(
-			`{"tool":"approval_tool","capabilities":["workspace.read"]}`,
+			`{"tool":"approval_tool","capabilities":["workspace.read"],"arguments_digest":"` + testApprovalArgumentsDigest + `","preview":{"summary":"Read approval fixture","details":[{"label":"path","value":"fixture.txt"}]}}`,
 		),
 	})
 	if err != nil {

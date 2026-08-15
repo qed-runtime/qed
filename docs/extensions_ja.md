@@ -85,6 +85,7 @@ requestはmultiplexされ、responseは順不同で到着できます
 | `initialize` | workspace、選択environment、opaque configuration、verbose stateの供給 |
 | `describe` | capability、Tool、Hook、Commandの登録 |
 | `required_capabilities` | authorization前にTool invocation固有capabilityを解決 |
+| `approval_preview` | 承認前にoptionalかつboundedで副作用のない説明を返却 |
 | `invoke_tool` | Run identity付きのauthorized Tool callを実行 |
 | `handle_event` | 選択されたRun EventをHookへ配送 |
 | `invoke_command` | authorizedなhost-requested Commandを実行 |
@@ -104,6 +105,17 @@ Hookはpublic Agent Event JSONとRun identityだけを受け取ります
 
 各Toolはname、description、input schema、static capability、invocation固有capabilityの有無を宣言します
 Hostはdynamic capabilityを問い合わせ、結合したsetを`capability.Policy`で評価し、必要なapprovalを取得した後だけ`invoke_tool`を送ります
+
+Toolは`extension.ApprovalPreviewer`を実装し、Policyが`ask`を返した後からApproverの判断前までにinvocationを説明できます
+preview生成は外部stateを変更せず、提案された操作を検証する必要があります
+Hostはterminal control dataを含まないvalid UTF-8だけを受理し、summaryは512 byte、labeled detailは最大64件、各valueは4 KiB、text合計は6 KiBに制限します
+結果をcloneし、preview、正確なargument digest、Extension identity、pin済みgenerationをapproval wait IDへ結び付けます
+raw Tool argumentはwait payloadへ含めません
+
+process分離Extensionは同じoptional contractを`approval_preview`で公開します
+このmethodを持たないpeerも互換性を保ち、approvalではdetail unavailableとして扱います
+preview contentはpath、command、その他のsensitiveなinvocation metadataを含む場合があり、対応Tool Callと同等に保護する必要があります
+previewはhuman decision向けの説明情報であり、Extension executableが信頼できることの証明ではありません
 
 RuntimeはProviderが返したargumentをdynamic capability解決、Policy、approval、Tool実行より前に検証します
 Extension serverはdirect protocol callを含むRPC境界でも同じargumentを再検証します

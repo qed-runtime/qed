@@ -155,6 +155,17 @@ serialized terminal approvalには`--approval prompt`を使います
 TUIはwaitを表示して`Y`または`N`を受け取ります
 両方の経路が`RunHandle.Resume`で継続し、`run.waiting`と`run.resumed` Eventを生成します
 
+`apply_patch`と`run_command`は`extension.ApprovalPreviewer`を実装します
+承認を求める前に提案されたpatchまたはcommandを実行せず検証します
+Hostはboundedなpreviewを検証し、正確なargument digest、Extension ID、generationへ結び付けます
+patch previewはadd、update、delete対象とline数の合計を示します
+command previewは正確なJSON argv、workspace-relative working directory、effective timeoutを示します
+raw Tool argumentはapproval wait payloadへコピーしません
+
+previewは対話判断のための情報でありlog向けではありません
+workspace pathやcommand argumentを含む可能性があるためSession Eventと同等に保護する必要があります
+`apply_patch`はwrite lock取得後にすべてのpreconditionを再確認するため、承認後でもstale patchは失敗する場合があります
+
 ## Go API
 
 宣言的なserver組み込みでは[QEDの組み込み](embedding_ja.md)に従い、application所有self-exec Catalogと`qed.LoadHost`を使うことを推奨します

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/qed-runtime/qed/agent"
+	"github.com/qed-runtime/qed/capability"
 	"github.com/qed-runtime/qed/evidence"
 	"github.com/qed-runtime/qed/extension/selfexec"
 	"github.com/qed-runtime/qed/internal/agentconfig"
@@ -1294,6 +1295,9 @@ func TestRunConfiguredCodingProfileAgainstOpenAIProtocol(t *testing.T) {
 	if exitCode != 0 || stdout.String() != "coding profile connected\n" ||
 		!strings.Contains(stderr.String(), `Approval required for Tool "read_file"`) ||
 		!strings.Contains(stderr.String(), "filesystem.read") ||
+		!strings.Contains(stderr.String(), "Extension: qed.workspace generation ") ||
+		!strings.Contains(stderr.String(), "Details: unavailable") ||
+		!strings.Contains(stderr.String(), "Arguments: sha256:") ||
 		!strings.Contains(stderr.String(), "extension.initialized") ||
 		!strings.Contains(stderr.String(), "extension.process.ready") ||
 		!strings.Contains(stderr.String(), `"extension_id":"qed.workspace"`) ||
@@ -1304,6 +1308,39 @@ func TestRunConfiguredCodingProfileAgainstOpenAIProtocol(t *testing.T) {
 	}
 	if requests.Load() != 2 {
 		t.Fatalf("request count = %d, want 2", requests.Load())
+	}
+}
+
+func TestApprovalRequestFromWaitPreservesBoundPreview(t *testing.T) {
+	t.Parallel()
+
+	wait := agent.WaitRequest{
+		Kind: agent.WaitKindApproval,
+		Payload: json.RawMessage(`{
+			"tool":"apply_patch",
+			"capabilities":["filesystem.write"],
+			"arguments_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"extension_id":"qed.workspace",
+			"extension_generation":3,
+			"preview":{"summary":"Apply a validated patch","details":[{"label":"update","value":"main.go"}]}
+		}`),
+	}
+	request, err := approvalRequestFromWait(wait)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Tool != "apply_patch" ||
+		len(request.Capabilities) != 1 || request.Capabilities[0] != capability.FilesystemWrite ||
+		request.ArgumentsDigest != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ||
+		request.ExtensionID != "qed.workspace" || request.ExtensionGeneration != 3 ||
+		request.Preview == nil || request.Preview.Summary != "Apply a validated patch" ||
+		len(request.Preview.Details) != 1 || request.Preview.Details[0].Value != "main.go" {
+		t.Fatalf("approvalRequestFromWait() = %#v", request)
+	}
+
+	wait.Payload = json.RawMessage(`{"tool":"apply_patch","capabilities":[],"arguments_digest":"sha256:bad","unknown":true}`)
+	if _, err := approvalRequestFromWait(wait); err == nil {
+		t.Fatal("approvalRequestFromWait accepted malformed payload")
 	}
 }
 

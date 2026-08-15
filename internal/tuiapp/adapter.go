@@ -11,12 +11,14 @@ import (
 	"unicode"
 
 	"github.com/qed-runtime/qed/agent"
+	"github.com/qed-runtime/qed/capability"
 	"github.com/qed-runtime/qed/internal/jsonstrict"
 )
 
 const (
 	maximumApprovalCapabilities = 64
-	maximumApprovalPayloadBytes = 16 << 10
+	maximumApprovalPayloadBytes = 64 << 10
+	maximumApprovalPreviewRunes = 512
 	maximumDiagnosticRunes      = 96
 )
 
@@ -47,10 +49,20 @@ type runActivity struct {
 }
 
 type approvalPrompt struct {
-	requestID    string
-	activityKey  string
-	tool         string
-	capabilities []string
+	requestID           string
+	activityKey         string
+	tool                string
+	capabilities        []string
+	argumentsDigest     string
+	extensionID         string
+	extensionGeneration uint64
+	summary             string
+	details             []approvalDetail
+}
+
+type approvalDetail struct {
+	label string
+	value string
 }
 
 type presentationUpdate struct {
@@ -594,15 +606,18 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 	case agent.EventToolCompleted:
 		tool := toolName(event)
 		state := activityStateCompleted
+		label := "Tool " + tool
 		update.status = "running"
 		if event.ToolResult != nil && event.ToolResult.IsError {
 			state = activityStateFailed
-			update.status = "tool failed"
+			reason := safeToolFailureReason(tool, event.ToolResult)
+			label += ": " + reason
+			update.status = "tool failed: " + reason
 		}
 		update.activity = &runActivity{
 			sequence: event.Sequence,
 			key:      toolActivityKey(event, tool),
-			label:    "Tool " + tool,
+			label:    label,
 			state:    state,
 		}
 	case agent.EventRunWaiting:
@@ -822,12 +837,75 @@ func adaptWaitEvent(event agent.Event, update *presentationUpdate) {
 	update.status = "waiting for approval"
 	approval.activityKey = approvalActivityKey(event.RunID, approval.requestID)
 	update.approval = &approval
+	label := "Approval for Tool " + approval.tool
+	if len(approval.details) != 0 {
+		label += ": " + diagnosticText(approval.details[0].label+" "+approval.details[0].value)
+		if len(approval.details) > 1 {
+			label += fmt.Sprintf(" (+%d detail(s))", len(approval.details)-1)
+		}
+	} else if approval.summary != "" {
+		label += ": " + diagnosticText(approval.summary)
+	}
 	update.activity = &runActivity{
 		sequence: event.Sequence,
 		key:      approval.activityKey,
-		label:    "Approval for Tool " + approval.tool,
+		label:    label,
 		state:    activityStateWaiting,
 	}
+}
+
+func safeToolFailureReason(tool string, result *agent.ToolResult) string {
+	if result == nil || !result.IsError {
+		return "execution error"
+	}
+	output := result.Output
+	if strings.Contains(output, "approval was rejected") {
+		return "approval denied"
+	}
+	if result.Policy != nil && result.Policy.Outcome == string(capability.OutcomeDeny) {
+		return "permission denied"
+	}
+	switch {
+	case strings.Contains(output, "context deadline exceeded"):
+		return "operation timed out"
+	case strings.Contains(output, "context canceled"):
+		return "operation canceled"
+	case strings.Contains(output, "input validation"),
+		strings.Contains(output, "arguments are not valid JSON"):
+		return "invalid arguments"
+	}
+	switch tool {
+	case "apply_patch":
+		switch {
+		case strings.Contains(output, "parse apply_patch patch:"),
+			strings.Contains(output, "apply_patch patch is required"),
+			strings.Contains(output, "apply_patch patch exceeds"):
+			return "invalid patch"
+		case strings.Contains(output, "does not match the current file"):
+			return "file changed since it was read"
+		case strings.Contains(output, "precondition"):
+			return "invalid file precondition"
+		case strings.Contains(output, "apply patch to "):
+			return "patch no longer applies"
+		case strings.Contains(output, "decode apply_patch arguments:"):
+			return "invalid arguments"
+		}
+	case "run_command":
+		switch {
+		case strings.Contains(output, `"timed_out":true`):
+			return "command timed out"
+		case strings.HasPrefix(strings.TrimSpace(output), `{"argv":`):
+			return "command exited unsuccessfully"
+		case strings.Contains(output, "decode run_command arguments:"),
+			strings.Contains(output, "run_command argv"),
+			strings.Contains(output, "run_command timeout_ms"):
+			return "invalid arguments"
+		}
+	}
+	if strings.Contains(output, "Extension RPC error") {
+		return "Extension error"
+	}
+	return "execution error"
 }
 
 func decodeApprovalPrompt(wait agent.WaitRequest) (approvalPrompt, error) {
@@ -835,8 +913,12 @@ func decodeApprovalPrompt(wait agent.WaitRequest) (approvalPrompt, error) {
 		return approvalPrompt{}, errors.New("approval request ID must not be empty")
 	}
 	var payload struct {
-		Tool         string   `json:"tool"`
-		Capabilities []string `json:"capabilities"`
+		Tool                string                      `json:"tool"`
+		Capabilities        []string                    `json:"capabilities"`
+		ArgumentsDigest     string                      `json:"arguments_digest"`
+		ExtensionID         string                      `json:"extension_id,omitempty"`
+		ExtensionGeneration uint64                      `json:"extension_generation,omitempty"`
+		Preview             *capability.ApprovalPreview `json:"preview,omitempty"`
 	}
 	if err := jsonstrict.Decode(wait.Payload, maximumApprovalPayloadBytes, &payload); err != nil {
 		return approvalPrompt{}, fmt.Errorf("decode approval request: %w", err)
@@ -844,21 +926,66 @@ func decodeApprovalPrompt(wait agent.WaitRequest) (approvalPrompt, error) {
 	if strings.TrimSpace(payload.Tool) == "" {
 		return approvalPrompt{}, errors.New("approval Tool must not be empty")
 	}
+	if err := capability.ValidateApprovalArgumentsDigest(payload.ArgumentsDigest); err != nil {
+		return approvalPrompt{}, err
+	}
+	if payload.ExtensionGeneration != 0 && strings.TrimSpace(payload.ExtensionID) == "" {
+		return approvalPrompt{}, errors.New("approval Extension generation requires an Extension ID")
+	}
+	if err := capability.ValidateApprovalPreview(payload.Preview); err != nil {
+		return approvalPrompt{}, fmt.Errorf("validate approval preview: %w", err)
+	}
 	if len(payload.Capabilities) > maximumApprovalCapabilities {
 		return approvalPrompt{}, fmt.Errorf("approval has %d capabilities, maximum is %d", len(payload.Capabilities), maximumApprovalCapabilities)
 	}
 	capabilities := make([]string, len(payload.Capabilities))
-	for index, capability := range payload.Capabilities {
-		if strings.TrimSpace(capability) == "" {
-			return approvalPrompt{}, errors.New("approval capability must not be empty")
+	for index, value := range payload.Capabilities {
+		if err := capability.ValidateName(capability.Name(value)); err != nil {
+			return approvalPrompt{}, fmt.Errorf("approval capability: %w", err)
 		}
-		capabilities[index] = diagnosticText(capability)
+		capabilities[index] = diagnosticText(value)
 	}
-	return approvalPrompt{
-		requestID:    wait.ID,
-		tool:         diagnosticText(payload.Tool),
-		capabilities: capabilities,
-	}, nil
+	approval := approvalPrompt{
+		requestID:           wait.ID,
+		tool:                diagnosticText(payload.Tool),
+		capabilities:        capabilities,
+		argumentsDigest:     payload.ArgumentsDigest,
+		extensionID:         diagnosticText(payload.ExtensionID),
+		extensionGeneration: payload.ExtensionGeneration,
+	}
+	if payload.Preview != nil {
+		approval.summary = approvalPreviewText(payload.Preview.Summary)
+		approval.details = make([]approvalDetail, len(payload.Preview.Details))
+		for index, detail := range payload.Preview.Details {
+			approval.details[index] = approvalDetail{
+				label: approvalPreviewText(detail.Label),
+				value: approvalPreviewText(detail.Value),
+			}
+		}
+	}
+	return approval, nil
+}
+
+func approvalPreviewText(value string) string {
+	value = strings.TrimSpace(value)
+	var result strings.Builder
+	runes := 0
+	truncated := false
+	for _, current := range value {
+		if runes == maximumApprovalPreviewRunes {
+			truncated = true
+			break
+		}
+		if unsafeDiagnosticRune(current) {
+			current = '?'
+		}
+		result.WriteRune(current)
+		runes++
+	}
+	if truncated {
+		result.WriteString("...")
+	}
+	return result.String()
 }
 
 func approvalWaitResponse(requestID string, approved bool) (agent.WaitResponse, error) {
@@ -954,11 +1081,15 @@ func diagnosticText(value string) string {
 		if runes == maximumDiagnosticRunes {
 			break
 		}
-		if unicode.IsControl(current) {
+		if unsafeDiagnosticRune(current) {
 			current = '?'
 		}
 		result.WriteRune(current)
 		runes++
 	}
 	return result.String()
+}
+
+func unsafeDiagnosticRune(value rune) bool {
+	return unicode.IsControl(value) || unicode.In(value, unicode.Cf)
 }

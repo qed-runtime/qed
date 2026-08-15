@@ -23,6 +23,7 @@ const (
 	maximumComposerHistory   = 128
 	maximumComposerBytes     = 64 << 10
 	maximumRecentSessions    = 64
+	maximumApprovalDetails   = 3
 )
 
 var (
@@ -613,8 +614,10 @@ func (view *runView) View(context tui.ViewContext) tui.Node[message] {
 	}
 	content = append(content, view.chatHistoryNode(presentation).WithLength(tui.Flex(1)))
 
-	if approval := view.approvalText(); approval != "" && view.historyView == nil && !view.historyLoading {
-		content = append(content, tui.Text[message](approval).WithLength(tui.Fixed(1)))
+	if view.historyView == nil && !view.historyLoading {
+		for _, line := range view.approvalLines() {
+			content = append(content, tui.Text[message](line).WithLength(tui.Fixed(1)))
+		}
 	}
 	if view.composerVisible() {
 		composer := view.composerWidget(context)
@@ -704,15 +707,33 @@ func (view *runView) identityText(presentation *runPresentation) string {
 	)
 }
 
-func (view *runView) approvalText() string {
+func (view *runView) approvalLines() []string {
 	if view.presentation.pendingApproval == nil {
-		return ""
+		return nil
 	}
-	approval := "Approval: Tool " + view.presentation.pendingApproval.tool
-	if len(view.presentation.pendingApproval.capabilities) != 0 {
-		approval += " [" + strings.Join(view.presentation.pendingApproval.capabilities, ", ") + "]"
+	prompt := view.presentation.pendingApproval
+	header := "Approval: Tool " + prompt.tool
+	if len(prompt.capabilities) != 0 {
+		header += " [" + strings.Join(prompt.capabilities, ", ") + "]"
 	}
-	return approval
+	if prompt.extensionID != "" {
+		header += fmt.Sprintf(" via %s@%d", prompt.extensionID, prompt.extensionGeneration)
+	}
+	lines := []string{header}
+	if prompt.summary == "" {
+		lines = append(lines, "Action details unavailable")
+	} else {
+		lines = append(lines, "Action: "+prompt.summary)
+		visible := min(len(prompt.details), maximumApprovalDetails)
+		for index := range visible {
+			lines = append(lines, "  "+prompt.details[index].label+": "+prompt.details[index].value)
+		}
+		if len(prompt.details) > visible {
+			lines = append(lines, fmt.Sprintf("  ... %d more detail(s)", len(prompt.details)-visible))
+		}
+	}
+	lines = append(lines, "Arguments: "+prompt.argumentsDigest)
+	return lines
 }
 
 func (view *runView) helpText() string {

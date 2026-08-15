@@ -207,6 +207,14 @@ Policy, or approval. The proxies then combine capabilities, evaluate Policy,
 request approval when required, and invoke the remote component only after
 authorization. Tool Evidence is recorded in the Host
 
+After an `ask` decision, an optional `extension.ApprovalPreviewer` may validate
+and describe the exact invocation without executing it. The Host bounds and
+validates that content, binds it together with the argument digest, Extension
+identity, and generation into the wait identity, and excludes raw Tool
+arguments from the wait payload. Process-isolated previews use the optional
+`approval_preview` RPC; a missing method degrades to unavailable detail, while
+malformed preview content fails closed before human approval
+
 `extension/protocol` defines Protocol v1 as 4-byte big-endian length-prefixed
 strict JSON over stdio. `extension/server` adapts Go Tools, Hooks, Commands, and
 lifecycle callbacks to that contract and revalidates Tool input before direct
@@ -256,6 +264,8 @@ or Host APIs. The TUI chat controller maps composer submissions to active-Run
 steering or terminal follow-up Runs, keeps approval resume and Run cancellation
 separate, and stores Evidence per Run rather than merging Run Event sequences.
 Its variable-height feed and application-owned Composer retain bounded state.
+It renders bounded approval previews and allowlisted Tool failure classes while
+keeping raw Tool arguments, output, wait payloads, and errors out of view state.
 Content-free Context and cache projections are derived from Events, while exact
 Evidence retrieval stays behind Runtime Tools and their scoped authorization.
 Standard Session Stores expose a bounded `session.Catalog`; the TUI loads one

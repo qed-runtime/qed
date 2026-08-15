@@ -33,6 +33,7 @@ import (
 	"github.com/qed-runtime/qed/internal/cliapproval"
 	"github.com/qed-runtime/qed/internal/extensionregistry"
 	"github.com/qed-runtime/qed/internal/extensionscaffold"
+	"github.com/qed-runtime/qed/internal/jsonstrict"
 	"github.com/qed-runtime/qed/internal/tuiapp"
 	"github.com/qed-runtime/qed/provider/anthropic"
 	"github.com/qed-runtime/qed/provider/echo"
@@ -85,6 +86,8 @@ const (
 	providerOpenAICodex     = "openai-codex"
 	providerAnthropic       = "anthropic"
 )
+
+const maximumApprovalWaitPayloadBytes = 64 << 10
 
 type chatAuthService interface {
 	LoginBrowser(context.Context, string, chatauth.BrowserLoginOptions) (chatauth.ProfileInfo, error)
@@ -2423,15 +2426,40 @@ func resolveRunWait(
 
 func approvalRequestFromWait(wait agent.WaitRequest) (capability.Request, error) {
 	var payload struct {
-		Tool         string            `json:"tool"`
-		Capabilities []capability.Name `json:"capabilities"`
+		Tool                string                      `json:"tool"`
+		Capabilities        []capability.Name           `json:"capabilities"`
+		ArgumentsDigest     string                      `json:"arguments_digest"`
+		ExtensionID         string                      `json:"extension_id,omitempty"`
+		ExtensionGeneration uint64                      `json:"extension_generation,omitempty"`
+		Preview             *capability.ApprovalPreview `json:"preview,omitempty"`
 	}
-	if err := json.Unmarshal(wait.Payload, &payload); err != nil {
+	if err := jsonstrict.Decode(wait.Payload, maximumApprovalWaitPayloadBytes, &payload); err != nil {
 		return capability.Request{}, fmt.Errorf("decode approval request: %w", err)
 	}
+	if strings.TrimSpace(payload.Tool) == "" {
+		return capability.Request{}, errors.New("approval Tool must not be empty")
+	}
+	for _, name := range payload.Capabilities {
+		if err := capability.ValidateName(name); err != nil {
+			return capability.Request{}, fmt.Errorf("approval capability: %w", err)
+		}
+	}
+	if err := capability.ValidateApprovalArgumentsDigest(payload.ArgumentsDigest); err != nil {
+		return capability.Request{}, err
+	}
+	if payload.ExtensionGeneration != 0 && strings.TrimSpace(payload.ExtensionID) == "" {
+		return capability.Request{}, errors.New("approval Extension generation requires an Extension ID")
+	}
+	if err := capability.ValidateApprovalPreview(payload.Preview); err != nil {
+		return capability.Request{}, fmt.Errorf("validate approval preview: %w", err)
+	}
 	return capability.Request{
-		Tool:         payload.Tool,
-		Capabilities: payload.Capabilities,
+		Tool:                payload.Tool,
+		Capabilities:        append([]capability.Name(nil), payload.Capabilities...),
+		ArgumentsDigest:     payload.ArgumentsDigest,
+		ExtensionID:         payload.ExtensionID,
+		ExtensionGeneration: payload.ExtensionGeneration,
+		Preview:             capability.CloneApprovalPreview(payload.Preview),
 	}, nil
 }
 

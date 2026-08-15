@@ -42,10 +42,23 @@ var (
 
 // Request describes the capabilities required by one Tool invocation
 type Request struct {
-	CallID       string
-	Tool         string
+	// CallID identifies the Tool invocation within its Run
+	CallID string
+	// Tool identifies the requested Tool
+	Tool string
+	// Capabilities lists the host permissions required by the invocation
 	Capabilities []Name
-	Arguments    json.RawMessage
+	// Arguments contains the exact Tool arguments and must not be displayed by
+	// an Approver unless the Tool explicitly derives a safe ApprovalPreview
+	Arguments json.RawMessage
+	// ArgumentsDigest binds approval metadata to the exact Arguments bytes
+	ArgumentsDigest string
+	// ExtensionID identifies the Extension that would execute the Tool
+	ExtensionID string
+	// ExtensionGeneration identifies the pinned Extension process generation
+	ExtensionGeneration uint64
+	// Preview contains optional bounded content for human review
+	Preview *ApprovalPreview
 }
 
 // Decision records one Policy evaluation

@@ -185,6 +185,19 @@ Non-interactive configuration defaults to `--approval deny`. Use
 and accepts `Y` or `N`. Both paths resume through `RunHandle.Resume` and produce
 `run.waiting` and `run.resumed` Events
 
+`apply_patch` and `run_command` implement `extension.ApprovalPreviewer`. Before
+asking, they validate the proposed patch or command without executing it. The
+Host validates the bounded preview and binds it to the exact argument digest,
+Extension ID, and generation. Patch previews list add, update, and delete
+targets with aggregate line counts. Command previews show exact JSON argv, the
+workspace-relative working directory, and effective timeout. Raw Tool arguments
+are not copied into the approval wait payload
+
+The preview is intended for an interactive decision, not for logging. It may
+contain workspace paths or command arguments and therefore belongs under the
+same protection as Session Events. A stale patch can still fail after approval
+because `apply_patch` rechecks every precondition under the write lock
+
 ## Go API
 
 For a declarative server integration, prefer `qed.LoadHost` with an

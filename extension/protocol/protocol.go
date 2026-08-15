@@ -25,6 +25,7 @@ const (
 	MethodDescribe             Method = "describe"
 	MethodInitialize           Method = "initialize"
 	MethodRequiredCapabilities Method = "required_capabilities"
+	MethodApprovalPreview      Method = "approval_preview"
 	MethodInvokeTool           Method = "invoke_tool"
 	MethodHandleEvent          Method = "handle_event"
 	MethodInvokeCommand        Method = "invoke_command"
@@ -163,6 +164,29 @@ type RequiredCapabilitiesRequest struct {
 // RequiredCapabilitiesResponse contains additional permissions for one call
 type RequiredCapabilitiesResponse struct {
 	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+// ApprovalPreviewRequest asks an Extension to describe one Tool call without
+// executing it
+type ApprovalPreviewRequest struct {
+	Call ToolCall `json:"call"`
+}
+
+// ApprovalPreviewResponse contains optional bounded content for human review
+type ApprovalPreviewResponse struct {
+	Preview *ApprovalPreview `json:"preview,omitempty"`
+}
+
+// ApprovalPreview is the language-independent human-readable Tool summary
+type ApprovalPreview struct {
+	Summary string                  `json:"summary"`
+	Details []ApprovalPreviewDetail `json:"details,omitempty"`
+}
+
+// ApprovalPreviewDetail is one labeled fact in an ApprovalPreview
+type ApprovalPreviewDetail struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
 }
 
 // InvokeToolRequest invokes one initialized Tool for one Run

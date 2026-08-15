@@ -315,6 +315,15 @@ go run ./cmd/qed run \
 承認は`run.waiting`と`run.resumed` Eventを生成します
 JSONL Sessionの待機中にprocessが終了した場合、直前のProvider requestを繰り返さず、保留中のTool callだけをresumeできます
 
+Toolが`extension.ApprovalPreviewer`を実装している場合、HostはPolicyが`ask`を返した後だけboundedかつ副作用のない説明を要求します
+Hostはpreviewを検証し、正確なargument digest、Extension ID、pin済みgenerationへ結び付けてから承認を永続化または表示します
+raw Tool argumentはwait payloadへ含めません
+組み込み`apply_patch` previewは検証済みfile操作とline数を示し、`run_command` previewは正確なargv、workspace-relative directory、effective timeoutを示します
+preview未対応Extensionも利用でき、detail unavailableとして表示します
+
+approval previewはcontent-bearingであり、pathやcommand argumentを含む場合があります
+これを含むSession Eventを保護し、command argumentへsecretを置かないでください
+
 ```sh
 go run ./cmd/qed session resume work-1 --config ./qed.json
 ```
@@ -345,8 +354,10 @@ messageを入力してEnterを押すと最初のRunを開始し、active Runへs
 Runが承認待ちになった場合は`Y`で許可、`N`で拒否します
 Ctrl-Cは現在のRunだけをcancelしてchatを維持し、Escapeはactive RunをcancelしてTUIを終了します
 
-TUIは最近のuserとassistant messageを保持し、assistant textをstream表示し、Agent、Session、Run、Tool、approval Capabilityの本文なしactivityを表示します
-Tool引数、Tool出力、raw wait payload、raw Run errorはrendering用の表示状態へ保持しません
+TUIは最近のuserとassistant messageを保持し、assistant textをstream表示し、Agent、Session、Run、Tool、approval Capability metadataをactivityとして表示します
+承認中はboundedなTool supplied preview、Extension generation、argument digestも表示します
+失敗したTool activityはinvalid patch、stale file、command failure、timeout、permission denialなどの小さなallowlistによる安全なfailure classificationを使います
+raw Tool argument、Tool出力、raw wait payload、raw Run errorはrendering用の表示状態へ保持しません
 
 複数行ComposerはEnterで送信し、Shift-Enter、Alt-Enter、Ctrl-Oで改行します
 caretがeditor境界にある場合はUpとDownでboundedな送信履歴を呼び出します

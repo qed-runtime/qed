@@ -307,6 +307,17 @@ func runLifecycleAndComponents(t *testing.T, command host.Command, timeout time.
 	if err != nil || !reflect.DeepEqual(capabilities, []capability.Name{dynamicCapability}) {
 		t.Fatalf("RequiredCapabilities() = %v, %v", capabilities, err)
 	}
+	previewer, ok := echo.(extensionpkg.ApprovalPreviewer)
+	if !ok {
+		t.Fatal("echo Tool does not expose ApprovalPreviewer")
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), timeout)
+	preview, err := previewer.ApprovalPreview(ctx, call)
+	cancel()
+	if err != nil || preview == nil || preview.Summary != "Echo one value" || len(preview.Details) != 1 ||
+		preview.Details[0].Label != "value" || preview.Details[0].Value != "hello" {
+		t.Fatalf("ApprovalPreview() = %#v, %v", preview, err)
+	}
 
 	runInfo := agent.RunInfo{
 		RunID:       "contract-run",
@@ -781,6 +792,20 @@ func (*echoTool) RequiredCapabilities(ctx context.Context, call agent.ToolCall) 
 		return nil, err
 	}
 	return []capability.Name{dynamicCapability}, nil
+}
+
+func (*echoTool) ApprovalPreview(ctx context.Context, call agent.ToolCall) (*capability.ApprovalPreview, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var arguments echoArguments
+	if err := protocol.Unmarshal(call.Arguments, &arguments); err != nil {
+		return nil, err
+	}
+	return &capability.ApprovalPreview{
+		Summary: "Echo one value",
+		Details: []capability.ApprovalPreviewDetail{{Label: "value", Value: arguments.Value}},
+	}, nil
 }
 
 func (tool *echoTool) Execute(ctx context.Context, call agent.ToolCall) (agent.ToolResult, error) {

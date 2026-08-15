@@ -106,6 +106,55 @@ func (tool *applyPatchTool) RequiredCapabilities(_ context.Context, call agent.T
 	return nil, nil
 }
 
+// ApprovalPreview describes the exact files and validated line changes without
+// exposing patch content
+func (tool *applyPatchTool) ApprovalPreview(ctx context.Context, call agent.ToolCall) (*capability.ApprovalPreview, error) {
+	if ctx == nil {
+		return nil, errors.New("apply_patch preview context must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	request, patches, err := tool.decode(call.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	release := tool.workspace.AcquireRead()
+	_, err = tool.prepareOperations(request.Preconditions, patches)
+	release()
+	if err != nil {
+		return nil, err
+	}
+	addedLines := 0
+	deletedLines := 0
+	details := make([]capability.ApprovalPreviewDetail, len(patches))
+	for patchIndex, patch := range patches {
+		for _, hunk := range patch.hunks {
+			for _, line := range hunk.lines {
+				switch line.kind {
+				case '+':
+					addedLines++
+				case '-':
+					deletedLines++
+				}
+			}
+		}
+		details[patchIndex] = capability.ApprovalPreviewDetail{
+			Label: string(patch.kind),
+			Value: patch.path,
+		}
+	}
+	return &capability.ApprovalPreview{
+		Summary: fmt.Sprintf(
+			"Apply a validated patch to %d file(s) (+%d -%d)",
+			len(patches),
+			addedLines,
+			deletedLines,
+		),
+		Details: details,
+	}, nil
+}
+
 func (tool *applyPatchTool) Execute(ctx context.Context, call agent.ToolCall) (agent.ToolResult, error) {
 	request, patches, err := tool.decode(call.Arguments)
 	if err != nil {

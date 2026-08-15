@@ -88,6 +88,54 @@ func TestApplyPatchUpdatesFileWithDigestPrecondition(t *testing.T) {
 	}
 }
 
+func TestApplyPatchApprovalPreviewValidatesWithoutMutation(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "source.txt")
+	before := "one\ntwo\n"
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raw := newTool(t, root)
+	previewer, ok := raw.(extension.ApprovalPreviewer)
+	if !ok {
+		t.Fatal("apply_patch does not expose ApprovalPreviewer")
+	}
+	arguments, err := json.Marshal(map[string]any{
+		"patch":         "--- a/source.txt\n+++ b/source.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n",
+		"preconditions": []map[string]any{{"path": "source.txt", "sha256": digest(before)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := previewer.ApprovalPreview(context.Background(), agent.ToolCall{Arguments: arguments})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview == nil || preview.Summary != "Apply a validated patch to 1 file(s) (+1 -1)" ||
+		len(preview.Details) != 1 || preview.Details[0].Label != "update" || preview.Details[0].Value != "source.txt" {
+		t.Fatalf("ApprovalPreview() = %#v", preview)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != before {
+		t.Fatalf("preview changed file = %q, %v", content, err)
+	}
+
+	var request map[string]any
+	if err := json.Unmarshal(arguments, &request); err != nil {
+		t.Fatal(err)
+	}
+	request["preconditions"] = []map[string]any{{"path": "source.txt", "sha256": digest("stale\n")}}
+	staleArguments, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := previewer.ApprovalPreview(context.Background(), agent.ToolCall{Arguments: staleArguments}); err == nil {
+		t.Fatal("ApprovalPreview accepted stale precondition")
+	}
+}
+
 func TestApplyPatchAcceptsWorkspaceRelativeHeaders(t *testing.T) {
 	t.Parallel()
 

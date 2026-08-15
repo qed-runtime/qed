@@ -160,13 +160,26 @@ func TestCodingProfileRecordsDeterministicApprovalDenial(t *testing.T) {
 		switch event.Type {
 		case agent.EventRunWaiting:
 			waiting++
-			if event.WaitRequest == nil || event.WaitRequest.Kind != agent.WaitKindApproval ||
-				strings.Contains(string(event.WaitRequest.Payload), "calc.go") {
+			if event.WaitRequest == nil || event.WaitRequest.Kind != agent.WaitKindApproval {
 				t.Errorf("approval wait Event = %#v", event)
 			}
 			if event.WaitRequest == nil {
 				handle.Cancel()
 				continue
+			}
+			var approval struct {
+				Tool                string                      `json:"tool"`
+				ArgumentsDigest     string                      `json:"arguments_digest"`
+				ExtensionID         string                      `json:"extension_id"`
+				ExtensionGeneration uint64                      `json:"extension_generation"`
+				Preview             *capability.ApprovalPreview `json:"preview"`
+			}
+			if err := json.Unmarshal(event.WaitRequest.Payload, &approval); err != nil ||
+				approval.Tool != "apply_patch" || !strings.HasPrefix(approval.ArgumentsDigest, "sha256:") ||
+				approval.ExtensionID != workspaceextension.ID || approval.ExtensionGeneration == 0 ||
+				approval.Preview == nil || len(approval.Preview.Details) != 1 ||
+				approval.Preview.Details[0].Label != "update" || approval.Preview.Details[0].Value != "calc.go" {
+				t.Errorf("approval preview = %#v, %v", approval, err)
 			}
 			resumeErr = handle.Resume(agent.WaitResponse{
 				RequestID: event.WaitRequest.ID,

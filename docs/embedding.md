@@ -153,6 +153,14 @@ the Run. The handler receives the low-level handle so an in-process approval
 adapter can resume a waiting Run or queue steering without blocking Event
 drain
 
+For Tool approval, a custom `capability.Approver` receives the exact arguments
+for Policy evaluation plus an optional bounded `ApprovalPreview`, its full argument
+digest, and the pinned Extension identity. The Approver should display the
+preview and protect it as content-bearing data, but should not log raw
+`Request.Arguments`. `capability.WaitApprover` excludes those raw arguments and
+persists the preview, digest, and Extension identity in the `run.waiting`
+payload so another process can make the same decision
+
 The terminal `RunResult.ContextLedger` is the deterministic five-Ledger view of
 the accepted Event history. `agent.BuildContextLedger` rebuilds the same view
 from ordered Events, while `agent.ValidateContextLedger` rejects changed
