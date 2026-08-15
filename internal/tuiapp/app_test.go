@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mayahiro/nagi-go/vt"
 	tui "github.com/mayahiro/nagitui-go"
@@ -151,13 +152,179 @@ func TestChatTerminalOptionsEnableSelectionAndClipboard(t *testing.T) {
 	}
 }
 
+func TestChatFeedInterleavesMessagesAndImportantActivities(t *testing.T) {
+	t.Parallel()
+
+	presentation := newRunPresentation("", runIdentity{sessionID: "timeline"})
+	events := []agent.Event{
+		{Sequence: 1, Type: agent.EventRunStarted},
+		{
+			Sequence: 2, Type: agent.EventUserMessageAdded,
+			Message: &agent.Message{Role: agent.RoleUser, Text: "inspect"},
+		},
+		{Sequence: 3, Type: agent.EventCurrentWorldStateCaptured},
+		{Sequence: 4, Type: agent.EventModelRequest},
+		{
+			Sequence: 5, Type: agent.EventToolStarted,
+			ToolCall: &agent.ToolCall{ID: "read", Name: "read_file"},
+		},
+		{
+			Sequence: 6, Type: agent.EventToolCompleted,
+			ToolCall:   &agent.ToolCall{ID: "read", Name: "read_file"},
+			ToolResult: &agent.ToolResult{CallID: "read", Name: "read_file"},
+		},
+		{
+			Sequence: 7, Type: agent.EventToolStarted,
+			ToolCall: &agent.ToolCall{ID: "status", Name: "git_status"},
+		},
+		{
+			Sequence: 8, Type: agent.EventToolCompleted,
+			ToolCall:   &agent.ToolCall{ID: "status", Name: "git_status"},
+			ToolResult: &agent.ToolResult{CallID: "status", Name: "git_status"},
+		},
+		{Sequence: 9, Type: agent.EventMessageStarted},
+		{
+			Sequence: 10, Type: agent.EventMessageCompleted,
+			Message: &agent.Message{Role: agent.RoleAssistant, Text: "done"},
+		},
+		{Sequence: 11, Type: agent.EventRunCompleted},
+	}
+	for _, event := range events {
+		presentation.apply(adaptRunEvent(event))
+	}
+
+	entries, _ := buildFeedEntries(&presentation, feedTabChat)
+	got := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		content, ok := entry.selectableContent()
+		if !ok {
+			t.Fatalf("Chat entry is not selectable: %#v", entry)
+		}
+		got = append(got, content.Text())
+	}
+	want := []string{
+		"You: inspect",
+		"  Tool read_file [completed]\n  Tool git_status [completed]",
+		"Assistant: done",
+		"  Run completed [completed]",
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("Chat entries = %#v, want %#v", got, want)
+	}
+	chatCopy, truncated := feedCopyText(&presentation, feedTabChat)
+	if truncated || strings.Contains(chatCopy, "Current state captured") ||
+		strings.Contains(chatCopy, "Model request") || strings.Contains(chatCopy, "005  ") {
+		t.Fatalf("Chat copy = %q, truncated = %t", chatCopy, truncated)
+	}
+
+	activityEntries, _ := buildFeedEntries(&presentation, feedTabActivity)
+	if len(activityEntries) != 1 {
+		t.Fatalf("Activity entries = %d, want one document", len(activityEntries))
+	}
+	activity, ok := activityEntries[0].selectableContent()
+	if !ok {
+		t.Fatal("Activity document is not selectable")
+	}
+	for _, expected := range []string{
+		"001  Run started",
+		"002  Request added",
+		"003  Current state captured",
+		"004  Model request",
+		"005  Tool read_file [completed]",
+		"010  Assistant response [completed]",
+		"011  Run completed [completed]",
+	} {
+		if !strings.Contains(activity.Text(), expected) {
+			t.Errorf("Activity document does not contain %q: %q", expected, activity.Text())
+		}
+	}
+}
+
+func TestCopyFeedCopiesSelectedTabAndBoundsOutput(t *testing.T) {
+	t.Parallel()
+
+	view := newRunView("", runIdentity{sessionID: "copy-feed"}, nil, func() {}, nil)
+	view.presentation.applyUserMessage("copy chat", agent.UserMessageOriginRunInput)
+	view.presentation.apply(adaptRunEvent(agent.Event{Sequence: 1, Type: agent.EventRunStarted}))
+	harness, err := tuitest.New(view, tui.Size{Width: 80, Height: 16}, mapEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer harness.Close()
+	if err := harness.Send(message{kind: copyFeedMessage}); err != nil {
+		t.Fatalf("copy Chat tab: %v", err)
+	}
+	request, ok := harness.TakeClipboardRequest()
+	if !ok || request.Text() != "You: copy chat" {
+		t.Fatalf("Chat clipboard request = %q, %t", request.Text(), ok)
+	}
+	if err := harness.Send(message{kind: selectFeedTabMessage, feedTab: feedTabActivity}); err != nil {
+		t.Fatalf("select Activity tab: %v", err)
+	}
+	if err := harness.Send(message{kind: copyFeedMessage}); err != nil {
+		t.Fatalf("copy Activity tab: %v", err)
+	}
+	request, ok = harness.TakeClipboardRequest()
+	if !ok || request.Text() != "001  Run started" {
+		t.Fatalf("Activity clipboard request = %q, %t", request.Text(), ok)
+	}
+
+	large := newRunPresentation("", runIdentity{})
+	large.reconcileMessages([]agent.Message{{
+		Role: agent.RoleUser,
+		Text: strings.Repeat("x", maximumFeedCopyBytes+128),
+	}})
+	text, truncated := feedCopyText(&large, feedTabChat)
+	if !truncated || len(text) > maximumFeedCopyBytes || !utf8.ValidString(text) ||
+		!strings.HasSuffix(text, "[copy truncated]") {
+		t.Fatalf("bounded copy bytes=%d truncated=%t suffix=%t", len(text), truncated, strings.HasSuffix(text, "[copy truncated]"))
+	}
+}
+
+func TestFeedTabsRetainIndependentSelectionAndScrollState(t *testing.T) {
+	t.Parallel()
+
+	view := newRunView("", runIdentity{}, nil, func() {}, nil)
+	chatSelection := widget.NewSelectableTextStateWithSelection(8, 1)
+	activitySelection := widget.NewSelectableTextStateWithSelection(16, 3)
+	view.Update(message{
+		kind: selectableTextChangedMessage, feedTab: feedTabChat,
+		selectableTextID: "chat-entry", selectableText: chatSelection,
+	})
+	view.Update(message{
+		kind: selectableTextChangedMessage, feedTab: feedTabActivity,
+		selectableTextID: "activity-document", selectableText: activitySelection,
+	})
+	view.Update(message{
+		kind: feedScrolledMessage, feedTab: feedTabChat,
+		scroll: tui.ScrollState{AtEnd: false},
+	})
+	view.Update(message{
+		kind: feedScrolledMessage, feedTab: feedTabActivity,
+		scroll: tui.ScrollState{AtEnd: true},
+	})
+	view.Update(message{kind: selectFeedTabMessage, feedTab: feedTabActivity})
+	view.Update(message{kind: toggleFeedTabMessage})
+
+	if view.selectedFeedTab != feedTabChat ||
+		view.selectableTextID[feedTabChat] != "chat-entry" ||
+		view.selectableText[feedTabChat] != chatSelection ||
+		view.selectableTextID[feedTabActivity] != "activity-document" ||
+		view.selectableText[feedTabActivity] != activitySelection {
+		t.Fatalf("tab selection state = %#v", view)
+	}
+	if view.feedAtEnd[feedTabChat] || !view.feedAtEnd[feedTabActivity] {
+		t.Fatalf("tab scroll state = %#v", view.feedAtEnd)
+	}
+}
+
 func TestChatSelectionSurvivesRedrawAndControlCCopiesInsteadOfCanceling(t *testing.T) {
 	t.Parallel()
 
 	canceled := false
 	view := newRunView("", runIdentity{sessionID: "copy-session"}, nil, func() { canceled = true }, nil)
 	view.presentation.applyUserMessage("copy me", agent.UserMessageOriginRunInput)
-	entries, _ := buildFeedEntries(&view.presentation)
+	entries, _ := buildFeedEntries(&view.presentation, feedTabChat)
 	if len(entries) == 0 {
 		t.Fatal("chat has no selectable entry")
 	}
@@ -173,7 +340,7 @@ func TestChatSelectionSurvivesRedrawAndControlCCopiesInsteadOfCanceling(t *testi
 	if err := harness.Input([]byte{0x01}); err != nil {
 		t.Fatalf("select all: %v", err)
 	}
-	if start, end, ok := view.selectableText.Selection(); !ok || start != 0 || end != len("You: copy me") {
+	if start, end, ok := view.selectableText[feedTabChat].Selection(); !ok || start != 0 || end != len("You: copy me") {
 		t.Fatalf("selection = %d:%d, %t", start, end, ok)
 	}
 	if err := harness.Send(message{kind: runEventMessage, update: adaptRunEvent(agent.Event{
@@ -203,6 +370,7 @@ func TestFunctionKeysMapLongChatNavigation(t *testing.T) {
 		want messageKind
 	}{
 		{name: "context", key: vt.KeyEvent{Code: vt.KeyFunction, Function: 2}, want: toggleContextMessage},
+		{name: "feed tab", key: vt.KeyEvent{Code: vt.KeyFunction, Function: 3}, want: toggleFeedTabMessage},
 		{name: "older", key: vt.KeyEvent{Code: vt.KeyFunction, Function: 6}, want: browseOlderSessionMessage},
 		{
 			name: "newer",
@@ -210,6 +378,7 @@ func TestFunctionKeysMapLongChatNavigation(t *testing.T) {
 			want: browseNewerSessionMessage,
 		},
 		{name: "current", key: vt.KeyEvent{Code: vt.KeyFunction, Function: 7}, want: returnCurrentSessionMessage},
+		{name: "copy feed", key: vt.KeyEvent{Code: vt.KeyFunction, Function: 8}, want: copyFeedMessage},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -396,8 +565,6 @@ func TestAdapterMapsContentAndContentFreeDiagnostics(t *testing.T) {
 		"Waiting for model capacity (limit 2) [waiting]",
 		"Model rate limit cooldown 750ms [waiting]",
 		"Model retry 2 in 1000ms (rate_limited) [waiting]",
-		"Current state captured",
-		"Context candidate prepared",
 		"Tool read_file [completed]",
 		"Run failed [failed]",
 	} {
@@ -408,6 +575,25 @@ func TestAdapterMapsContentAndContentFreeDiagnostics(t *testing.T) {
 	for _, excluded := range []string{"secret-input", "secret-output", "secret-error"} {
 		if strings.Contains(rendered, excluded) {
 			t.Errorf("rendered surface contains protected value %q:\n%s", excluded, rendered)
+		}
+	}
+	for _, hidden := range []string{"Current state captured", "Context candidate prepared", "Model request"} {
+		if strings.Contains(rendered, hidden) {
+			t.Errorf("Chat contains internal Activity %q:\n%s", hidden, rendered)
+		}
+	}
+	if err := harness.Send(message{kind: selectFeedTabMessage, feedTab: feedTabActivity}); err != nil {
+		t.Fatalf("select Activity tab: %v", err)
+	}
+	activityRendered := surfaceText(harness.LatestSurface())
+	for _, expected := range []string{
+		"004  Current state captured",
+		"005  Context candidate prepared",
+		"006  Model request",
+		"010  Tool read_file [completed]",
+	} {
+		if !strings.Contains(activityRendered, expected) {
+			t.Errorf("Activity does not contain %q:\n%s", expected, activityRendered)
 		}
 	}
 }
@@ -579,17 +765,12 @@ func TestActivitySelectionSurvivesRedrawAndCopies(t *testing.T) {
 
 	view := newRunView("", runIdentity{sessionID: "activity-copy"}, nil, func() {}, nil)
 	view.presentation.apply(adaptRunEvent(agent.Event{Type: agent.EventRunStarted, Sequence: 1}))
-	entries, _ := buildFeedEntries(&view.presentation)
-	var activityID tui.NodeID
-	for _, entry := range entries {
-		if entry.activity != nil {
-			activityID = entry.id
-			break
-		}
-	}
-	if activityID == "" {
+	view.selectedFeedTab = feedTabActivity
+	entries, _ := buildFeedEntries(&view.presentation, feedTabActivity)
+	if len(entries) != 1 {
 		t.Fatal("Activity has no selectable entry")
 	}
+	activityID := entries[0].id
 	harness, err := tuitest.New(view, tui.Size{Width: 80, Height: 16}, mapEvent)
 	if err != nil {
 		t.Fatal(err)
@@ -606,12 +787,47 @@ func TestActivitySelectionSurvivesRedrawAndCopies(t *testing.T) {
 	})}); err != nil {
 		t.Fatalf("redraw Activity: %v", err)
 	}
+	if _, _, selected := view.selectableText[feedTabActivity].Selection(); !selected {
+		t.Fatal("Activity selection was cleared by redraw")
+	}
+	if err := harness.Input([]byte{0x01}); err != nil {
+		t.Fatalf("select complete Activity document: %v", err)
+	}
 	if err := harness.Input([]byte{0x03}); err != nil {
 		t.Fatalf("copy Activity: %v", err)
 	}
 	request, ok := harness.TakeClipboardRequest()
-	if !ok || request.Text() != "001  Run started" {
+	if !ok || request.Text() != "001  Run started\n002  Model request" {
 		t.Fatalf("clipboard request = %q, %t", request.Text(), ok)
+	}
+}
+
+func TestActivityMouseDragSelectsAcrossRows(t *testing.T) {
+	t.Parallel()
+
+	view := newRunView("", runIdentity{sessionID: "activity-drag"}, nil, func() {}, nil)
+	view.selectedFeedTab = feedTabActivity
+	view.presentation.apply(adaptRunEvent(agent.Event{Type: agent.EventRunStarted, Sequence: 1}))
+	view.presentation.apply(adaptRunEvent(agent.Event{Type: agent.EventModelRequest, Sequence: 2}))
+	harness, err := tuitest.New(view, tui.Size{Width: 80, Height: 16}, mapEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer harness.Close()
+	if err := harness.Input([]byte("\x1b[<0;4;8M\x1b[<32;20;9M\x1b[<0;20;9m")); err != nil {
+		t.Fatalf("drag Activity selection: %v", err)
+	}
+	start, end, selected := view.selectableText[feedTabActivity].Selection()
+	firstLineEnd := len("001  Run started")
+	if !selected || start >= firstLineEnd || end <= firstLineEnd+1 {
+		t.Fatalf("Activity drag selection = %d:%d, %t", start, end, selected)
+	}
+	if err := harness.Input([]byte{0x03}); err != nil {
+		t.Fatalf("copy dragged Activity selection: %v", err)
+	}
+	request, ok := harness.TakeClipboardRequest()
+	if !ok || !strings.Contains(request.Text(), "\n") {
+		t.Fatalf("dragged Activity clipboard request = %q, %t", request.Text(), ok)
 	}
 }
 
@@ -908,7 +1124,7 @@ func TestChatAndComposerClickSwitchFocusForHistoryNavigation(t *testing.T) {
 		t.Fatalf("release chat history: %v", err)
 	}
 	if focused, ok := harness.Interaction().Focused(); !ok ||
-		focused == composerInputID || focused != view.selectableTextID {
+		focused == composerInputID || focused != view.selectableTextID[feedTabChat] {
 		t.Fatalf("chat focus = %q, present = %t", focused, ok)
 	}
 	if err := harness.Input([]byte("\x1b[5~")); err != nil {
@@ -933,12 +1149,17 @@ func TestChatAndComposerClickSwitchFocusForHistoryNavigation(t *testing.T) {
 		t.Fatalf("chat ScrollState after second PageUp = %+v, PageDown = %+v", afterPageUp, afterPageDown)
 	}
 
-	if err := harness.Input([]byte("\x1b[<64;5;8M")); err != nil {
+	if err := harness.Input([]byte("\x1b[<64;5;10M")); err != nil {
 		t.Fatalf("wheel chat history: %v", err)
 	}
 	afterWheel, ok := harness.ScrollState(chatViewportID)
 	if !ok || afterWheel.Offset.Y >= afterPageUp.Offset.Y {
-		t.Fatalf("chat ScrollState after wheel = %+v, PageUp = %+v", afterWheel, afterPageUp)
+		t.Fatalf(
+			"chat ScrollState after wheel = %+v, PageUp = %+v:\n%s",
+			afterWheel,
+			afterPageUp,
+			surfaceText(harness.LatestSurface()),
+		)
 	}
 
 	if err := harness.Input([]byte("\x1b[<0;5;16M")); err != nil {
@@ -1190,7 +1411,7 @@ func TestChatSteersActiveRunAtNextProviderBoundary(t *testing.T) {
 		t.Fatalf("steering Events = %d, want 1", steeringEvents)
 	}
 	rendered := surfaceText(harness.LatestSurface())
-	for _, expected := range []string{"You: steer now", "Assistant: steered answer", "Steering added"} {
+	for _, expected := range []string{"You: steer now", "Assistant: steered answer"} {
 		if !strings.Contains(rendered, expected) {
 			t.Errorf("rendered surface does not contain %q:\n%s", expected, rendered)
 		}
@@ -1250,7 +1471,7 @@ func TestChatApprovesToolAndResumesRun(t *testing.T) {
 		}
 	}
 	rendered = surfaceText(harness.LatestSurface())
-	for _, expected := range []string{"Assistant: approved", "Tool approval_tool [completed]", "Run resumed"} {
+	for _, expected := range []string{"Assistant: approved", "Tool approval_tool [completed]"} {
 		if !strings.Contains(rendered, expected) {
 			t.Errorf("rendered surface does not contain %q:\n%s", expected, rendered)
 		}
@@ -1310,8 +1531,8 @@ func TestLongChatPresentationIsBoundedAndKeepsStableTailIDs(t *testing.T) {
 		t.Fatalf("transcript head = %q", presentation.transcript[0].text)
 	}
 	firstTailID := presentation.transcript[len(presentation.transcript)-1].id
-	entries, items := buildFeedEntries(&presentation)
-	if len(entries) != maximumTranscriptHistory+2 || len(items) != len(entries) {
+	entries, items := buildFeedEntries(&presentation, feedTabChat)
+	if len(entries) != maximumTranscriptHistory || len(items) != len(entries) {
 		t.Fatalf("feed entries/items = %d/%d", len(entries), len(items))
 	}
 
@@ -1325,7 +1546,7 @@ func TestLongChatPresentationIsBoundedAndKeepsStableTailIDs(t *testing.T) {
 
 	other := newRunPresentation("", runIdentity{sessionID: "other-session"})
 	other.reconcileMessages(messages)
-	otherEntries, _ := buildFeedEntries(&other)
+	otherEntries, _ := buildFeedEntries(&other, feedTabChat)
 	if entries[0].id == otherEntries[0].id {
 		t.Fatalf("historical Session item IDs collide = %q", entries[0].id)
 	}
@@ -1334,7 +1555,8 @@ func TestLongChatPresentationIsBoundedAndKeepsStableTailIDs(t *testing.T) {
 	streaming.apply(presentationUpdate{assistantStarted: true})
 	previousRevision := streaming.revision
 	streaming.apply(presentationUpdate{answerDelta: "delta"})
-	update := virtualFlowUpdate(&streaming)
+	streamingEntries, _ := buildFeedEntries(&streaming, feedTabChat)
+	update := virtualFlowUpdate(&streaming, feedTabChat, streamingEntries)
 	previous, ok := update.PreviousRevision()
 	start, end := update.ChangedRange()
 	if update.Revision() != previousRevision+1 || !ok || previous != previousRevision || start != 0 || end != 1 {

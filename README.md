@@ -405,13 +405,19 @@ or start a follow-up after it finishes. When a Run waits for approval, press
 `Y` to approve or `N` to deny. Ctrl-C cancels only the current Run and keeps the
 chat open; Escape exits and cancels an active Run
 
-The view keeps recent user and assistant messages, streams assistant text, and
-shows Run activity with Agent, Session, Run, Tool, and approval capability
-metadata. During approval it also shows the bounded Tool-supplied preview,
-Extension generation, and argument digest. Failed Tool activity uses a small
-allowlist of safe failure classifications such as invalid patch, stale file,
-command failure, timeout, or permission denial. Raw Tool arguments, Tool
-output, raw wait payloads, and raw Run errors are not copied into rendered view
+The default Chat tab keeps recent user and assistant messages, streams
+assistant text, and interleaves important Tool, approval, capacity, compaction,
+and terminal activity without Event sequence numbers. Consecutive activity is
+grouped into one selectable block. Internal request and state-capture Events
+stay in the Activity tab, which presents every retained activity with its Event
+sequence as one multi-line selectable document. Press F3 or select the tabs to
+switch views
+
+During approval the TUI also shows the bounded Tool-supplied preview, Extension
+generation, and argument digest. Failed Tool activity uses a small allowlist of
+safe failure classifications such as invalid patch, stale file, command
+failure, timeout, or permission denial. Raw Tool arguments, Tool output, raw
+wait payloads, and raw Run errors are not copied into either tab's rendered
 state. Repeated failures are numbered, safe terminal reasons remain visible,
 and the Status row summarizes changed files, verification outcomes, and
 mutations since the latest successful verification without retaining their
@@ -421,17 +427,20 @@ The multiline Composer uses Enter to submit and Shift-Enter, Alt-Enter, or
 Ctrl-O to insert a line break. Up and Down recall the bounded submission
 history when the caret is at an editor boundary. The transcript uses a
 variable-height VirtualFeed, retains at most 2,048 user and assistant entries,
-and builds only the visible range plus overscan. Message and Activity entries
-support application-owned selection that survives redraws. Click or left-drag
-one entry, use Ctrl-C to copy a non-empty selection, or Ctrl-Shift-C to copy the
-whole focused entry through OSC 52. Selection does not span multiple entries.
-When no selection owns Ctrl-C, it keeps its Run-cancel behavior. Use PageUp or
-PageDown after focusing the transcript, and use the mouse wheel over the target
-region. Click the Composer to resume input. QED enables SGR button-motion mouse
-tracking while the TUI is open so click, drag, and wheel reports reach the
-application. OSC 52 copy requires terminal support. Terminal-native pointer
-selection may require the terminal's own override gesture or leaving the TUI
-first
+and builds only the visible range plus overscan. Each tab retains its own
+application-owned selection across redraws and tab switches. Chat selection is
+bounded to one message or grouped activity block; Activity selection may span
+all retained rows. Click or left-drag, use Ctrl-C to copy a non-empty
+selection, or Ctrl-Shift-C to copy the complete focused block or Activity
+document through OSC 52. Press F8 to copy the complete current tab as displayed
+safe text. Tab copy is limited to 1 MiB and ends with `[copy truncated]` when
+the limit is reached. When no selection owns Ctrl-C, it keeps its Run-cancel
+behavior. Use PageUp or PageDown after focusing the current feed, and use the
+mouse wheel over the target region. Click the Composer to resume input. QED
+enables SGR button-motion mouse tracking while the TUI is open so click, drag,
+and wheel reports reach the application. OSC 52 copy requires terminal
+support. Terminal-native pointer selection may require the terminal's own
+override gesture or leaving the TUI first
 
 Press F2 to toggle content-free Context, predictive-budget, cache, and scoped
 Evidence availability details. Evidence content is not read directly by the

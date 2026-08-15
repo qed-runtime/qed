@@ -42,13 +42,14 @@ type runIdentity struct {
 }
 
 type runActivity struct {
-	id       uint64
-	sequence uint64
-	key      string
-	label    string
-	state    activityState
-	tool     string
-	failure  string
+	id            uint64
+	sequence      uint64
+	key           string
+	label         string
+	state         activityState
+	tool          string
+	failure       string
+	visibleInChat bool
 }
 
 type runWorkSummary struct {
@@ -118,8 +119,6 @@ type runPresentation struct {
 	revision           uint64
 	feedKey            string
 	feedPrevious       uint64
-	feedChangedStart   int
-	feedChangedEnd     int
 	feedPartial        bool
 	work               runWorkSummary
 	failureCounts      map[string]int
@@ -214,8 +213,6 @@ func (presentation *runPresentation) apply(update presentationUpdate) {
 	presentation.invalidateFeed()
 	if partialDelta {
 		presentation.feedPartial = true
-		presentation.feedChangedStart = streamingEntry
-		presentation.feedChangedEnd = streamingEntry + 1
 	}
 	if update.identity.runID != "" {
 		presentation.identity.runID = update.identity.runID
@@ -426,9 +423,6 @@ func (presentation *runPresentation) resolveApproval(approved bool) (string, boo
 			presentation.activities[index].state = activityStateDenied
 		}
 		presentation.invalidateFeed()
-		presentation.feedPartial = true
-		presentation.feedChangedStart = len(presentation.transcript) + 1 + index
-		presentation.feedChangedEnd = presentation.feedChangedStart + 1
 		break
 	}
 	presentation.pendingApproval = nil
@@ -463,6 +457,7 @@ func (presentation *runPresentation) applyActivity(activity runActivity) {
 			activity.id = presentation.activities[index].id
 			presentation.activities[index].label = activity.label
 			presentation.activities[index].state = activity.state
+			presentation.activities[index].visibleInChat = activity.visibleInChat
 			return
 		}
 	}
@@ -486,8 +481,6 @@ func (presentation *runPresentation) allocateEntryID() uint64 {
 func (presentation *runPresentation) invalidateFeed() {
 	presentation.feedPrevious = presentation.revision
 	presentation.revision++
-	presentation.feedChangedStart = 0
-	presentation.feedChangedEnd = 0
 	presentation.feedPartial = false
 }
 
@@ -728,7 +721,27 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 		update.status = "running"
 		activity("Runtime event", "")
 	}
+	if update.activity != nil {
+		update.activity.visibleInChat = activityVisibleInChat(event.Type)
+	}
 	return update
+}
+
+func activityVisibleInChat(eventType agent.EventType) bool {
+	switch eventType {
+	case agent.EventContextCompacted,
+		agent.EventProviderRateLimitWait,
+		agent.EventProviderRetry,
+		agent.EventToolStarted,
+		agent.EventToolCompleted,
+		agent.EventRunWaiting,
+		agent.EventRunCompleted,
+		agent.EventRunFailed,
+		agent.EventRunCanceled:
+		return true
+	default:
+		return false
+	}
 }
 
 func adaptRunResult(result agent.RunResult, runErr error) presentationUpdate {

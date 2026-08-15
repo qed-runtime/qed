@@ -263,13 +263,15 @@ frontend packages and no Nagi type crosses into Runtime, Provider, Extension,
 or Host APIs. The TUI chat controller maps composer submissions to active-Run
 steering or terminal follow-up Runs, keeps approval resume and Run cancellation
 separate, and stores Evidence per Run rather than merging Run Event sequences.
-Its variable-height feed and application-owned Composer retain bounded state.
-It renders bounded approval previews and allowlisted Tool failure classes while
-keeping raw Tool arguments, output, wait payloads, and errors out of view state.
-Selectable transcript and Activity entries keep application-owned selection
-across redraws and send explicit copy requests through the terminal clipboard
-adapter. Safe terminal reasons and content-free work counters remain derived
-from Events rather than raw Tool output.
+Its default Chat projection interleaves messages with an allowlisted subset of
+important activity in Event arrival order while grouping consecutive activity
+into bounded selectable blocks. A separate Activity projection retains every
+bounded activity label and sequence in one selectable document. Each tab owns
+independent selection and scroll state, and both send explicit bounded copy
+requests through the terminal clipboard adapter. The projections render
+bounded approval previews, allowlisted Tool failure classes, safe terminal
+reasons, and content-free work counters while keeping raw Tool arguments,
+output, wait payloads, and errors out of view state.
 Content-free Context and cache projections are derived from Events, while exact
 Evidence retrieval stays behind Runtime Tools and their scoped authorization.
 Standard Session Stores expose a bounded `session.Catalog`; the TUI loads one

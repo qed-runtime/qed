@@ -24,16 +24,30 @@ const (
 	maximumComposerBytes     = 64 << 10
 	maximumRecentSessions    = 64
 	maximumApprovalDetails   = 3
+	maximumFeedCopyBytes     = 1 << 20
 )
 
 var (
-	chatViewportID        = tui.NewNodeID("chat-history")
-	sessionViewportID     = tui.NewNodeID("session-history")
-	chatFocusRegionID     = tui.NewNodeID("chat-focus-region")
-	composerInputID       = tui.NewNodeID("chat-composer")
-	composerViewportID    = tui.NewNodeID("chat-composer-viewport")
-	composerCaretID       = tui.NewNodeID("chat-composer-caret")
-	sessionHistoryTaskKey = tui.NewTaskKey("qed-session-history")
+	feedTabsID                = tui.NewNodeID("feed-tabs")
+	chatTabID                 = tui.NewNodeID("feed-tab-chat")
+	activityTabID             = tui.NewNodeID("feed-tab-activity")
+	chatViewportID            = tui.NewNodeID("chat-history")
+	activityViewportID        = tui.NewNodeID("activity-history")
+	sessionViewportID         = tui.NewNodeID("session-history")
+	sessionActivityViewportID = tui.NewNodeID("session-activity-history")
+	chatFocusRegionID         = tui.NewNodeID("chat-focus-region")
+	composerInputID           = tui.NewNodeID("chat-composer")
+	composerViewportID        = tui.NewNodeID("chat-composer-viewport")
+	composerCaretID           = tui.NewNodeID("chat-composer-caret")
+	sessionHistoryTaskKey     = tui.NewTaskKey("qed-session-history")
+)
+
+type feedTab uint8
+
+const (
+	feedTabChat feedTab = iota
+	feedTabActivity
+	feedTabCount
 )
 
 type messageKind uint8
@@ -50,6 +64,9 @@ const (
 	feedScrolledMessage
 	selectableTextChangedMessage
 	copyTextMessage
+	selectFeedTabMessage
+	toggleFeedTabMessage
+	copyFeedMessage
 	toggleContextMessage
 	browseOlderSessionMessage
 	browseNewerSessionMessage
@@ -67,6 +84,7 @@ type message struct {
 	selectableTextID  tui.NodeID
 	selectableText    widget.SelectableTextState
 	copyText          string
+	feedTab           feedTab
 	scroll            tui.ScrollState
 	historicalScroll  bool
 	runNumber         uint64
@@ -135,15 +153,16 @@ type runView struct {
 	streamDone       chan struct{}
 	streamClosed     *sync.Once
 	options          ChatOptions
-	feedAtEnd        bool
-	feedUnread       bool
+	selectedFeedTab  feedTab
+	feedAtEnd        [feedTabCount]bool
+	feedUnread       [feedTabCount]bool
 	showContext      bool
 	historyLoading   bool
 	historyRequest   uint64
 	historyView      *runPresentation
 	historySession   session.SessionDescriptor
-	selectableTextID tui.NodeID
-	selectableText   widget.SelectableTextState
+	selectableTextID [feedTabCount]tui.NodeID
+	selectableText   [feedTabCount]widget.SelectableTextState
 }
 
 // StartFunc starts one Run for the TUI without coupling it to a concrete Harness
@@ -383,7 +402,7 @@ func newChatView(
 		persistent:      request.SessionID != "",
 		composerEnabled: true,
 		composer:        widget.NewComposerStateAtEnd(""),
-		feedAtEnd:       true,
+		feedAtEnd:       initialFeedEndState(),
 		nextHistoryID:   1,
 	}
 	view.recordComposerHistory(prompt)
@@ -404,7 +423,7 @@ func newIdleChatView(ctx context.Context, start StartFunc, request agent.RunRequ
 		composerEnabled: true,
 		composer:        widget.NewComposerStateAtEnd(""),
 		finished:        true,
-		feedAtEnd:       true,
+		feedAtEnd:       initialFeedEndState(),
 		nextHistoryID:   1,
 	}
 }
@@ -426,11 +445,19 @@ func newRunView(
 		streamDone:    make(chan struct{}),
 		streamClosed:  &sync.Once{},
 		composer:      widget.NewComposerStateAtEnd(""),
-		feedAtEnd:     true,
+		feedAtEnd:     initialFeedEndState(),
 		nextHistoryID: 1,
 	}
 	view.recordComposerHistory(prompt)
 	return view
+}
+
+func initialFeedEndState() [feedTabCount]bool {
+	state := [feedTabCount]bool{}
+	for tab := feedTabChat; tab < feedTabCount; tab++ {
+		state[tab] = true
+	}
+	return state
 }
 
 func (view *runView) attachRun(handle *agent.RunHandle, bridge *eventBridge) {
@@ -521,15 +548,18 @@ func (view *runView) Update(value message) tui.Effect[message] {
 	case submitMessage:
 		return view.submitDraft()
 	case feedScrolledMessage:
-		if !value.historicalScroll {
-			view.feedAtEnd = value.scroll.AtEnd
+		if value.feedTab < feedTabCount && !value.historicalScroll {
+			view.feedAtEnd[value.feedTab] = value.scroll.AtEnd
 			if value.scroll.AtEnd {
-				view.feedUnread = false
+				view.feedUnread[value.feedTab] = false
 			}
 		}
 	case selectableTextChangedMessage:
-		view.selectableTextID = value.selectableTextID
-		view.selectableText = value.selectableText
+		if value.feedTab >= feedTabCount {
+			return tui.NoneEffect[message]()
+		}
+		view.selectableTextID[value.feedTab] = value.selectableTextID
+		view.selectableText[value.feedTab] = value.selectableText
 		view.inputNotice = ""
 	case copyTextMessage:
 		if value.copyText == "" {
@@ -537,6 +567,26 @@ func (view *runView) Update(value message) tui.Effect[message] {
 		}
 		view.inputNotice = "Copy requested"
 		return tui.SetClipboardEffect[message](value.copyText)
+	case selectFeedTabMessage:
+		if value.feedTab >= feedTabCount {
+			return tui.NoneEffect[message]()
+		}
+		view.selectedFeedTab = value.feedTab
+		view.inputNotice = "Viewing " + feedTabLabel(value.feedTab)
+	case toggleFeedTabMessage:
+		view.selectedFeedTab = (view.selectedFeedTab + 1) % feedTabCount
+		view.inputNotice = "Viewing " + feedTabLabel(view.selectedFeedTab)
+	case copyFeedMessage:
+		text, truncated := feedCopyText(view.displayPresentation(), view.selectedFeedTab)
+		if text == "" {
+			view.inputNotice = feedTabLabel(view.selectedFeedTab) + " has nothing to copy"
+			return tui.NoneEffect[message]()
+		}
+		view.inputNotice = feedTabLabel(view.selectedFeedTab) + " copy requested"
+		if truncated {
+			view.inputNotice += " with truncation"
+		}
+		return tui.SetClipboardEffect[message](text)
 	case toggleContextMessage:
 		view.showContext = !view.showContext
 	case browseOlderSessionMessage:
@@ -630,7 +680,10 @@ func (view *runView) View(context tui.ViewContext) tui.Node[message] {
 			content = append(content, tui.Text[message](detail).WithLength(tui.Fixed(1)))
 		}
 	}
-	content = append(content, view.chatHistoryNode(presentation).WithLength(tui.Flex(1)))
+	content = append(content,
+		view.feedTabsNode().WithLength(tui.Fixed(1)),
+		view.feedNode(presentation).WithLength(tui.Flex(1)),
+	)
 
 	if view.historyView == nil && !view.historyLoading {
 		for _, line := range view.approvalLines() {
@@ -656,32 +709,61 @@ func (view *runView) View(context tui.ViewContext) tui.Node[message] {
 	return tui.Panel(tui.Column(content...), "Agent Chat")
 }
 
-func (view *runView) chatHistoryNode(presentation *runPresentation) tui.Node[message] {
-	entries, items := buildFeedEntries(presentation)
+func (view *runView) feedTabsNode() tui.Node[message] {
+	labels := [feedTabCount]string{"Chat", "Activity"}
+	for tab := feedTabChat; tab < feedTabCount; tab++ {
+		if view.feedUnread[tab] && view.selectedFeedTab != tab {
+			labels[tab] += " *"
+		}
+	}
+	return widget.NewTabs(
+		feedTabsID,
+		[]widget.TabItem{
+			widget.NewTabItem(chatTabID, labels[feedTabChat]),
+			widget.NewTabItem(activityTabID, labels[feedTabActivity]),
+		},
+		int(view.selectedFeedTab),
+		func(index int) message {
+			return message{kind: selectFeedTabMessage, feedTab: feedTab(index)}
+		},
+	).Node()
+}
+
+func (view *runView) feedNode(presentation *runPresentation) tui.Node[message] {
+	tab := view.selectedFeedTab
+	entries, items := buildFeedEntries(presentation, tab)
 	order, err := tui.NewVirtualFlowItems(items)
 	if err != nil {
-		return tui.Text[message]("Chat history is unavailable")
+		return tui.Text[message](feedTabLabel(tab) + " is unavailable")
 	}
 	source := tui.NewVirtualFlowSource(order, func(context tui.VirtualFlowItemContext) tui.Node[message] {
-		return entries[context.Index].node(view.selectableTextID, view.selectableText)
-	}).Update(virtualFlowUpdate(presentation)).EstimatedHeight(
+		return entries[context.Index].node(
+			tab,
+			view.selectableTextID[tab],
+			view.selectableText[tab],
+		)
+	}).Update(virtualFlowUpdate(presentation, tab, entries)).EstimatedHeight(
 		func(context tui.VirtualFlowItemContext) uint32 {
 			return entries[context.Index].estimatedHeight(context.Width)
 		},
 	)
-	feedID := chatViewportID
-	if view.historyView != nil {
-		feedID = sessionViewportID
-	}
+	feedID := view.feedViewportID(tab)
 	historical := view.historyView != nil
+	empty := "Waiting for messages..."
+	if tab == feedTabActivity {
+		empty = "Waiting for Run activity..."
+	}
 	feed := widget.NewVirtualFeed(feedID, source).
 		Overscan(8).
 		FollowEnd(true).
 		OnScroll(func(state tui.ScrollState) message {
-			return message{kind: feedScrolledMessage, scroll: state, historicalScroll: historical}
+			return message{
+				kind: feedScrolledMessage, feedTab: tab,
+				scroll: state, historicalScroll: historical,
+			}
 		}).
-		Empty(tui.Text[message]("Waiting for messages..."))
-	if view.feedUnread && view.historyView == nil {
+		Empty(tui.Text[message](empty))
+	if view.feedUnread[tab] && view.historyView == nil {
 		feed = feed.UnreadIndicator(tui.StyledText[message](" New activity below ", vt.Style{Reverse: true}))
 	}
 	return feed.Node().OnPointerEvent(
@@ -694,6 +776,26 @@ func (view *runView) chatHistoryNode(presentation *runPresentation) tui.Node[mes
 			return tui.ConsumeResult[message]().Focus(feedID)
 		},
 	)
+}
+
+func (view *runView) feedViewportID(tab feedTab) tui.NodeID {
+	if view.historyView != nil {
+		if tab == feedTabActivity {
+			return sessionActivityViewportID
+		}
+		return sessionViewportID
+	}
+	if tab == feedTabActivity {
+		return activityViewportID
+	}
+	return chatViewportID
+}
+
+func feedTabLabel(tab feedTab) string {
+	if tab == feedTabActivity {
+		return "Activity"
+	}
+	return "Chat"
 }
 
 func (view *runView) composerWidget(context tui.ViewContext) widget.Composer[message] {
@@ -755,25 +857,26 @@ func (view *runView) approvalLines() []string {
 }
 
 func (view *runView) helpText() string {
+	feedHelp := "F3 tabs  F8 copy tab  drag select  Ctrl-C copy/cancel  Ctrl-Shift-C block  PgUp/PgDn"
 	switch {
 	case view.historyView != nil || view.historyLoading:
-		return "Chat: click/drag/PgUp/PgDn/wheel  Ctrl-C copy selection  Ctrl-Shift-C copy item  F6 older  Shift-F6 newer  F7 current  F2 context  Esc quit"
+		return feedHelp + "  F6 older  Shift-F6 newer  F7 current  F2 context  Esc quit"
 	case view.presentation.pendingApproval != nil:
-		return "Approval required  Y approve  N deny  Chat: drag select  Ctrl-C copy/cancel  Ctrl-Shift-C copy item  F2 context  Esc quit"
+		return "Approval required  Y approve  N deny  " + feedHelp + "  F2 context  Esc quit"
 	case view.presentation.waitingUnsupported:
-		return "Input cannot be handled here  Chat: drag select  Ctrl-C copy/cancel  Ctrl-Shift-C copy item  F2 context  Esc quit"
+		return "Input cannot be handled here  " + feedHelp + "  F2 context  Esc quit"
 	case !view.composerEnabled:
 		if view.finished {
-			return "Run finished  Chat: click/drag/PgUp/PgDn/wheel  Ctrl-C copy selection  Ctrl-Shift-C copy item  F2 context  Q/Esc quit"
+			return "Run finished  " + feedHelp + "  F2 context  Q/Esc quit"
 		}
-		return "Chat: click/drag/PgUp/PgDn/wheel  Ctrl-C copy/cancel  Ctrl-Shift-C copy item  Q/Esc quit"
+		return feedHelp + "  Q/Esc quit"
 	case view.finished:
 		if view.runNumber == 0 {
-			return "Enter start  Chat: click/drag/PgUp/PgDn/wheel  Ctrl-C copy selection  Ctrl-Shift-C copy item  F2 context  F6 Sessions  Esc quit"
+			return "Enter start  " + feedHelp + "  F2 context  F6 Sessions  Esc quit"
 		}
-		return "Enter follow-up  Chat: click/drag/PgUp/PgDn/wheel  Ctrl-C copy selection  Ctrl-Shift-C copy item  F2 context  F6 Sessions  Esc quit"
+		return "Enter follow-up  " + feedHelp + "  F2 context  F6 Sessions  Esc quit"
 	default:
-		return "Enter steer  Chat: click/drag/PgUp/PgDn/wheel  Ctrl-C copy/cancel  Ctrl-Shift-C copy item  F2 context  F6 Sessions  Esc quit"
+		return "Enter steer  " + feedHelp + "  F2 context  F6 Sessions  Esc quit"
 	}
 }
 
@@ -922,12 +1025,16 @@ func mapEvent(event vt.Event) tui.EventAction[message] {
 		return tui.MessageAction(message{kind: quitMessage})
 	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyFunction && event.Key.Function == 2:
 		return tui.MessageAction(message{kind: toggleContextMessage})
+	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyFunction && event.Key.Function == 3:
+		return tui.MessageAction(message{kind: toggleFeedTabMessage})
 	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyFunction && event.Key.Function == 6 && event.Key.Modifiers.Shift:
 		return tui.MessageAction(message{kind: browseNewerSessionMessage})
 	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyFunction && event.Key.Function == 6:
 		return tui.MessageAction(message{kind: browseOlderSessionMessage})
 	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyFunction && event.Key.Function == 7:
 		return tui.MessageAction(message{kind: returnCurrentSessionMessage})
+	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyFunction && event.Key.Function == 8:
+		return tui.MessageAction(message{kind: copyFeedMessage})
 	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyEnter:
 		return tui.MessageAction(message{kind: submitMessage})
 	case event.Kind == vt.EventKey &&

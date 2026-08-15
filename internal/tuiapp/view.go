@@ -3,6 +3,7 @@ package tuiapp
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -14,40 +15,24 @@ import (
 )
 
 type feedEntry struct {
-	id       tui.NodeID
-	role     agent.Role
-	text     string
-	state    transcriptState
-	activity *runActivity
-	heading  bool
+	id                tui.NodeID
+	role              agent.Role
+	text              string
+	state             transcriptState
+	transcriptEntryID uint64
+	activities        []runActivity
+	showSequence      bool
 }
 
-func buildFeedEntries(presentation *runPresentation) ([]feedEntry, []tui.VirtualFlowItem) {
-	entries := make([]feedEntry, 0, len(presentation.transcript)+len(presentation.activities)+2)
-	for _, transcript := range presentation.transcript {
-		entries = append(entries, feedEntry{
-			id:    tui.NewNodeID(fmt.Sprintf("chat-%s-message-%d", presentation.feedKey, transcript.id)),
-			role:  transcript.role,
-			text:  transcript.text,
-			state: transcript.state,
-		})
-	}
-	entries = append(entries, feedEntry{
-		id: tui.NewNodeID("chat-" + presentation.feedKey + "-activity-heading"), text: "Activity", heading: true,
-	})
-	if len(presentation.activities) == 0 {
-		entries = append(entries, feedEntry{
-			id:   tui.NewNodeID("chat-" + presentation.feedKey + "-activity-empty"),
-			text: "Waiting for Run activity...",
-		})
+func buildFeedEntries(
+	presentation *runPresentation,
+	tab feedTab,
+) ([]feedEntry, []tui.VirtualFlowItem) {
+	var entries []feedEntry
+	if tab == feedTabActivity {
+		entries = buildActivityFeedEntries(presentation)
 	} else {
-		for index := range presentation.activities {
-			activity := presentation.activities[index]
-			entries = append(entries, feedEntry{
-				id:       tui.NewNodeID(fmt.Sprintf("chat-%s-activity-%d", presentation.feedKey, activity.id)),
-				activity: &activity,
-			})
-		}
+		entries = buildChatFeedEntries(presentation)
 	}
 	items := make([]tui.VirtualFlowItem, len(entries))
 	for index := range entries {
@@ -56,14 +41,70 @@ func buildFeedEntries(presentation *runPresentation) ([]feedEntry, []tui.Virtual
 	return entries, items
 }
 
+func buildChatFeedEntries(presentation *runPresentation) []feedEntry {
+	type orderedEntry struct {
+		id         uint64
+		transcript *transcriptEntry
+		activity   *runActivity
+	}
+	ordered := make([]orderedEntry, 0, len(presentation.transcript)+len(presentation.activities))
+	for index := range presentation.transcript {
+		entry := &presentation.transcript[index]
+		ordered = append(ordered, orderedEntry{id: entry.id, transcript: entry})
+	}
+	for index := range presentation.activities {
+		activity := &presentation.activities[index]
+		if !activity.visibleInChat {
+			continue
+		}
+		ordered = append(ordered, orderedEntry{id: activity.id, activity: activity})
+	}
+	sort.SliceStable(ordered, func(first, second int) bool {
+		return ordered[first].id < ordered[second].id
+	})
+
+	entries := make([]feedEntry, 0, len(ordered))
+	for _, orderedEntry := range ordered {
+		if orderedEntry.transcript != nil {
+			transcript := orderedEntry.transcript
+			entries = append(entries, feedEntry{
+				id:                tui.NewNodeID(fmt.Sprintf("chat-%s-message-%d", presentation.feedKey, transcript.id)),
+				role:              transcript.role,
+				text:              transcript.text,
+				state:             transcript.state,
+				transcriptEntryID: transcript.id,
+			})
+			continue
+		}
+		activity := *orderedEntry.activity
+		if len(entries) != 0 && len(entries[len(entries)-1].activities) != 0 {
+			entries[len(entries)-1].activities = append(entries[len(entries)-1].activities, activity)
+			continue
+		}
+		entries = append(entries, feedEntry{
+			id:         tui.NewNodeID(fmt.Sprintf("chat-%s-activity-group-%d", presentation.feedKey, activity.id)),
+			activities: []runActivity{activity},
+		})
+	}
+	return entries
+}
+
+func buildActivityFeedEntries(presentation *runPresentation) []feedEntry {
+	if len(presentation.activities) == 0 {
+		return nil
+	}
+	return []feedEntry{{
+		id:           tui.NewNodeID("activity-" + presentation.feedKey + "-document"),
+		activities:   append([]runActivity(nil), presentation.activities...),
+		showSequence: true,
+	}}
+}
+
 func (entry feedEntry) node(
+	tab feedTab,
 	selectedID tui.NodeID,
 	selectedState widget.SelectableTextState,
 ) tui.Node[message] {
-	switch {
-	case entry.heading:
-		return tui.StyledText[message](entry.text, vt.Style{Bold: true}).WithID(entry.id)
-	}
 	content, selectable := entry.selectableContent()
 	if !selectable {
 		return tui.Text[message](entry.text).WithID(entry.id)
@@ -80,24 +121,45 @@ func (entry feedEntry) node(
 		state,
 		func(next widget.SelectableTextState) message {
 			return message{
-				kind: selectableTextChangedMessage, selectableTextID: entry.id, selectableText: next,
+				kind: selectableTextChangedMessage, feedTab: tab,
+				selectableTextID: entry.id, selectableText: next,
 			}
 		},
 	).Style(style).OnCopy(func(request widget.TextCopyRequest) message {
-		return message{kind: copyTextMessage, copyText: request.Text}
+		return message{kind: copyTextMessage, feedTab: tab, copyText: request.Text}
 	}).Node()
 }
 
 func (entry feedEntry) selectableContent() (widget.SelectableTextContent, bool) {
 	switch {
-	case entry.activity != nil:
-		label := entry.activity.label
-		if entry.activity.state != "" {
-			label += " [" + string(entry.activity.state) + "]"
+	case len(entry.activities) != 0:
+		spans := make([]tui.TextSpan, 0, 2*len(entry.activities)-1)
+		for index, activity := range entry.activities {
+			if index != 0 {
+				spans = append(spans, tui.NewTextSpan("\n", vt.Style{}))
+			}
+			label := activity.label
+			if activity.state != "" {
+				label += " [" + string(activity.state) + "]"
+			}
+			style := vt.Style{}
+			if entry.showSequence {
+				label = fmt.Sprintf("%03d  %s", activity.sequence, label)
+			} else {
+				label = "  " + label
+				switch activity.state {
+				case activityStateRunning,
+					activityStateWaiting,
+					activityStateFailed,
+					activityStateCanceled,
+					activityStateDenied:
+				default:
+					style.Dim = true
+				}
+			}
+			spans = append(spans, tui.NewTextSpan(label, style))
 		}
-		return widget.NewPlainSelectableTextContent(
-			fmt.Sprintf("%03d  %s", entry.activity.sequence, label),
-		), true
+		return widget.NewSelectableTextContent(spans), true
 	case entry.role == agent.RoleUser || entry.role == agent.RoleAssistant:
 		role := "Assistant"
 		style := vt.Style{}
@@ -119,17 +181,13 @@ func (entry feedEntry) selectableContent() (widget.SelectableTextContent, bool) 
 }
 
 func (entry feedEntry) estimatedHeight(width uint32) uint32 {
-	if entry.activity != nil || entry.heading {
-		return 1
-	}
 	if width == 0 {
 		return 1
 	}
+	content, selectable := entry.selectableContent()
 	text := entry.text
-	if entry.role == agent.RoleUser {
-		text = "You: " + text
-	} else if entry.role == agent.RoleAssistant {
-		text = "Assistant: " + text
+	if selectable {
+		text = content.Text()
 	}
 	lines := uint64(0)
 	for _, line := range strings.Split(text, "\n") {
@@ -172,8 +230,10 @@ func (view *runView) composerVisible() bool {
 }
 
 func (view *runView) markFeedUpdated() {
-	if view.historyView != nil || !view.feedAtEnd {
-		view.feedUnread = true
+	for tab := feedTabChat; tab < feedTabCount; tab++ {
+		if view.historyView != nil || !view.feedAtEnd[tab] {
+			view.feedUnread[tab] = true
+		}
 	}
 }
 
@@ -206,16 +266,76 @@ func (view *runView) recordComposerHistory(value string) {
 	view.composer = view.composer.ReconcileHistory(history)
 }
 
-func virtualFlowUpdate(presentation *runPresentation) tui.VirtualFlowUpdate {
-	if presentation.feedPartial {
-		return tui.ChangedVirtualFlowUpdate(
-			presentation.revision,
-			presentation.feedPrevious,
-			presentation.feedChangedStart,
-			presentation.feedChangedEnd,
-		)
+func virtualFlowUpdate(
+	presentation *runPresentation,
+	tab feedTab,
+	entries []feedEntry,
+) tui.VirtualFlowUpdate {
+	if tab == feedTabChat && presentation.feedPartial &&
+		presentation.streamingEntry >= 0 &&
+		presentation.streamingEntry < len(presentation.transcript) {
+		streamingID := presentation.transcript[presentation.streamingEntry].id
+		for index, entry := range entries {
+			if entry.transcriptEntryID != streamingID {
+				continue
+			}
+			return tui.ChangedVirtualFlowUpdate(
+				presentation.revision,
+				presentation.feedPrevious,
+				index,
+				index+1,
+			)
+		}
 	}
 	return tui.ResetVirtualFlowUpdate(presentation.revision)
+}
+
+func feedCopyText(presentation *runPresentation, tab feedTab) (string, bool) {
+	entries, _ := buildFeedEntries(presentation, tab)
+	if len(entries) == 0 {
+		return "", false
+	}
+	const truncatedMarker = "\n[copy truncated]"
+	var builder strings.Builder
+	for _, entry := range entries {
+		content, selectable := entry.selectableContent()
+		if !selectable || content.Text() == "" {
+			continue
+		}
+		separator := ""
+		if builder.Len() != 0 {
+			separator = "\n"
+		}
+		text := separator + content.Text()
+		if builder.Len()+len(text) <= maximumFeedCopyBytes {
+			builder.WriteString(text)
+			continue
+		}
+		remaining := maximumFeedCopyBytes - len(truncatedMarker) - builder.Len()
+		if remaining > 0 {
+			builder.WriteString(boundedUTF8Prefix(text, remaining))
+		}
+		prefix := builder.String()
+		if len(prefix) > maximumFeedCopyBytes-len(truncatedMarker) {
+			prefix = boundedUTF8Prefix(prefix, maximumFeedCopyBytes-len(truncatedMarker))
+		}
+		return prefix + truncatedMarker, true
+	}
+	return builder.String(), false
+}
+
+func boundedUTF8Prefix(value string, maximum int) string {
+	if maximum <= 0 {
+		return ""
+	}
+	if len(value) <= maximum {
+		return value
+	}
+	end := maximum
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	return value[:end]
 }
 
 func observabilitySummary(presentation *runPresentation) string {
