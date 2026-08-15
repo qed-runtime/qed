@@ -11,7 +11,7 @@ bounded project context、1つのcapability Policy、host所有Evidence、1つ�
 | --- | --- | --- | --- |
 | `search_text` | `qed.workspace` | `filesystem.read` | bounded UTF-8 fileをliteralまたはregular expressionで検索 |
 | `read_file` | `qed.workspace` | `filesystem.read` | bounded line rangeを読みfull-file SHA-256 digestを返却 |
-| `apply_patch` | `qed.workspace` | `filesystem.write` | すべてのpath preconditionが一致する場合にunified diffを適用 |
+| `apply_patch` | `qed.workspace` | `filesystem.write` | すべてのpath preconditionが一致する場合にboundedなcountedまたはmarker patchを適用 |
 | `run_command` | `qed.process` | `process.execute` | shell評価なしで1つのexecutableを直接実行 |
 | `git_status` | `qed.git` | `git.read` | bounded porcelain v2 statusを返却 |
 | `git_diff` | `qed.git` | `git.read` | boundedなworktree、staged、base-relative patchを返却し、worktreeとbaseではboundedなuntracked contentも追加 |
@@ -19,8 +19,11 @@ bounded project context、1つのcapability Policy、host所有Evidence、1つ�
 `apply_patch`での削除には`filesystem.delete`も必要です
 公式Tool argumentはunknown field、duplicate key、trailing value、invalid type、Tool固有limit violationを拒否するstrictかつboundedなdecoderを使います
 
-`apply_patch`は`--- a/path`と`+++ b/path`、および同じ意味のworkspace-relativeな`--- path`と`+++ path` headerを受理します
-model-facing Tool schemaとCoding Profile instructionはprefix付きcanonical形式を推奨し、`*** Begin Patch` markerではなく`@@` unified diff hunkを要求し、`read_file`が返した完全な`sha256:...` valueを変更せず使うようmodelへ伝えます
+`apply_patch`は`--- a/path`と`+++ b/path`、および同じ意味のworkspace-relative headerを使うcounted unified diffを受理します
+`*** Begin Patch` envelopeと`*** Update File`、`*** Add File`、`*** Delete File` sectionからなる安全なmarker形式も受理します
+marker update hunkはcounted unified header、または`@@`に続く正確なcontext、削除、追加lineを使用できます
+countを持たないold lineは1か所だけを特定する必要があり、複数箇所へ一致する場合は変更せず拒否します
+marker moveは未対応で、どちらの形式でも変更する全pathにcurrent digestまたはabsence preconditionを正確に1つ要求します
 
 test実行に専用Test Extensionは必要ありません
 Profileは`qed.process`の汎用`run_command` Toolを公開し、Host Policyが用途に応じて許可するexecutable、argument、directory、capabilityを制限します
@@ -364,6 +367,7 @@ command実行前にHostがすべてのsource fileを検査し、既知の安全�
 command environmentはGo module download、checksum service access、telemetry、VCS access、CGO、toolchain downloadを無効にします
 
 modelはRuntime budget内で非mutatingな`apply_patch`構文とpreconditionの失敗から自己修正できます
+既定のrepeated Tool guardは成功を挟まず`apply_patch`が4回失敗するとRunを停止します
 Evidence検証は全試行を保持し、成功した変更が正確に1つあること、commandとGit確認が成功したこと、各失敗のvalidationまたはPolicy段階が整合することを要求します
 別pathの変更、未対応file操作、想定外Tool、未分類失敗からの継続は引き続きtestを失敗させます
 

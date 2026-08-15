@@ -1272,6 +1272,106 @@ func TestRuntimeStopsAtProviderCallLimit(t *testing.T) {
 	}
 }
 
+func TestRuntimeStopsAfterRepeatedFailuresFromOneTool(t *testing.T) {
+	t.Parallel()
+
+	arguments := []json.RawMessage{
+		json.RawMessage(`{}`),
+		json.RawMessage(`{"text":1}`),
+		json.RawMessage(`{"text":null}`),
+		json.RawMessage(`{"text":[]}`),
+		json.RawMessage(`{"text":{}}`),
+	}
+	responses := make([]providerResponse, 5)
+	for index := range responses {
+		responses[index] = providerResponse{message: agent.Message{
+			Role: agent.RoleAssistant,
+			ToolCalls: []agent.ToolCall{{
+				ID:        fmt.Sprintf("invalid-%d", index+1),
+				Name:      "uppercase",
+				Arguments: arguments[index],
+			}},
+		}}
+	}
+	provider := &scriptedProvider{responses: responses}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider:                provider,
+		Tools:                   []agent.Tool{uppercaseTool{}},
+		MaxProviderCalls:        10,
+		MaxRepeatedToolFailures: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events, result, runErr := collectRun(handle)
+	if !errors.Is(runErr, agent.ErrRepeatedToolFailureLimit) {
+		t.Fatalf("Wait() error = %v, want ErrRepeatedToolFailureLimit", runErr)
+	}
+	if result.Status != agent.RunStatusFailed || result.ProviderCalls != 4 || result.ToolCalls != 4 {
+		t.Fatalf("RunResult = %#v", result)
+	}
+	if result.ToolResults[0].Output == result.ToolResults[1].Output {
+		t.Fatalf("Tool failure outputs unexpectedly match: %q", result.ToolResults[0].Output)
+	}
+	if got := len(provider.Requests()); got != 4 {
+		t.Fatalf("Provider requests = %d, want 4", got)
+	}
+	terminal := events[len(events)-1]
+	if terminal.Type != agent.EventRunFailed ||
+		!strings.Contains(terminal.Error, agent.ErrRepeatedToolFailureLimit.Error()) ||
+		strings.Contains(terminal.Error, "scripted provider exhausted") {
+		t.Fatalf("terminal Event = %#v", terminal)
+	}
+}
+
+func TestRuntimeSuccessfulToolCallResetsRepeatedFailureCount(t *testing.T) {
+	t.Parallel()
+
+	toolCall := func(id string, arguments json.RawMessage) providerResponse {
+		return providerResponse{message: agent.Message{
+			Role: agent.RoleAssistant,
+			ToolCalls: []agent.ToolCall{{
+				ID: id, Name: "uppercase", Arguments: arguments,
+			}},
+		}}
+	}
+	provider := &scriptedProvider{responses: []providerResponse{
+		toolCall("fail-1", json.RawMessage(`{}`)),
+		toolCall("fail-2", json.RawMessage(`{"text":1}`)),
+		toolCall("success", json.RawMessage(`{"text":"ok"}`)),
+		toolCall("fail-3", json.RawMessage(`{"text":null}`)),
+		toolCall("fail-4", json.RawMessage(`{"text":[]}`)),
+		{message: agent.Message{Role: agent.RoleAssistant, Text: "done"}},
+	}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider:                provider,
+		Tools:                   []agent.Tool{uppercaseTool{}},
+		MaxProviderCalls:        10,
+		MaxRepeatedToolFailures: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, runErr := collectRun(handle)
+	if runErr != nil || result.Status != agent.RunStatusCompleted ||
+		result.ProviderCalls != 6 || result.ToolCalls != 5 {
+		t.Fatalf("RunResult = %#v, error = %v", result, runErr)
+	}
+}
+
 func TestRuntimeCancellation(t *testing.T) {
 	t.Parallel()
 

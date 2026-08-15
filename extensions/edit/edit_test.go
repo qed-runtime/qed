@@ -29,13 +29,125 @@ func TestApplyPatchDefinitionExplainsFormatAndPreconditions(t *testing.T) {
 	}
 	schema := string(definition.InputSchema)
 	for _, expected := range []string{
-		"Unified diff text with --- a/path, +++ b/path, and @@ hunk headers",
+		"Counted unified diff, or *** Begin Patch format",
 		"Full sha256:... digest returned by read_file",
 		"Set true only when adding a path that does not exist",
 	} {
 		if !strings.Contains(schema, expected) {
 			t.Errorf("InputSchema does not contain %q", expected)
 		}
+	}
+}
+
+func TestApplyPatchAcceptsMarkerUpdateWithExactContext(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "source.txt")
+	before := "one\ntwo\nthree\n"
+	if err := os.WriteFile(path, []byte(before), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	result := execute(t, newTool(t, root), map[string]any{
+		"patch": "*** Begin Patch\n*** Update File: source.txt\n@@\n one\n-two\n+TWO\n three\n*** End Patch\n",
+		"preconditions": []map[string]any{{
+			"path": "source.txt", "sha256": digest(before),
+		}},
+	})
+	if result.IsError {
+		t.Fatalf("result = %#v", result)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != "one\nTWO\nthree\n" {
+		t.Fatalf("file = %q, %v", after, err)
+	}
+}
+
+func TestApplyPatchAcceptsMarkerAddAndDelete(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	removed := filepath.Join(root, "removed.txt")
+	if err := os.WriteFile(removed, []byte("remove\nme\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := execute(t, newTool(t, root), map[string]any{
+		"patch": "*** Begin Patch\n*** Add File: added.txt\n+hello\n+world\n*** Delete File: removed.txt\n*** End Patch\n",
+		"preconditions": []map[string]any{
+			{"path": "added.txt", "absent": true},
+			{"path": "removed.txt", "sha256": digest("remove\nme\n")},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("result = %#v", result)
+	}
+	added, err := os.ReadFile(filepath.Join(root, "added.txt"))
+	if err != nil || string(added) != "hello\nworld\n" {
+		t.Fatalf("added file = %q, %v", added, err)
+	}
+	if _, err := os.Stat(removed); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removed file still exists: %v", err)
+	}
+}
+
+func TestApplyPatchRejectsAmbiguousMarkerContextWithoutMutation(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "source.txt")
+	before := "same\nvalue\nsame\nvalue\n"
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := executeError(t, newTool(t, root), map[string]any{
+		"patch": "*** Begin Patch\n*** Update File: source.txt\n@@\n-same\n+changed\n*** End Patch\n",
+		"preconditions": []map[string]any{{
+			"path": "source.txt", "sha256": digest(before),
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "more than one location") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil || string(after) != before {
+		t.Fatalf("file changed after rejection = %q, %v", after, readErr)
+	}
+}
+
+func TestApplyPatchRejectsMarkerTraversalWithoutMutation(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	err := executeError(t, newTool(t, root), map[string]any{
+		"patch":         "*** Begin Patch\n*** Add File: ../outside.txt\n+unsafe\n*** End Patch\n",
+		"preconditions": []map[string]any{{"path": "../outside.txt", "absent": true}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "within the workspace") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestApplyPatchRejectsMarkerMoveWithoutMutation(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "source.txt")
+	before := "before\n"
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := executeError(t, newTool(t, root), map[string]any{
+		"patch": "*** Begin Patch\n*** Update File: source.txt\n*** Move to: moved.txt\n@@\n-before\n+after\n*** End Patch\n",
+		"preconditions": []map[string]any{{
+			"path": "source.txt", "sha256": digest(before),
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "move") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil || string(after) != before {
+		t.Fatalf("file changed after rejection = %q, %v", after, readErr)
 	}
 }
 
@@ -275,6 +387,18 @@ func execute(t *testing.T, tool agent.Tool, request any) agent.ToolResult {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	return result
+}
+
+func executeError(t *testing.T, tool agent.Tool, request any) error {
+	t.Helper()
+	arguments, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Execute(context.Background(), agent.ToolCall{
+		ID: "call-1", Name: tool.Definition().Name, Arguments: arguments,
+	})
+	return err
 }
 
 func digest(value string) string {

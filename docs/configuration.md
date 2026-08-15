@@ -68,6 +68,7 @@ The format is used by `qed`, `qed tui`, `qed run`, and `qed session resume`
       "provider": "primary",
       "profile": "coding",
       "instructions": "Use specialists when useful and return the final answer",
+      "max_repeated_tool_failures": 4,
       "provider_retry": {
         "max_attempts": 3,
         "initial_backoff": "1s",
@@ -380,10 +381,17 @@ does not request approval for an `ask` outcome. See
 | `instructions` | no | Base instructions for this Agent |
 | `max_provider_calls` | no | Runtime-local Provider call limit |
 | `max_tool_calls` | no | Runtime-local Tool call limit |
+| `max_repeated_tool_failures` | no | Failed calls to one non-retrieval Tool allowed without a success, default `4` |
 | `provider_retry` | no | Bounded retry policy for transient Provider failures |
 | `context` | no | Evidence-preserving context compression policy |
 | `cache` | no | Provider-neutral prompt-cache policy |
 | `delegations` | no | Subagent Tools exposed to this Agent |
+
+`max_repeated_tool_failures` counts failures independently for each Tool and
+resets that Tool's count after a successful call. A Run stops with
+`ErrRepeatedToolFailureLimit` after the configured number of failures even when
+their error text differs. Built-in Context retrieval results are excluded
+because their own per-Run limits intentionally return bounded Tool errors
 
 Delegation fields
 

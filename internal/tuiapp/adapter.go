@@ -20,6 +20,7 @@ const (
 	maximumApprovalPayloadBytes = 64 << 10
 	maximumApprovalPreviewRunes = 512
 	maximumDiagnosticRunes      = 96
+	maximumSummaryOutputBytes   = 1 << 20
 )
 
 type activityState string
@@ -46,6 +47,16 @@ type runActivity struct {
 	key      string
 	label    string
 	state    activityState
+	tool     string
+	failure  string
+}
+
+type runWorkSummary struct {
+	patchedFiles      int
+	checksPassed      int
+	checksFailed      int
+	unverifiedActions int
+	observed          bool
 }
 
 type approvalPrompt struct {
@@ -83,6 +94,13 @@ type presentationUpdate struct {
 	context            *contextObservation
 	cache              *cacheObservation
 	usage              *agent.Usage
+	resetWork          bool
+	patchedFiles       int
+	checksPassed       int
+	checksFailed       int
+	unverifiedActions  int
+	resetUnverified    bool
+	observedWork       bool
 }
 
 type runPresentation struct {
@@ -103,6 +121,8 @@ type runPresentation struct {
 	feedChangedStart   int
 	feedChangedEnd     int
 	feedPartial        bool
+	work               runWorkSummary
+	failureCounts      map[string]int
 }
 
 type contextObservation struct {
@@ -207,8 +227,34 @@ func (presentation *runPresentation) apply(update presentationUpdate) {
 		presentation.identity.sessionID = update.identity.sessionID
 	}
 	if update.status != "" {
-		presentation.status = update.status
+		if update.status != "failed" || !strings.HasPrefix(presentation.status, "failed: ") {
+			presentation.status = update.status
+		}
 	}
+	if update.resetWork {
+		presentation.work = runWorkSummary{}
+		presentation.failureCounts = nil
+	}
+	presentation.work.patchedFiles = saturatingAddInt(
+		presentation.work.patchedFiles,
+		update.patchedFiles,
+	)
+	presentation.work.checksPassed = saturatingAddInt(
+		presentation.work.checksPassed,
+		update.checksPassed,
+	)
+	presentation.work.checksFailed = saturatingAddInt(
+		presentation.work.checksFailed,
+		update.checksFailed,
+	)
+	if update.resetUnverified {
+		presentation.work.unverifiedActions = 0
+	}
+	presentation.work.unverifiedActions = saturatingAddInt(
+		presentation.work.unverifiedActions,
+		update.unverifiedActions,
+	)
+	presentation.work.observed = presentation.work.observed || update.observedWork
 	if update.userMessage != nil {
 		presentation.applyUserMessage(*update.userMessage, update.userMessageOrigin)
 	}
@@ -391,6 +437,24 @@ func (presentation *runPresentation) resolveApproval(approved bool) (string, boo
 }
 
 func (presentation *runPresentation) applyActivity(activity runActivity) {
+	if activity.tool != "" {
+		if activity.failure == "" {
+			for key := range presentation.failureCounts {
+				if strings.HasPrefix(key, activity.tool+"\x00") {
+					delete(presentation.failureCounts, key)
+				}
+			}
+		} else {
+			if presentation.failureCounts == nil {
+				presentation.failureCounts = make(map[string]int)
+			}
+			key := activity.tool + "\x00" + activity.failure
+			presentation.failureCounts[key]++
+			if count := presentation.failureCounts[key]; count > 1 {
+				activity.label += fmt.Sprintf(" (repeat %d)", count)
+			}
+		}
+	}
 	if activity.key != "" {
 		for index := len(presentation.activities) - 1; index >= 0; index-- {
 			if presentation.activities[index].key != activity.key {
@@ -510,6 +574,7 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 	switch event.Type {
 	case agent.EventRunStarted:
 		update.status = "running"
+		update.resetWork = true
 		activity("Run started", "")
 	case agent.EventUserMessageAdded:
 		update.status = "running"
@@ -613,13 +678,28 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 			reason := safeToolFailureReason(tool, event.ToolResult)
 			label += ": " + reason
 			update.status = "tool failed: " + reason
+			update.activity = &runActivity{
+				sequence: event.Sequence,
+				key:      toolActivityKey(event, tool),
+				label:    label,
+				state:    state,
+				tool:     tool,
+				failure:  reason,
+			}
+		} else {
+			summary := safeToolSuccessSummary(tool, event.ToolResult)
+			if summary != "" {
+				label += ": " + summary
+			}
+			update.activity = &runActivity{
+				sequence: event.Sequence,
+				key:      toolActivityKey(event, tool),
+				label:    label,
+				state:    state,
+				tool:     tool,
+			}
 		}
-		update.activity = &runActivity{
-			sequence: event.Sequence,
-			key:      toolActivityKey(event, tool),
-			label:    label,
-			state:    state,
-		}
+		applyToolWorkSummary(&update, tool, event.ToolResult)
 	case agent.EventRunWaiting:
 		adaptWaitEvent(event, &update)
 	case agent.EventRunResumed:
@@ -631,9 +711,15 @@ func adaptRunEvent(event agent.Event) presentationUpdate {
 		update.terminal = true
 		activity("Run completed", activityStateCompleted)
 	case agent.EventRunFailed:
+		reason := safeRunFailureReason(event.Error, event.ProviderError)
 		update.status = "failed"
+		label := "Run failed"
+		if reason != "" {
+			update.status += ": " + reason
+			label += ": " + reason
+		}
 		update.terminal = true
-		activity("Run failed", activityStateFailed)
+		activity(label, activityStateFailed)
 	case agent.EventRunCanceled:
 		update.status = "canceled"
 		update.terminal = true
@@ -661,6 +747,11 @@ func adaptRunResult(result agent.RunResult, runErr error) presentationUpdate {
 		update.status = "canceled"
 	case agent.RunStatusFailed:
 		update.status = "failed"
+		if runErr != nil {
+			if reason := safeRunFailureReason(runErr.Error(), nil); reason != "" {
+				update.status += ": " + reason
+			}
+		}
 	default:
 		if runErr != nil {
 			update.status = "failed"
@@ -906,6 +997,161 @@ func safeToolFailureReason(tool string, result *agent.ToolResult) string {
 		return "Extension error"
 	}
 	return "execution error"
+}
+
+func safeToolSuccessSummary(tool string, result *agent.ToolResult) string {
+	if result == nil || result.IsError {
+		return ""
+	}
+	switch tool {
+	case "apply_patch":
+		if count, ok := safePatchChangeCount(result.Output); ok {
+			return fmt.Sprintf("changed %d file(s)", count)
+		}
+	case "run_command":
+		if result.ContextOperation != nil {
+			switch result.ContextOperation.Kind {
+			case agent.ContextOperationVerification:
+				return "check passed"
+			case agent.ContextOperationCommit:
+				return "commit completed"
+			case agent.ContextOperationMutation:
+				return "command completed"
+			}
+		}
+	case "git_status":
+		if count, ok := safeGitStatusEntryCount(result.Output); ok {
+			return fmt.Sprintf("observed %d change(s)", count)
+		}
+	case "git_diff":
+		if truncated, ok := safeGitDiffSummary(result.Output); ok {
+			if truncated {
+				return "captured truncated diff"
+			}
+			return "captured diff"
+		}
+	}
+	return ""
+}
+
+func applyToolWorkSummary(update *presentationUpdate, tool string, result *agent.ToolResult) {
+	if update == nil {
+		return
+	}
+	switch tool {
+	case "apply_patch", "run_command", "git_status", "git_diff":
+		update.observedWork = true
+	}
+	if result == nil {
+		return
+	}
+	if tool == "apply_patch" && !result.IsError {
+		if count, ok := safePatchChangeCount(result.Output); ok {
+			update.patchedFiles = count
+		}
+	}
+	if result.ContextOperation == nil {
+		return
+	}
+	switch result.ContextOperation.Kind {
+	case agent.ContextOperationVerification:
+		if result.IsError {
+			update.checksFailed = 1
+		} else {
+			update.checksPassed = 1
+			update.resetUnverified = true
+		}
+	case agent.ContextOperationMutation:
+		update.unverifiedActions = 1
+	case agent.ContextOperationCommit:
+		update.unverifiedActions = 1
+	}
+}
+
+func safePatchChangeCount(output string) (int, bool) {
+	if len(output) == 0 || len(output) > maximumSummaryOutputBytes {
+		return 0, false
+	}
+	var response struct {
+		Changes []struct {
+			Kind string `json:"kind"`
+		} `json:"changes"`
+	}
+	if err := json.Unmarshal([]byte(output), &response); err != nil || len(response.Changes) == 0 || len(response.Changes) > 64 {
+		return 0, false
+	}
+	for _, change := range response.Changes {
+		switch change.Kind {
+		case "add", "update", "delete":
+		default:
+			return 0, false
+		}
+	}
+	return len(response.Changes), true
+}
+
+func safeGitStatusEntryCount(output string) (int, bool) {
+	if len(output) == 0 || len(output) > maximumSummaryOutputBytes {
+		return 0, false
+	}
+	var response struct {
+		Entries []struct{} `json:"entries"`
+	}
+	if err := json.Unmarshal([]byte(output), &response); err != nil || len(response.Entries) > 1024 {
+		return 0, false
+	}
+	return len(response.Entries), true
+}
+
+func safeGitDiffSummary(output string) (bool, bool) {
+	if len(output) == 0 || len(output) > maximumSummaryOutputBytes {
+		return false, false
+	}
+	var response struct {
+		Scope     string `json:"scope"`
+		Truncated bool   `json:"truncated"`
+	}
+	if err := json.Unmarshal([]byte(output), &response); err != nil || response.Scope == "" {
+		return false, false
+	}
+	return response.Truncated, true
+}
+
+func safeRunFailureReason(raw string, providerError *agent.ProviderErrorInfo) string {
+	for _, known := range []struct {
+		needle string
+		label  string
+	}{
+		{agent.ErrRepeatedToolFailureLimit.Error(), "repeated Tool failures"},
+		{agent.ErrProviderCallLimit.Error(), "provider call limit reached"},
+		{agent.ErrToolCallLimit.Error(), "Tool call limit reached"},
+		{agent.ErrBudgetProviderCalls.Error(), "shared provider call budget reached"},
+		{agent.ErrBudgetToolCalls.Error(), "shared Tool call budget reached"},
+		{agent.ErrBudgetInputTokens.Error(), "input token budget reached"},
+		{agent.ErrBudgetOutputTokens.Error(), "output token budget reached"},
+		{agent.ErrBudgetCost.Error(), "cost budget reached"},
+	} {
+		if strings.Contains(raw, known.needle) {
+			return known.label
+		}
+	}
+	if providerError == nil {
+		return ""
+	}
+	switch string(providerError.Code) {
+	case "rate_limited":
+		return "provider rate limit"
+	case "authentication":
+		return "provider authentication failed"
+	case "invalid_request":
+		return "provider rejected the request"
+	case "retryable":
+		return "provider temporarily unavailable"
+	case "terminal":
+		return "provider request failed"
+	default:
+		return ""
+	}
 }
 
 func decodeApprovalPrompt(wait agent.WaitRequest) (approvalPrompt, error) {

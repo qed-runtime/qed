@@ -139,12 +139,58 @@ func TestControlCProducesCancelMessage(t *testing.T) {
 	}
 }
 
-func TestChatTerminalOptionsEnableMouseInput(t *testing.T) {
+func TestChatTerminalOptionsEnableSelectionAndClipboard(t *testing.T) {
 	t.Parallel()
 
 	options := chatTerminalOptions()
-	if options.MouseTracking == nil || *options.MouseTracking != vt.MouseTrackingPress {
-		t.Fatalf("MouseTracking = %v, want press tracking", options.MouseTracking)
+	if options.MouseTracking == nil || *options.MouseTracking != vt.MouseTrackingButton {
+		t.Fatalf("MouseTracking = %v, want button-motion tracking", options.MouseTracking)
+	}
+	if options.Clipboard != tui.TerminalClipboardOSC52 {
+		t.Fatalf("Clipboard = %v, want OSC 52", options.Clipboard)
+	}
+}
+
+func TestChatSelectionSurvivesRedrawAndControlCCopiesInsteadOfCanceling(t *testing.T) {
+	t.Parallel()
+
+	canceled := false
+	view := newRunView("", runIdentity{sessionID: "copy-session"}, nil, func() { canceled = true }, nil)
+	view.presentation.applyUserMessage("copy me", agent.UserMessageOriginRunInput)
+	entries, _ := buildFeedEntries(&view.presentation)
+	if len(entries) == 0 {
+		t.Fatal("chat has no selectable entry")
+	}
+	messageID := entries[0].id
+	harness, err := tuitest.New(view, tui.Size{Width: 80, Height: 16}, mapEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer harness.Close()
+	if focused, err := harness.RequestFocus(messageID); err != nil || !focused {
+		t.Fatalf("RequestFocus() = %t, %v", focused, err)
+	}
+	if err := harness.Input([]byte{0x01}); err != nil {
+		t.Fatalf("select all: %v", err)
+	}
+	if start, end, ok := view.selectableText.Selection(); !ok || start != 0 || end != len("You: copy me") {
+		t.Fatalf("selection = %d:%d, %t", start, end, ok)
+	}
+	if err := harness.Send(message{kind: runEventMessage, update: adaptRunEvent(agent.Event{
+		RunID: "run-copy", Sequence: 2, Type: agent.EventCurrentWorldStateCaptured,
+		CurrentWorldState: &agent.CurrentWorldState{},
+	})}); err != nil {
+		t.Fatalf("redraw event: %v", err)
+	}
+	if err := harness.Input([]byte{0x03}); err != nil {
+		t.Fatalf("copy selection: %v", err)
+	}
+	request, ok := harness.TakeClipboardRequest()
+	if !ok || request.Text() != "You: copy me" {
+		t.Fatalf("clipboard request = %q, %t", request.Text(), ok)
+	}
+	if canceled {
+		t.Fatal("Ctrl-C canceled the Run while a text selection owned focus")
 	}
 }
 
@@ -428,6 +474,144 @@ func TestAdapterClassifiesToolFailuresWithoutRenderingRawOutput(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAdapterSummarizesRepeatedFailuresAndTerminalWorkWithoutContent(t *testing.T) {
+	t.Parallel()
+
+	plain := newRunPresentation("", runIdentity{})
+	plain.apply(adaptRunEvent(agent.Event{Type: agent.EventRunStarted, Sequence: 1}))
+	plain.apply(adaptRunEvent(agent.Event{Type: agent.EventRunCompleted, Sequence: 2}))
+	if summary, ok := workSummary(&plain); ok {
+		t.Fatalf("plain workSummary() = %q, want unavailable", summary)
+	}
+
+	presentation := newRunPresentation("", runIdentity{})
+	presentation.apply(adaptRunEvent(agent.Event{Type: agent.EventRunStarted, Sequence: 1}))
+	for index := 0; index < 2; index++ {
+		callID := fmt.Sprintf("patch-%d", index+1)
+		presentation.apply(adaptRunEvent(agent.Event{
+			Type: agent.EventToolCompleted, Sequence: uint64(index + 2),
+			ToolCall: &agent.ToolCall{ID: callID, Name: "apply_patch"},
+			ToolResult: &agent.ToolResult{
+				CallID: callID, Name: "apply_patch", IsError: true,
+				Output: "parse apply_patch patch: private path and content",
+			},
+		}))
+	}
+	presentation.apply(adaptRunEvent(agent.Event{
+		Type: agent.EventToolCompleted, Sequence: 4,
+		ToolCall: &agent.ToolCall{ID: "patch-success", Name: "apply_patch"},
+		ToolResult: &agent.ToolResult{
+			CallID: "patch-success", Name: "apply_patch",
+			Output:           `{"changes":[{"path":"private.go","kind":"update"}]}`,
+			ContextOperation: &agent.ContextOperation{Kind: agent.ContextOperationMutation},
+		},
+	}))
+	presentation.apply(adaptRunEvent(agent.Event{
+		Type: agent.EventToolCompleted, Sequence: 5,
+		ToolCall: &agent.ToolCall{ID: "verify", Name: "run_command"},
+		ToolResult: &agent.ToolResult{
+			CallID: "verify", Name: "run_command", Output: "private command output",
+			ContextOperation: &agent.ContextOperation{Kind: agent.ContextOperationVerification},
+		},
+	}))
+	presentation.apply(adaptRunEvent(agent.Event{
+		Type: agent.EventRunFailed, Sequence: 6,
+		Error: agent.ErrRepeatedToolFailureLimit.Error() + ": private Tool detail",
+	}))
+
+	if len(presentation.activities) != 6 ||
+		presentation.activities[2].label != "Tool apply_patch: invalid patch (repeat 2)" {
+		t.Fatalf("activities = %#v", presentation.activities)
+	}
+	if presentation.status != "failed: repeated Tool failures" {
+		t.Fatalf("status = %q", presentation.status)
+	}
+	if summary, ok := workSummary(&presentation); !ok ||
+		summary != "Work: patched=1 checks=1 passed, 0 failed unverified=0" {
+		t.Fatalf("workSummary() = %q, %t", summary, ok)
+	}
+	ordered := newRunPresentation("", runIdentity{})
+	ordered.apply(adaptRunEvent(agent.Event{Type: agent.EventRunStarted, Sequence: 1}))
+	ordered.apply(adaptRunEvent(agent.Event{
+		Type: agent.EventToolCompleted, Sequence: 2,
+		ToolCall: &agent.ToolCall{ID: "patch-before-check", Name: "apply_patch"},
+		ToolResult: &agent.ToolResult{
+			CallID: "patch-before-check", Name: "apply_patch",
+			Output:           `{"changes":[{"path":"private.go","kind":"update"}]}`,
+			ContextOperation: &agent.ContextOperation{Kind: agent.ContextOperationMutation},
+		},
+	}))
+	ordered.apply(adaptRunEvent(agent.Event{
+		Type: agent.EventToolCompleted, Sequence: 3,
+		ToolCall: &agent.ToolCall{ID: "ordered-verify", Name: "run_command"},
+		ToolResult: &agent.ToolResult{
+			CallID: "ordered-verify", Name: "run_command", Output: "private command output",
+			ContextOperation: &agent.ContextOperation{Kind: agent.ContextOperationVerification},
+		},
+	}))
+	ordered.apply(adaptRunEvent(agent.Event{
+		Type: agent.EventToolCompleted, Sequence: 4,
+		ToolCall: &agent.ToolCall{ID: "patch-after-check", Name: "apply_patch"},
+		ToolResult: &agent.ToolResult{
+			CallID: "patch-after-check", Name: "apply_patch",
+			Output:           `{"changes":[{"path":"private.go","kind":"update"}]}`,
+			ContextOperation: &agent.ContextOperation{Kind: agent.ContextOperationMutation},
+		},
+	}))
+	if summary, ok := workSummary(&ordered); !ok ||
+		summary != "Work: patched=2 checks=1 passed, 0 failed unverified=1" {
+		t.Fatalf("post-check workSummary() = %q, %t", summary, ok)
+	}
+	for _, activity := range presentation.activities {
+		for _, protected := range []string{"private path", "private.go", "private command output", "private Tool detail"} {
+			if strings.Contains(activity.label, protected) {
+				t.Fatalf("activity contains protected value %q: %#v", protected, activity)
+			}
+		}
+	}
+}
+
+func TestActivitySelectionSurvivesRedrawAndCopies(t *testing.T) {
+	t.Parallel()
+
+	view := newRunView("", runIdentity{sessionID: "activity-copy"}, nil, func() {}, nil)
+	view.presentation.apply(adaptRunEvent(agent.Event{Type: agent.EventRunStarted, Sequence: 1}))
+	entries, _ := buildFeedEntries(&view.presentation)
+	var activityID tui.NodeID
+	for _, entry := range entries {
+		if entry.activity != nil {
+			activityID = entry.id
+			break
+		}
+	}
+	if activityID == "" {
+		t.Fatal("Activity has no selectable entry")
+	}
+	harness, err := tuitest.New(view, tui.Size{Width: 80, Height: 16}, mapEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer harness.Close()
+	if focused, err := harness.RequestFocus(activityID); err != nil || !focused {
+		t.Fatalf("RequestFocus() = %t, %v", focused, err)
+	}
+	if err := harness.Input([]byte{0x01}); err != nil {
+		t.Fatalf("select Activity: %v", err)
+	}
+	if err := harness.Send(message{kind: runEventMessage, update: adaptRunEvent(agent.Event{
+		Type: agent.EventModelRequest, Sequence: 2,
+	})}); err != nil {
+		t.Fatalf("redraw Activity: %v", err)
+	}
+	if err := harness.Input([]byte{0x03}); err != nil {
+		t.Fatalf("copy Activity: %v", err)
+	}
+	request, ok := harness.TakeClipboardRequest()
+	if !ok || request.Text() != "001  Run started" {
+		t.Fatalf("clipboard request = %q, %t", request.Text(), ok)
 	}
 }
 
@@ -720,7 +904,11 @@ func TestChatAndComposerClickSwitchFocusForHistoryNavigation(t *testing.T) {
 	if err := harness.Input([]byte("\x1b[<0;5;8M")); err != nil {
 		t.Fatalf("click chat history: %v", err)
 	}
-	if focused, ok := harness.Interaction().Focused(); !ok || focused != chatViewportID {
+	if err := harness.Input([]byte("\x1b[<0;5;8m")); err != nil {
+		t.Fatalf("release chat history: %v", err)
+	}
+	if focused, ok := harness.Interaction().Focused(); !ok ||
+		focused == composerInputID || focused != view.selectableTextID {
 		t.Fatalf("chat focus = %q, present = %t", focused, ok)
 	}
 	if err := harness.Input([]byte("\x1b[5~")); err != nil {

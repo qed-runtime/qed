@@ -270,15 +270,16 @@ type providerRateLimitProfile struct {
 }
 
 type agentProfile struct {
-	Provider         string                `json:"provider"`
-	Profile          string                `json:"profile,omitempty"`
-	Instructions     string                `json:"instructions,omitempty"`
-	MaxProviderCalls int                   `json:"max_provider_calls,omitempty"`
-	MaxToolCalls     int                   `json:"max_tool_calls,omitempty"`
-	ProviderRetry    *providerRetryProfile `json:"provider_retry,omitempty"`
-	Delegations      []delegationProfile   `json:"delegations,omitempty"`
-	Context          *contextProfile       `json:"context,omitempty"`
-	Cache            *cacheProfile         `json:"cache,omitempty"`
+	Provider                string                `json:"provider"`
+	Profile                 string                `json:"profile,omitempty"`
+	Instructions            string                `json:"instructions,omitempty"`
+	MaxProviderCalls        int                   `json:"max_provider_calls,omitempty"`
+	MaxToolCalls            int                   `json:"max_tool_calls,omitempty"`
+	MaxRepeatedToolFailures int                   `json:"max_repeated_tool_failures,omitempty"`
+	ProviderRetry           *providerRetryProfile `json:"provider_retry,omitempty"`
+	Delegations             []delegationProfile   `json:"delegations,omitempty"`
+	Context                 *contextProfile       `json:"context,omitempty"`
+	Cache                   *cacheProfile         `json:"cache,omitempty"`
 }
 
 type providerRetryProfile struct {
@@ -1264,6 +1265,7 @@ func (builder *graphBuilder) buildAgent(agentID string) error {
 		ComponentSource:         componentSource,
 		MaxProviderCalls:        specification.MaxProviderCalls,
 		MaxToolCalls:            specification.MaxToolCalls,
+		MaxRepeatedToolFailures: specification.MaxRepeatedToolFailures,
 		SessionStore:            builder.sessions,
 		ContextCompiler:         contextCompiler,
 		TokenEstimator:          builder.tokenEstimator,

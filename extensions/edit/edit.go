@@ -38,6 +38,16 @@ var (
 	digestPattern     = regexp.MustCompile(`\Asha256:[0-9a-f]{64}\z`)
 )
 
+const (
+	markerPatchBegin = "*** Begin Patch"
+	markerPatchEnd   = "*** End Patch"
+	markerUpdateFile = "*** Update File: "
+	markerAddFile    = "*** Add File: "
+	markerDeleteFile = "*** Delete File: "
+	markerMoveFile   = "*** Move to: "
+	markerEndOfFile  = "*** End of File"
+)
+
 // Options bounds apply_patch resource use
 type Options struct {
 	MaxPatchBytes int
@@ -83,10 +93,11 @@ type applyPatchTool struct {
 func (tool *applyPatchTool) Definition() agent.ToolDefinition {
 	return agent.ToolDefinition{
 		Name: ApplyPatchToolName,
-		Description: "Apply a bounded unified diff using --- a/path, +++ b/path, and @@ hunks; " +
-			"do not use *** Begin Patch markers. Provide one precondition per changed path, copying " +
+		Description: "Apply a bounded patch using either counted unified diff headers " +
+			"(--- a/path, +++ b/path, @@ -line,count +line,count @@) or a *** Begin Patch envelope " +
+			"with *** Update File, *** Add File, or *** Delete File sections. Provide one precondition per changed path, copying " +
 			"read_file's full sha256:... digest for existing files or using absent:true for new files",
-		InputSchema:  json.RawMessage(`{"type":"object","properties":{"patch":{"type":"string","description":"Unified diff text with --- a/path, +++ b/path, and @@ hunk headers; *** Begin Patch format is not supported"},"preconditions":{"type":"array","description":"Exactly one current-state precondition for every changed path","items":{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path matching the diff target"},"sha256":{"type":"string","description":"Full sha256:... digest returned by read_file for an existing path"},"absent":{"type":"boolean","description":"Set true only when adding a path that does not exist"}},"required":["path"],"additionalProperties":false}}},"required":["patch","preconditions"],"additionalProperties":false}`),
+		InputSchema:  json.RawMessage(`{"type":"object","properties":{"patch":{"type":"string","description":"Counted unified diff, or *** Begin Patch format whose update hunks use @@ followed by exact context, deletion, and addition lines"},"preconditions":{"type":"array","description":"Exactly one current-state precondition for every changed path","items":{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path matching the patch target"},"sha256":{"type":"string","description":"Full sha256:... digest returned by read_file for an existing path"},"absent":{"type":"boolean","description":"Set true only when adding a path that does not exist"}},"required":["path"],"additionalProperties":false}}},"required":["patch","preconditions"],"additionalProperties":false}`),
 		Capabilities: []string{string(capability.FilesystemWrite)},
 	}
 }
@@ -120,15 +131,23 @@ func (tool *applyPatchTool) ApprovalPreview(ctx context.Context, call agent.Tool
 		return nil, err
 	}
 	release := tool.workspace.AcquireRead()
-	_, err = tool.prepareOperations(request.Preconditions, patches)
+	operations, err := tool.prepareOperations(request.Preconditions, patches)
 	release()
 	if err != nil {
 		return nil, err
 	}
 	addedLines := 0
 	deletedLines := 0
+	operationsByPath := make(map[string]operation, len(operations))
+	for _, operation := range operations {
+		operationsByPath[operation.path] = operation
+	}
 	details := make([]capability.ApprovalPreviewDetail, len(patches))
 	for patchIndex, patch := range patches {
+		if patch.deleteWhole {
+			before, _ := textLines(operationsByPath[patch.path].before)
+			deletedLines += len(before)
+		}
 		for _, hunk := range patch.hunks {
 			for _, line := range hunk.lines {
 				switch line.kind {
@@ -220,7 +239,7 @@ func (tool *applyPatchTool) decode(arguments json.RawMessage) (patchRequest, []f
 	if len(request.Patch) > tool.maxPatchBytes {
 		return patchRequest{}, nil, fmt.Errorf("apply_patch patch exceeds %d bytes", tool.maxPatchBytes)
 	}
-	patches, err := parseUnifiedDiff(request.Patch, tool.maxFiles)
+	patches, err := parsePatch(request.Patch, tool.maxFiles)
 	if err != nil {
 		return patchRequest{}, nil, fmt.Errorf("parse apply_patch patch: %w", err)
 	}
@@ -236,23 +255,48 @@ const (
 )
 
 type filePatch struct {
-	path  string
-	kind  changeKind
-	hunks []hunk
+	path        string
+	kind        changeKind
+	hunks       []hunk
+	deleteWhole bool
 }
 
 type hunk struct {
-	oldStart int
-	oldCount int
-	newStart int
-	newCount int
-	lines    []patchLine
+	oldStart  int
+	oldCount  int
+	newStart  int
+	newCount  int
+	lines     []patchLine
+	locate    bool
+	anchorEOF bool
 }
 
 type patchLine struct {
 	kind      byte
 	text      string
 	noNewline bool
+}
+
+func parsePatch(value string, maxFiles int) ([]filePatch, error) {
+	lines := patchLines(value)
+	if len(lines) > 0 && lines[0] == markerPatchBegin {
+		return parseMarkerPatch(lines, maxFiles)
+	}
+	return parseUnifiedDiff(value, maxFiles)
+}
+
+func patchLines(value string) []string {
+	lines := strings.Split(value, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for len(lines) > 0 && lines[0] == "" {
+		lines = lines[1:]
+	}
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 func parseUnifiedDiff(value string, maxFiles int) ([]filePatch, error) {
@@ -314,6 +358,153 @@ func parseUnifiedDiff(value string, maxFiles int) ([]filePatch, error) {
 		return nil, errors.New("patch contains no file changes")
 	}
 	return patches, nil
+}
+
+func parseMarkerPatch(lines []string, maxFiles int) ([]filePatch, error) {
+	if len(lines) < 2 || lines[0] != markerPatchBegin || lines[len(lines)-1] != markerPatchEnd {
+		return nil, errors.New("marker patch must start with *** Begin Patch and end with *** End Patch")
+	}
+	patches := make([]filePatch, 0)
+	seen := make(map[string]struct{})
+	for index := 1; index < len(lines)-1; {
+		line := lines[index]
+		var patch filePatch
+		switch {
+		case strings.HasPrefix(line, markerUpdateFile):
+			path, err := parseMarkerPath(strings.TrimPrefix(line, markerUpdateFile))
+			if err != nil {
+				return nil, fmt.Errorf("marker update header line %d: %w", index+1, err)
+			}
+			patch = filePatch{path: path, kind: changeUpdate}
+			index++
+			if index < len(lines)-1 && strings.HasPrefix(lines[index], markerMoveFile) {
+				return nil, fmt.Errorf("marker move at line %d is not supported", index+1)
+			}
+			for index < len(lines)-1 && !isMarkerFileHeader(lines[index]) {
+				hunk, next, err := parseMarkerUpdateHunk(lines, index)
+				if err != nil {
+					return nil, err
+				}
+				patch.hunks = append(patch.hunks, hunk)
+				index = next
+			}
+			if len(patch.hunks) == 0 {
+				return nil, fmt.Errorf("updated file %q has no hunks", path)
+			}
+		case strings.HasPrefix(line, markerAddFile):
+			path, err := parseMarkerPath(strings.TrimPrefix(line, markerAddFile))
+			if err != nil {
+				return nil, fmt.Errorf("marker add header line %d: %w", index+1, err)
+			}
+			patch = filePatch{path: path, kind: changeAdd}
+			index++
+			hunk := hunk{oldStart: 0, newStart: 1}
+			for index < len(lines)-1 && !isMarkerFileHeader(lines[index]) {
+				line = lines[index]
+				if !strings.HasPrefix(line, "+") {
+					return nil, fmt.Errorf("added file %q line %d must start with +", path, index+1)
+				}
+				hunk.lines = append(hunk.lines, patchLine{kind: '+', text: line[1:]})
+				hunk.newCount++
+				index++
+			}
+			if len(hunk.lines) != 0 {
+				patch.hunks = append(patch.hunks, hunk)
+			}
+		case strings.HasPrefix(line, markerDeleteFile):
+			path, err := parseMarkerPath(strings.TrimPrefix(line, markerDeleteFile))
+			if err != nil {
+				return nil, fmt.Errorf("marker delete header line %d: %w", index+1, err)
+			}
+			patch = filePatch{path: path, kind: changeDelete, deleteWhole: true}
+			index++
+			if index < len(lines)-1 && !isMarkerFileHeader(lines[index]) {
+				return nil, fmt.Errorf("deleted file %q must not contain patch lines", path)
+			}
+		case strings.HasPrefix(line, markerMoveFile):
+			return nil, fmt.Errorf("marker move at line %d is not supported", index+1)
+		default:
+			return nil, fmt.Errorf("expected marker file header at line %d", index+1)
+		}
+		if _, duplicate := seen[patch.path]; duplicate {
+			return nil, fmt.Errorf("file %q appears more than once", patch.path)
+		}
+		seen[patch.path] = struct{}{}
+		patches = append(patches, patch)
+		if len(patches) > maxFiles {
+			return nil, fmt.Errorf("patch exceeds %d files", maxFiles)
+		}
+	}
+	if len(patches) == 0 {
+		return nil, errors.New("patch contains no file changes")
+	}
+	return patches, nil
+}
+
+func parseMarkerPath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasPrefix(value, "\"") {
+		return "", errors.New("marker patch path must be an unquoted workspace-relative path")
+	}
+	return normalizePatchPath(value)
+}
+
+func isMarkerFileHeader(line string) bool {
+	return line == markerPatchEnd ||
+		strings.HasPrefix(line, markerUpdateFile) ||
+		strings.HasPrefix(line, markerAddFile) ||
+		strings.HasPrefix(line, markerDeleteFile) ||
+		strings.HasPrefix(line, markerMoveFile)
+}
+
+func parseMarkerUpdateHunk(lines []string, index int) (hunk, int, error) {
+	if index >= len(lines) || (lines[index] != "@@" && !strings.HasPrefix(lines[index], "@@ ")) {
+		return hunk{}, index, fmt.Errorf("expected marker update hunk at line %d", index+1)
+	}
+	if hunkHeaderPattern.MatchString(lines[index]) {
+		return parseHunk(lines, index)
+	}
+	start := index
+	parsed := hunk{locate: true}
+	index++
+	for index < len(lines) && !isMarkerFileHeader(lines[index]) &&
+		lines[index] != "@@" && !strings.HasPrefix(lines[index], "@@ ") {
+		line := lines[index]
+		if line == markerEndOfFile {
+			parsed.anchorEOF = true
+			index++
+			break
+		}
+		if line == `\ No newline at end of file` {
+			if len(parsed.lines) == 0 {
+				return hunk{}, index, fmt.Errorf("marker hunk at line %d has a newline marker without a preceding line", start+1)
+			}
+			parsed.lines[len(parsed.lines)-1].noNewline = true
+			index++
+			continue
+		}
+		if line == "" {
+			return hunk{}, index, fmt.Errorf("marker hunk at line %d contains an unprefixed empty line", start+1)
+		}
+		entry := patchLine{kind: line[0], text: line[1:]}
+		switch entry.kind {
+		case ' ':
+			parsed.oldCount++
+			parsed.newCount++
+		case '-':
+			parsed.oldCount++
+		case '+':
+			parsed.newCount++
+		default:
+			return hunk{}, index, fmt.Errorf("invalid marker hunk line prefix at line %d", index+1)
+		}
+		parsed.lines = append(parsed.lines, entry)
+		index++
+	}
+	if len(parsed.lines) == 0 {
+		return hunk{}, index, fmt.Errorf("marker hunk at line %d contains no changes", start+1)
+	}
+	return parsed, index, nil
 }
 
 func parseHeaderPath(value string) (string, error) {
@@ -491,20 +682,32 @@ func (tool *applyPatchTool) prepareOperations(preconditions []precondition, patc
 }
 
 func applyHunks(before []byte, patch filePatch) ([]byte, error) {
+	if patch.deleteWhole {
+		return nil, nil
+	}
 	source, sourceFinalNewline := textLines(before)
 	result := make([]string, 0, len(source))
 	sourcePosition := 0
 	finalNewline := sourceFinalNewline
 	for hunkIndex, hunk := range patch.hunks {
 		start := hunkPosition(hunk.oldStart, hunk.oldCount)
+		if hunk.locate {
+			var err error
+			start, err = locateMarkerHunk(source, sourcePosition, hunk)
+			if err != nil {
+				return nil, fmt.Errorf("marker hunk %d: %w", hunkIndex+1, err)
+			}
+		}
 		if start < sourcePosition || start > len(source) {
 			return nil, fmt.Errorf("hunk %d starts outside or before the previous hunk", hunkIndex+1)
 		}
 		result = append(result, source[sourcePosition:start]...)
 		sourcePosition = start
-		newStart := hunkPosition(hunk.newStart, hunk.newCount)
-		if newStart != len(result) {
-			return nil, fmt.Errorf("hunk %d new-file position does not follow the previous hunk", hunkIndex+1)
+		if !hunk.locate {
+			newStart := hunkPosition(hunk.newStart, hunk.newCount)
+			if newStart != len(result) {
+				return nil, fmt.Errorf("hunk %d new-file position does not follow the previous hunk", hunkIndex+1)
+			}
 		}
 		var lastNewLine *patchLine
 		for lineIndex := range hunk.lines {
@@ -542,6 +745,45 @@ func applyHunks(before []byte, patch filePatch) ([]byte, error) {
 		encoded = append(encoded, '\n')
 	}
 	return encoded, nil
+}
+
+func locateMarkerHunk(source []string, start int, hunk hunk) (int, error) {
+	needle := make([]string, 0, hunk.oldCount)
+	for _, line := range hunk.lines {
+		if line.kind != '+' {
+			needle = append(needle, line.text)
+		}
+	}
+	if len(needle) == 0 {
+		if hunk.anchorEOF {
+			return len(source), nil
+		}
+		return 0, errors.New("addition-only hunk requires *** End of File or a counted unified diff header")
+	}
+	match := -1
+	for position := start; position+len(needle) <= len(source); position++ {
+		if hunk.anchorEOF && position+len(needle) != len(source) {
+			continue
+		}
+		matches := true
+		for offset, line := range needle {
+			if source[position+offset] != line {
+				matches = false
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		if match >= 0 {
+			return 0, errors.New("old lines match more than one location; include more context or use a counted unified diff header")
+		}
+		match = position
+	}
+	if match < 0 {
+		return 0, errors.New("old lines do not match the current file")
+	}
+	return match, nil
 }
 
 func hunkPosition(start, count int) int {

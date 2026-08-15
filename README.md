@@ -243,6 +243,10 @@ The standard Coding Profile exposes six model-facing Tools
 - `git_status`
 - `git_diff`
 
+`apply_patch` accepts either counted unified diffs or the safe
+`*** Begin Patch` subset documented in the Coding Profile. Digest or absence
+preconditions remain mandatory in both forms
+
 For `worktree` and `base`, `git_diff` appends untracked regular files that are
 not excluded by standard Git ignore rules within the same bounded patch.
 `staged` remains index-only
@@ -408,18 +412,26 @@ Extension generation, and argument digest. Failed Tool activity uses a small
 allowlist of safe failure classifications such as invalid patch, stale file,
 command failure, timeout, or permission denial. Raw Tool arguments, Tool
 output, raw wait payloads, and raw Run errors are not copied into rendered view
-state
+state. Repeated failures are numbered, safe terminal reasons remain visible,
+and the Status row summarizes changed files, verification outcomes, and
+mutations since the latest successful verification without retaining their
+content
 
 The multiline Composer uses Enter to submit and Shift-Enter, Alt-Enter, or
 Ctrl-O to insert a line break. Up and Down recall the bounded submission
 history when the caret is at an editor boundary. The transcript uses a
 variable-height VirtualFeed, retains at most 2,048 user and assistant entries,
-and builds only the visible range plus overscan. Click the transcript to move
-focus from the Composer, then use PageUp or PageDown to navigate it. The mouse
-wheel scrolls the region under the pointer. Click the Composer to resume input.
-QED enables SGR press mouse tracking while the TUI is open so click and wheel
-reports reach the application. Terminal-native pointer selection may therefore
-require the terminal's own override gesture or leaving the TUI first
+and builds only the visible range plus overscan. Message and Activity entries
+support application-owned selection that survives redraws. Click or left-drag
+one entry, use Ctrl-C to copy a non-empty selection, or Ctrl-Shift-C to copy the
+whole focused entry through OSC 52. Selection does not span multiple entries.
+When no selection owns Ctrl-C, it keeps its Run-cancel behavior. Use PageUp or
+PageDown after focusing the transcript, and use the mouse wheel over the target
+region. Click the Composer to resume input. QED enables SGR button-motion mouse
+tracking while the TUI is open so click, drag, and wheel reports reach the
+application. OSC 52 copy requires terminal support. Terminal-native pointer
+selection may require the terminal's own override gesture or leaving the TUI
+first
 
 Press F2 to toggle content-free Context, predictive-budget, cache, and scoped
 Evidence availability details. Evidence content is not read directly by the

@@ -219,6 +219,9 @@ go run ./cmd/qed run --config ./qed.json "Review this plan"
 - `git_status`
 - `git_diff`
 
+`apply_patch`はcounted unified diff、またはCoding Profileで定義する安全な`*** Begin Patch` subsetを受理します
+どちらの形式でもdigestまたはabsence preconditionは必須です
+
 `git_diff`の`worktree`と`base`はstandard Git ignore ruleで除外されないuntracked regular fileを同じbounded patchへ追加します
 `staged`はindexだけを対象にします
 
@@ -358,13 +361,18 @@ TUIは最近のuserとassistant messageを保持し、assistant textをstream表
 承認中はboundedなTool supplied preview、Extension generation、argument digestも表示します
 失敗したTool activityはinvalid patch、stale file、command failure、timeout、permission denialなどの小さなallowlistによる安全なfailure classificationを使います
 raw Tool argument、Tool出力、raw wait payload、raw Run errorはrendering用の表示状態へ保持しません
+反復failureには回数を付け、安全なterminal reasonを維持し、Status rowへ変更file数、verification結果、最後に成功したverification以降のmutationをcontentなしで要約します
 
 複数行ComposerはEnterで送信し、Shift-Enter、Alt-Enter、Ctrl-Oで改行します
 caretがeditor境界にある場合はUpとDownでboundedな送信履歴を呼び出します
 transcriptは可変高VirtualFeedを使い、userとassistant entryを最大2048件保持し、可視範囲とoverscanだけを構築します
-transcriptをクリックするとComposerからfocusが移り、PageUpとPageDownで内容を移動できます
-mouse wheelはpointerがある領域をscrollし、Composerをクリックすると入力へ戻ります
-QEDはTUI表示中にSGR press mouse trackingを有効にしてclickとwheel reportを受け取ります
+messageとActivity entryは再描画後も維持するapplication所有selectionに対応します
+1つのentryをclickまたは左dragし、空でないselectionはCtrl-C、focus中entry全体はCtrl-Shift-CでOSC 52へcopyできます
+selectionは複数entryをまたがず、selectionがCtrl-Cを所有しない場合は従来どおりRunをcancelします
+transcriptへfocusを移した後はPageUpとPageDownで内容を移動でき、mouse wheelはpointerがある領域をscrollします
+Composerをclickすると入力へ戻ります
+QEDはTUI表示中にSGR button-motion mouse trackingを有効にしてclick、drag、wheel reportを受け取ります
+OSC 52 copyにはterminal側の対応が必要です
 この間のterminal native pointer selectionはterminal設定に応じたoverride操作またはTUI終了後の選択が必要になる場合があります
 
 F2で本文を含まないContext、predictive budget、cache、scope付きEvidenceの利用可能状態を切り替えます

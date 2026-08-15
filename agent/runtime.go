@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	defaultMaxProviderCalls = 16
-	defaultMaxToolCalls     = 64
+	defaultMaxProviderCalls        = 16
+	defaultMaxToolCalls            = 64
+	defaultMaxRepeatedToolFailures = 4
 )
 
 // ErrProviderCallLimit indicates that a Run exhausted its Provider call budget
@@ -26,6 +27,10 @@ var ErrProviderCallLimit = errors.New("provider call limit reached")
 
 // ErrToolCallLimit indicates that a Run exhausted its Tool call budget
 var ErrToolCallLimit = errors.New("tool call limit reached")
+
+// ErrRepeatedToolFailureLimit indicates that one non-retrieval Tool repeatedly
+// failed without an intervening successful execution of that Tool
+var ErrRepeatedToolFailureLimit = errors.New("repeated Tool failure limit reached")
 
 // RuntimeEvidenceAccess configures scoped Evidence identity for every Run
 //
@@ -71,6 +76,9 @@ type Options struct {
 	MaxProviderCalls int
 	// MaxToolCalls bounds one Run and defaults to 64 when zero
 	MaxToolCalls int
+	// MaxRepeatedToolFailures bounds failures by one non-retrieval Tool since its
+	// most recent successful execution and defaults to 4 when zero
+	MaxRepeatedToolFailures int
 	// SessionStore persists Run Events and reconstructs Session context
 	//
 	// A nil Store keeps Runs ephemeral
@@ -131,6 +139,7 @@ type Runtime struct {
 	staticHooks             []runtimeHook
 	maxProviderCalls        int
 	maxToolCalls            int
+	maxRepeatedToolFailures int
 	sessionStore            SessionStore
 	contextCompiler         ContextCompiler
 	tokenEstimator          TokenEstimator
@@ -183,6 +192,13 @@ func NewRuntime(options Options) (*Runtime, error) {
 	}
 	if maxToolCalls < 0 {
 		return nil, errors.New("max tool calls must be positive")
+	}
+	maxRepeatedToolFailures := options.MaxRepeatedToolFailures
+	if maxRepeatedToolFailures == 0 {
+		maxRepeatedToolFailures = defaultMaxRepeatedToolFailures
+	}
+	if maxRepeatedToolFailures < 0 {
+		return nil, errors.New("max repeated Tool failures must be positive")
 	}
 
 	tokenEstimator, err := resolveTokenEstimator(options.Provider, options.TokenEstimator)
@@ -265,6 +281,7 @@ func NewRuntime(options Options) (*Runtime, error) {
 		staticHooks:             staticHooks,
 		maxProviderCalls:        maxProviderCalls,
 		maxToolCalls:            maxToolCalls,
+		maxRepeatedToolFailures: maxRepeatedToolFailures,
 		sessionStore:            options.SessionStore,
 		contextCompiler:         contextCompiler,
 		tokenEstimator:          tokenEstimator,
@@ -699,9 +716,29 @@ func (runtime *Runtime) execute(
 	toolResults := make([]ToolResult, 0)
 	providerCalls := 0
 	toolCalls := 0
+	repeatedToolFailures := make(map[string]int)
 	sequence := uint64(0)
 	usage := Usage{}
 	inputTokenDetailsComplete := true
+	recordToolResult := func(result ToolResult) {
+		if result.IsError && result.ContextRetrieval == nil {
+			repeatedToolFailures[result.Name]++
+			return
+		}
+		delete(repeatedToolFailures, result.Name)
+	}
+	repeatedToolFailure := func(name string) error {
+		failures := repeatedToolFailures[name]
+		if failures < runtime.maxRepeatedToolFailures {
+			return nil
+		}
+		return fmt.Errorf(
+			"%w: Tool %q failed %d times without a successful execution",
+			ErrRepeatedToolFailureLimit,
+			name,
+			failures,
+		)
+	}
 
 	emit := func(event Event) error {
 		event.Sequence = sequence + 1
@@ -970,6 +1007,7 @@ func (runtime *Runtime) execute(
 			return
 		}
 		toolResults = append(toolResults, result)
+		recordToolResult(result)
 		messages = append(messages, Message{
 			Role:        RoleTool,
 			Text:        result.Output,
@@ -979,6 +1017,10 @@ func (runtime *Runtime) execute(
 		})
 		toolMessage := cloneMessage(messages[len(messages)-1])
 		if err := emit(Event{Type: EventToolCompleted, Message: &toolMessage, ToolCall: &call, ToolResult: &result}); err != nil {
+			fail(err)
+			return
+		}
+		if err := repeatedToolFailure(result.Name); err != nil {
 			fail(err)
 			return
 		}
@@ -1642,6 +1684,7 @@ func (runtime *Runtime) execute(
 				return
 			}
 			toolResults = append(toolResults, result)
+			recordToolResult(result)
 			messages = append(messages, Message{
 				Role:        RoleTool,
 				Text:        result.Output,
@@ -1651,6 +1694,12 @@ func (runtime *Runtime) execute(
 			})
 			toolMessage := cloneMessage(messages[len(messages)-1])
 			if err := emit(Event{Type: EventToolCompleted, Message: &toolMessage, ToolCall: &call, ToolResult: &result}); err != nil {
+				fail(err)
+				return
+			}
+		}
+		for _, call := range message.ToolCalls {
+			if err := repeatedToolFailure(call.Name); err != nil {
 				fail(err)
 				return
 			}

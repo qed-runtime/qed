@@ -67,6 +67,7 @@ QEDは1つのstrictなJSON documentからProvider profile、process分離Extensi
       "provider": "primary",
       "profile": "coding",
       "instructions": "Use specialists when useful and return the final answer",
+      "max_repeated_tool_failures": 4,
       "provider_retry": {
         "max_attempts": 3,
         "initial_backoff": "1s",
@@ -360,10 +361,15 @@ executable lookupは選択した`PATH`だけを使い、Host environmentへfallb
 | `instructions` | no | このAgentのbase instruction |
 | `max_provider_calls` | no | Runtime local Provider call上限 |
 | `max_tool_calls` | no | Runtime local Tool call上限 |
+| `max_repeated_tool_failures` | no | 1つのnon-retrieval Toolが成功なしに失敗できる回数、既定値`4` |
 | `provider_retry` | no | transientなProvider failureに対するbounded retry policy |
 | `context` | no | Evidence preservingなcontext圧縮policy |
 | `cache` | no | Provider neutralなprompt cache policy |
 | `delegations` | no | このAgentへ公開するSubagent Tool |
+
+`max_repeated_tool_failures`はToolごとにfailureを数え、そのToolが成功するとcountをresetします
+error textが異なる場合も設定回数へ達するとRunは`ErrRepeatedToolFailureLimit`で停止します
+組み込みContext retrieval resultは独自のper-Run limitが意図的にbounded Tool errorを返すため対象外です
 
 Delegation field
 

@@ -56,16 +56,48 @@ func buildFeedEntries(presentation *runPresentation) ([]feedEntry, []tui.Virtual
 	return entries, items
 }
 
-func (entry feedEntry) node() tui.Node[message] {
+func (entry feedEntry) node(
+	selectedID tui.NodeID,
+	selectedState widget.SelectableTextState,
+) tui.Node[message] {
+	switch {
+	case entry.heading:
+		return tui.StyledText[message](entry.text, vt.Style{Bold: true}).WithID(entry.id)
+	}
+	content, selectable := entry.selectableContent()
+	if !selectable {
+		return tui.Text[message](entry.text).WithID(entry.id)
+	}
+	state := widget.NewSelectableTextState(0)
+	if entry.id == selectedID {
+		state = selectedState
+	}
+	style := widget.DefaultSelectableTextStyle()
+	style.Focused = vt.Style{}
+	return widget.NewSelectableText(
+		entry.id,
+		content,
+		state,
+		func(next widget.SelectableTextState) message {
+			return message{
+				kind: selectableTextChangedMessage, selectableTextID: entry.id, selectableText: next,
+			}
+		},
+	).Style(style).OnCopy(func(request widget.TextCopyRequest) message {
+		return message{kind: copyTextMessage, copyText: request.Text}
+	}).Node()
+}
+
+func (entry feedEntry) selectableContent() (widget.SelectableTextContent, bool) {
 	switch {
 	case entry.activity != nil:
 		label := entry.activity.label
 		if entry.activity.state != "" {
 			label += " [" + string(entry.activity.state) + "]"
 		}
-		return tui.Text[message](fmt.Sprintf("%03d  %s", entry.activity.sequence, label)).WithID(entry.id)
-	case entry.heading:
-		return tui.StyledText[message](entry.text, vt.Style{Bold: true}).WithID(entry.id)
+		return widget.NewPlainSelectableTextContent(
+			fmt.Sprintf("%03d  %s", entry.activity.sequence, label),
+		), true
 	case entry.role == agent.RoleUser || entry.role == agent.RoleAssistant:
 		role := "Assistant"
 		style := vt.Style{}
@@ -77,12 +109,12 @@ func (entry feedEntry) node() tui.Node[message] {
 		if entry.state == transcriptStateQueued || entry.state == transcriptStateCanceled {
 			state = " [" + string(entry.state) + "]"
 		}
-		return tui.Paragraph[message]([]tui.TextSpan{
+		return widget.NewSelectableTextContent([]tui.TextSpan{
 			tui.NewTextSpan(role+": ", style),
 			tui.NewTextSpan(entry.text+state, vt.Style{}),
-		}, tui.DefaultParagraphOptions()).WithID(entry.id)
+		}), true
 	default:
-		return tui.Text[message](entry.text).WithID(entry.id)
+		return widget.SelectableTextContent{}, false
 	}
 }
 
@@ -125,7 +157,11 @@ func (view *runView) statusText(presentation *runPresentation) string {
 	if view.historyView != nil {
 		return fmt.Sprintf("history revision %d", view.historySession.Revision)
 	}
-	return presentation.status
+	status := presentation.status
+	if summary, ok := workSummary(presentation); ok {
+		status += "  " + summary
+	}
+	return status
 }
 
 func (view *runView) composerVisible() bool {
@@ -184,6 +220,23 @@ func virtualFlowUpdate(presentation *runPresentation) tui.VirtualFlowUpdate {
 
 func observabilitySummary(presentation *runPresentation) string {
 	return contextSummary(presentation) + "  " + cacheSummary(presentation)
+}
+
+func workSummary(presentation *runPresentation) (string, bool) {
+	work := presentation.work
+	if !work.observed {
+		return "", false
+	}
+	checks := "not run"
+	if work.checksPassed != 0 || work.checksFailed != 0 {
+		checks = fmt.Sprintf("%d passed, %d failed", work.checksPassed, work.checksFailed)
+	}
+	return fmt.Sprintf(
+		"Work: patched=%d checks=%s unverified=%d",
+		work.patchedFiles,
+		checks,
+		work.unverifiedActions,
+	), true
 }
 
 func contextSummary(presentation *runPresentation) string {

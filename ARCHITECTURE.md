@@ -266,6 +266,10 @@ separate, and stores Evidence per Run rather than merging Run Event sequences.
 Its variable-height feed and application-owned Composer retain bounded state.
 It renders bounded approval previews and allowlisted Tool failure classes while
 keeping raw Tool arguments, output, wait payloads, and errors out of view state.
+Selectable transcript and Activity entries keep application-owned selection
+across redraws and send explicit copy requests through the terminal clipboard
+adapter. Safe terminal reasons and content-free work counters remain derived
+from Events rather than raw Tool output.
 Content-free Context and cache projections are derived from Events, while exact
 Evidence retrieval stays behind Runtime Tools and their scoped authorization.
 Standard Session Stores expose a bounded `session.Catalog`; the TUI loads one
@@ -340,6 +344,13 @@ the Runtime-local and shared Provider call budgets, and only then emits
 failure updates the shared cooldown before its active-stream permit is
 released, preventing another waiting Run from racing through the observed
 limit
+
+Runtime also tracks failed non-retrieval calls independently for each Tool. A
+successful call resets that Tool's count; reaching the configured threshold
+after a complete Tool batch terminates the Run with
+`ErrRepeatedToolFailureLimit`. This bounds model repair loops while preserving
+every attempted Tool result in the Event stream. Built-in Context retrieval is
+excluded because its own bounded denials and limit outcomes are expected
 
 ## Configuration ownership
 

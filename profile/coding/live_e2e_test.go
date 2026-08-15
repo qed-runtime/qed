@@ -242,16 +242,6 @@ func TestProtectedLiveCodingPolicyClassifiesPatchRejection(t *testing.T) {
 		wantClass string
 	}{
 		{
-			name: "unsupported patch format",
-			arguments: mustJSON(t, map[string]any{
-				"patch": "*** Begin Patch\n*** Update File: calc.go\n@@\n-\treturn first - second\n+\treturn first + second\n*** End Patch\n",
-				"preconditions": []map[string]string{{
-					"path": "calc.go", "sha256": codingE2EDigest(codingE2ECalcBefore),
-				}},
-			}),
-			wantClass: protectedLiveCodingPolicyPatchFormat,
-		},
-		{
 			name: "unexpected patch target",
 			arguments: mustJSON(t, map[string]any{
 				"patch": "--- a/go.mod\n+++ b/go.mod\n@@ -1,1 +1,1 @@\n-module example.com/codinge2e\n+module example.com/changed\n",
@@ -301,6 +291,7 @@ func TestProtectedLiveCodingPolicyAllowsEquivalentPatchHeaders(t *testing.T) {
 	patches := []string{
 		"--- calc.go\n+++ calc.go\n@@ -4,1 +4,1 @@\n-\treturn first - second\n+\treturn first + second\n",
 		"diff --git calc.go calc.go\n--- calc.go\tbefore\n+++ calc.go\tafter\n@@ -4,1 +4,1 @@\n-\treturn first - second\n+\treturn first + second\n",
+		"*** Begin Patch\n*** Update File: calc.go\n@@\n-\treturn first - second\n+\treturn first + second\n*** End Patch\n",
 	}
 
 	for index, patch := range patches {
@@ -1019,6 +1010,9 @@ func protectedCodingPatchPolicyClass(patch string) string {
 	if patch == "" || len(patch) > 4096 || strings.IndexByte(patch, 0) >= 0 {
 		return protectedLiveCodingPolicyPatchFormat
 	}
+	if strings.HasPrefix(patch, "*** Begin Patch\n") {
+		return protectedCodingMarkerPatchPolicyClass(patch)
+	}
 	oldHeaders := 0
 	newHeaders := 0
 	diffHeaders := 0
@@ -1052,6 +1046,41 @@ func protectedCodingPatchPolicyClass(patch string) string {
 		}
 	}
 	if oldHeaders != 1 || newHeaders != 1 || diffHeaders > 1 {
+		return protectedLiveCodingPolicyPatchFormat
+	}
+	return ""
+}
+
+func protectedCodingMarkerPatchPolicyClass(patch string) string {
+	lines := strings.Split(strings.TrimSuffix(patch, "\n"), "\n")
+	if len(lines) < 3 || lines[0] != "*** Begin Patch" || lines[len(lines)-1] != "*** End Patch" {
+		return protectedLiveCodingPolicyPatchFormat
+	}
+	updates := 0
+	for _, line := range lines[1 : len(lines)-1] {
+		switch {
+		case strings.HasPrefix(line, "*** Update File: "):
+			updates++
+			path, operation, ok := protectedCodingPatchHeaderPath(
+				strings.TrimPrefix(line, "*** Update File: "),
+			)
+			if operation {
+				return protectedLiveCodingPolicyPatchOperation
+			}
+			if !ok || path != "calc.go" {
+				return protectedLiveCodingPolicyPatchTarget
+			}
+		case strings.HasPrefix(line, "*** Add File: "),
+			strings.HasPrefix(line, "*** Delete File: "),
+			strings.HasPrefix(line, "*** Move to: "):
+			return protectedLiveCodingPolicyPatchOperation
+		case strings.HasPrefix(line, "*** ") && line != "*** End of File":
+			return protectedLiveCodingPolicyPatchFormat
+		case line == "*** Begin Patch", line == "*** End Patch":
+			return protectedLiveCodingPolicyPatchFormat
+		}
+	}
+	if updates != 1 {
 		return protectedLiveCodingPolicyPatchFormat
 	}
 	return ""

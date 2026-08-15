@@ -454,6 +454,18 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 			want: "Provider retry max backoff must not be shorter than initial backoff",
 		},
 		{
+			name: "negative repeated Tool failure limit",
+			document: `{
+				"version": 1,
+				"providers": {"local": {"protocol": "echo"}},
+				"agents": {"main": {
+					"provider": "local",
+					"max_repeated_tool_failures": -1
+				}}
+			}`,
+			want: "max repeated Tool failures must be positive",
+		},
+		{
 			name: "negative Provider concurrency",
 			document: `{
 				"version": 1,

@@ -48,6 +48,8 @@ const (
 	composerChangedMessage
 	submitMessage
 	feedScrolledMessage
+	selectableTextChangedMessage
+	copyTextMessage
 	toggleContextMessage
 	browseOlderSessionMessage
 	browseNewerSessionMessage
@@ -62,6 +64,9 @@ type message struct {
 	result            agent.RunResult
 	err               error
 	composer          widget.ComposerState
+	selectableTextID  tui.NodeID
+	selectableText    widget.SelectableTextState
+	copyText          string
 	scroll            tui.ScrollState
 	historicalScroll  bool
 	runNumber         uint64
@@ -105,38 +110,40 @@ type eventBridge struct {
 }
 
 type runView struct {
-	presentation    runPresentation
-	ctx             context.Context
-	start           StartFunc
-	baseRequest     agent.RunRequest
-	persistent      bool
-	messages        <-chan message
-	handle          *agent.RunHandle
-	bridges         []*eventBridge
-	runNumber       uint64
-	currentResult   agent.RunResult
-	cancelRun       func()
-	steerRun        func(agent.Message) error
-	resolveWait     func(string, bool) error
-	composer        widget.ComposerState
-	composerHistory widget.ComposerHistory
-	nextHistoryID   uint64
-	inputNotice     string
-	runErr          error
-	finished        bool
-	exiting         bool
-	cancelRequested bool
-	composerEnabled bool
-	streamDone      chan struct{}
-	streamClosed    *sync.Once
-	options         ChatOptions
-	feedAtEnd       bool
-	feedUnread      bool
-	showContext     bool
-	historyLoading  bool
-	historyRequest  uint64
-	historyView     *runPresentation
-	historySession  session.SessionDescriptor
+	presentation     runPresentation
+	ctx              context.Context
+	start            StartFunc
+	baseRequest      agent.RunRequest
+	persistent       bool
+	messages         <-chan message
+	handle           *agent.RunHandle
+	bridges          []*eventBridge
+	runNumber        uint64
+	currentResult    agent.RunResult
+	cancelRun        func()
+	steerRun         func(agent.Message) error
+	resolveWait      func(string, bool) error
+	composer         widget.ComposerState
+	composerHistory  widget.ComposerHistory
+	nextHistoryID    uint64
+	inputNotice      string
+	runErr           error
+	finished         bool
+	exiting          bool
+	cancelRequested  bool
+	composerEnabled  bool
+	streamDone       chan struct{}
+	streamClosed     *sync.Once
+	options          ChatOptions
+	feedAtEnd        bool
+	feedUnread       bool
+	showContext      bool
+	historyLoading   bool
+	historyRequest   uint64
+	historyView      *runPresentation
+	historySession   session.SessionDescriptor
+	selectableTextID tui.NodeID
+	selectableText   widget.SelectableTextState
 }
 
 // StartFunc starts one Run for the TUI without coupling it to a concrete Harness
@@ -248,8 +255,9 @@ func RunWithStarterOptions(
 
 func chatTerminalOptions() tui.TerminalOptions {
 	options := tui.DefaultTerminalOptions()
-	mouseTracking := vt.MouseTrackingPress
+	mouseTracking := vt.MouseTrackingButton
 	options.MouseTracking = &mouseTracking
+	options.Clipboard = tui.TerminalClipboardOSC52
 	return options
 }
 
@@ -519,6 +527,16 @@ func (view *runView) Update(value message) tui.Effect[message] {
 				view.feedUnread = false
 			}
 		}
+	case selectableTextChangedMessage:
+		view.selectableTextID = value.selectableTextID
+		view.selectableText = value.selectableText
+		view.inputNotice = ""
+	case copyTextMessage:
+		if value.copyText == "" {
+			return tui.NoneEffect[message]()
+		}
+		view.inputNotice = "Copy requested"
+		return tui.SetClipboardEffect[message](value.copyText)
 	case toggleContextMessage:
 		view.showContext = !view.showContext
 	case browseOlderSessionMessage:
@@ -645,7 +663,7 @@ func (view *runView) chatHistoryNode(presentation *runPresentation) tui.Node[mes
 		return tui.Text[message]("Chat history is unavailable")
 	}
 	source := tui.NewVirtualFlowSource(order, func(context tui.VirtualFlowItemContext) tui.Node[message] {
-		return entries[context.Index].node()
+		return entries[context.Index].node(view.selectableTextID, view.selectableText)
 	}).Update(virtualFlowUpdate(presentation)).EstimatedHeight(
 		func(context tui.VirtualFlowItemContext) uint32 {
 			return entries[context.Index].estimatedHeight(context.Width)
@@ -739,23 +757,23 @@ func (view *runView) approvalLines() []string {
 func (view *runView) helpText() string {
 	switch {
 	case view.historyView != nil || view.historyLoading:
-		return "Chat click: PgUp/PgDn/wheel  F6 older  Shift-F6 newer  F7 current  F2 context  Esc quit"
+		return "Chat: click/drag/PgUp/PgDn/wheel  Ctrl-C copy selection  Ctrl-Shift-C copy item  F6 older  Shift-F6 newer  F7 current  F2 context  Esc quit"
 	case view.presentation.pendingApproval != nil:
-		return "Approval required  Y approve  N deny  Chat click: PgUp/PgDn/wheel  Ctrl-C cancel  F2 context  Esc quit"
+		return "Approval required  Y approve  N deny  Chat: drag select  Ctrl-C copy/cancel  Ctrl-Shift-C copy item  F2 context  Esc quit"
 	case view.presentation.waitingUnsupported:
-		return "Input cannot be handled here  Chat click: PgUp/PgDn/wheel  Ctrl-C cancel  F2 context  Esc quit"
+		return "Input cannot be handled here  Chat: drag select  Ctrl-C copy/cancel  Ctrl-Shift-C copy item  F2 context  Esc quit"
 	case !view.composerEnabled:
 		if view.finished {
-			return "Run finished  Chat click: PgUp/PgDn/wheel  F2 context  Q/Esc quit"
+			return "Run finished  Chat: click/drag/PgUp/PgDn/wheel  Ctrl-C copy selection  Ctrl-Shift-C copy item  F2 context  Q/Esc quit"
 		}
-		return "Chat click: PgUp/PgDn/wheel  Ctrl-C cancel  Q/Esc quit"
+		return "Chat: click/drag/PgUp/PgDn/wheel  Ctrl-C copy/cancel  Ctrl-Shift-C copy item  Q/Esc quit"
 	case view.finished:
 		if view.runNumber == 0 {
-			return "Enter start  Chat click: PgUp/PgDn/wheel  F2 context  F6 Sessions  Esc quit"
+			return "Enter start  Chat: click/drag/PgUp/PgDn/wheel  Ctrl-C copy selection  Ctrl-Shift-C copy item  F2 context  F6 Sessions  Esc quit"
 		}
-		return "Enter follow-up  Chat click: PgUp/PgDn/wheel  F2 context  F6 Sessions  Esc quit"
+		return "Enter follow-up  Chat: click/drag/PgUp/PgDn/wheel  Ctrl-C copy selection  Ctrl-Shift-C copy item  F2 context  F6 Sessions  Esc quit"
 	default:
-		return "Enter steer  Chat click: PgUp/PgDn/wheel  Ctrl-C cancel  F2 context  F6 Sessions  Esc quit"
+		return "Enter steer  Chat: click/drag/PgUp/PgDn/wheel  Ctrl-C copy/cancel  Ctrl-Shift-C copy item  F2 context  F6 Sessions  Esc quit"
 	}
 }
 

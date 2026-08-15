@@ -13,7 +13,7 @@ Three reusable official Extensions contribute six Tools
 | --- | --- | --- | --- |
 | `search_text` | `qed.workspace` | `filesystem.read` | Search bounded UTF-8 files by literal or regular expression |
 | `read_file` | `qed.workspace` | `filesystem.read` | Read a bounded line range and return the full-file SHA-256 digest |
-| `apply_patch` | `qed.workspace` | `filesystem.write` | Apply a unified diff when every path precondition matches |
+| `apply_patch` | `qed.workspace` | `filesystem.write` | Apply a bounded counted or marker patch when every path precondition matches |
 | `run_command` | `qed.process` | `process.execute` | Run one executable directly without shell evaluation |
 | `git_status` | `qed.git` | `git.read` | Return bounded porcelain v2 status |
 | `git_diff` | `qed.git` | `git.read` | Return a bounded worktree, staged, or base-relative patch, including bounded untracked content for worktree and base |
@@ -23,12 +23,14 @@ Official Tool arguments use strict bounded decoders that reject unknown fields,
 duplicate keys, trailing values, invalid types, and Tool-specific limit
 violations
 
-`apply_patch` accepts both `--- a/path` plus `+++ b/path` and equivalent
-workspace-relative `--- path` plus `+++ path` headers. The model-facing Tool
-schema and Coding Profile instructions recommend the prefixed canonical form,
-require `@@` unified diff hunks rather than `*** Begin Patch` markers, and tell
-the model to copy the complete `sha256:...` value returned by `read_file`
-without modification
+`apply_patch` accepts counted unified diffs with either `--- a/path` plus
+`+++ b/path` or equivalent workspace-relative headers. It also accepts a safe
+`*** Begin Patch` envelope with `*** Update File`, `*** Add File`, and
+`*** Delete File` sections. Marker update hunks may use counted unified headers
+or `@@` followed by exact context, deletion, and addition lines. Uncounted old
+lines must identify one location; ambiguous matches are rejected without
+mutation. Marker moves are not supported. Both forms still require exactly one
+current digest or absence precondition for every changed path
 
 Testing does not require a dedicated Test Extension. A Profile exposes the
 generic `run_command` Tool from `qed.process`, while the Host Policy limits the
@@ -428,7 +430,9 @@ environment disables Go module downloads, checksum service access, telemetry,
 VCS access, CGO, and toolchain downloads
 
 The model may recover from non-mutating `apply_patch` syntax and precondition
-failures within the Runtime budgets. Evidence validation retains every attempt,
+failures within the Runtime budgets. The default repeated-Tool guard stops the
+Run after four failed `apply_patch` calls without an intervening successful
+call. Evidence validation retains every attempt,
 requires exactly one successful change plus successful command and Git
 inspection results, and checks that each failure occurred at a consistent
 validation or Policy stage. Attempts to change another path, perform an
