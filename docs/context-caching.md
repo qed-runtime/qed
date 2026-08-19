@@ -37,6 +37,11 @@ value selects the concurrency-safe `agent.DefaultContextCompiler`, which
 - canonicalizes valid JSON Tool Call arguments
 - preserves instruction text, message text, and opaque Provider state bytes
 
+Runtime restores the host-owned Run ID after every custom Compiler call and
+rejects a Compiler that changes the Agent ID, Session ID, or request metadata.
+Provider Adapters may use those identities for local scoping but must not expose
+them upstream without an explicit protocol need
+
 Tool order visible to custom Providers is canonical name order, not registration
 or Extension order. Unicode, line endings, and trailing whitespace remain
 unchanged because normalizing them could alter user or Tool content
@@ -586,6 +591,7 @@ Current built-in adapter behavior is
 | Official OpenAI Responses or Chat Completions, `gpt-5.6*` or detected later GPT family | automatic caching, `prompt_cache_key`, explicit content breakpoint, `prompt_cache_options`, `30m` TTL |
 | Earlier official OpenAI models | automatic caching and `prompt_cache_key`; no QED retention override |
 | Custom OpenAI-compatible endpoint | disabled unless `cache_capabilities` is declared |
+| OrcaRouter Responses or Chat Completions | disabled unless `cache_capabilities` is declared; Session Affinity and upstream implicit caching remain independent |
 | Official Anthropic Messages | automatic or explicit `cache_control`, model-aware minimum, `5m` and `1h` TTL |
 | Custom Anthropic-compatible endpoint | disabled unless `cache_capabilities` is declared |
 | ChatGPT Codex backend | observed automatic caching only; no new cache request fields |

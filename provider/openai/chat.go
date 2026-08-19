@@ -80,6 +80,7 @@ type chatResponse struct {
 		CompletionTokens    int64              `json:"completion_tokens"`
 		TotalTokens         int64              `json:"total_tokens"`
 		PromptTokensDetails *inputTokenDetails `json:"prompt_tokens_details"`
+		CostUSD             json.Number        `json:"cost_usd"`
 	} `json:"usage"`
 }
 
@@ -147,6 +148,7 @@ func messageFromChatResponse(response chatResponse) (agent.Message, error) {
 			response.Usage.CompletionTokens,
 			response.Usage.TotalTokens,
 			response.Usage.PromptTokensDetails,
+			response.Usage.CostUSD,
 		),
 		ResponseID: response.ID,
 		Model:      response.Model,
@@ -196,6 +198,7 @@ type chatStreamAccumulator struct {
 		CompletionTokens    int64              `json:"completion_tokens"`
 		TotalTokens         int64              `json:"total_tokens"`
 		PromptTokensDetails *inputTokenDetails `json:"prompt_tokens_details"`
+		CostUSD             json.Number        `json:"cost_usd"`
 	}
 	calls     map[int]*chatStreamToolCall
 	completed bool
@@ -261,6 +264,7 @@ func (accumulator *chatStreamAccumulator) next() (agent.ModelStreamEvent, error)
 				CompletionTokens    int64              `json:"completion_tokens"`
 				TotalTokens         int64              `json:"total_tokens"`
 				PromptTokensDetails *inputTokenDetails `json:"prompt_tokens_details"`
+				CostUSD             json.Number        `json:"cost_usd"`
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal(event.Data, &chunk); err != nil {
@@ -282,7 +286,8 @@ func (accumulator *chatStreamAccumulator) next() (agent.ModelStreamEvent, error)
 		if chunk.Model != "" {
 			accumulator.model = chunk.Model
 		}
-		if chunk.Usage.PromptTokens != 0 || chunk.Usage.CompletionTokens != 0 || chunk.Usage.TotalTokens != 0 {
+		if chunk.Usage.PromptTokens != 0 || chunk.Usage.CompletionTokens != 0 ||
+			chunk.Usage.TotalTokens != 0 || chunk.Usage.CostUSD != "" {
 			accumulator.usage = chunk.Usage
 		}
 

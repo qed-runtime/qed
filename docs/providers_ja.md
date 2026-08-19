@@ -18,7 +18,7 @@ Provider実装は次を満たす必要があります
 - Tool Call、stop reason、Usageを`agent` typeへ正規化する
 - HTTP-based Providerではnon-success responseを`*provider.HTTPError`として返す
 
-Provider固有response ID、model ID、raw stop reason、`ProviderState`はadapter所有fieldのままです
+Provider固有request ID、response ID、model ID、raw stop reason、`ProviderState`はadapter所有fieldのままです
 Runtimeは`ProviderState`をopaqueとして扱い、同じProvider identityだけへ返します
 
 ## Provider errorとretry
@@ -94,6 +94,31 @@ endpointとmodelの文字列だけではupstreamの共有bucketを推測でき�
 この挙動は現在の[OpenAI rate-limit guidance](https://developers.openai.com/api/docs/guides/rate-limits)と
 [Anthropic rate-limit guidance](https://platform.claude.com/docs/en/api/rate-limits)に基づきます
 
+## OrcaRouter Adapter
+
+`provider/orcarouter`は検証済みOpenAI ResponsesとChat Completions wire codecを再利用し、OrcaRouter routing behaviorを所有します
+公開APIは`APIResponses`と`APIChatCompletions`で、対応するCLIとJSON protocol名は`orcarouter-responses`と`orcarouter-chat`です
+
+Adapterはcallごとに`X-OrcaRouter-Session-Id`を設定します
+設定済みQED Sessionを優先し、ephemeral RunではRun IDを使うことで同一Run内のTool turnをまとめます
+header valueはraw QED identifierではなくProvider、設定model、Agent、scope identityをdomain-separated SHA-256へ入力したdigestです
+これは安定したrouting inputであり、secretまたはauthorization tokenではありません
+
+さらに`X-OrcaRouter-Include-Cost: true`を設定し、次を正規化します
+
+- `X-Orca-Request-Id`を成功時は`agent.Message.RequestID`、HTTP error時は`provider.HTTPError.RequestID`へ変換
+- `X-Orca-Resolved-Model`がある場合は`agent.Message.Model`へ変換
+- `usage.cost_usd`を丸めた整数の`agent.Usage.CostMicros`へ変換
+
+これらのfieldは現在のOrcaRouter [Session Affinity](https://docs.orcarouter.ai/routing/session-affinity)、
+[response header](https://docs.orcarouter.ai/routing/response-headers)、
+[call単位cost](https://docs.orcarouter.ai/api-reference/chat/create-a-chat-completion#headers) contractに従います
+
+routed identifierはprompt cache request fieldとreporting behaviorが異なるmodelへ解決され得ます
+そのためAdapterは既定でQED cache capabilityを公開しません
+hostは選択modelまたはrouter contractを検証した場合だけ`CacheCapabilities`を宣言できます
+OrcaRouter Session Affinityとupstream implicit cacheはQED Cache Planとは独立して動作します
+
 ## Contract test kit
 
 `provider/contracttest`は公開された再利用可能なtest packageです
@@ -153,12 +178,13 @@ contracttest.RunText(t, contracttest.TextOptions{
 })
 ```
 
-QEDはOpenAI Responses、OpenAI Chat Completions、Anthropic Messages、ChatGPT Codex Responsesへ完全suiteを適用します
+QEDはOpenAI Responses、OpenAI Chat Completions、OrcaRouter ResponsesとChat Completions、Anthropic Messages、ChatGPT Codex Responsesへ完全suiteを適用します
 Echo Providerはmodel transport、Tool生成、token Usageを持たないためtext subsetを適用します
 
 first-partyの適用箇所は実行可能なexampleです
 
 - [OpenAI contract test](../provider/openai/contract_test.go)
+- [OrcaRouter contract test](../provider/orcarouter/contract_test.go)
 - [Anthropic contract test](../provider/anthropic/contract_test.go)
 - [ChatGPT Codex contract test](../provider/openaicodex/contract_test.go)
 - [Echo text contract test](../provider/echo/contract_test.go)

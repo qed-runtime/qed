@@ -75,7 +75,7 @@ func validateSteeringMessage(message Message) error {
 	}
 	if message.ToolCallID != "" || message.ToolName != "" || message.ToolIsError ||
 		len(message.ToolCalls) != 0 || message.StopReason != "" || message.RawStopReason != "" ||
-		message.Usage != nil || message.ResponseID != "" || message.Model != "" ||
+		message.Usage != nil || message.ResponseID != "" || message.RequestID != "" || message.Model != "" ||
 		message.ProviderState != nil {
 		return fmt.Errorf("%w: user message contains Provider or Tool state", ErrInvalidSteeringMessage)
 	}

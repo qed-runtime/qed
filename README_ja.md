@@ -7,7 +7,7 @@ QED RuntimeはGoで実装された組み込み可能なエージェントラン�
 このプロジェクトは初期プロトタイプですが、主要なアーキテクチャ境界は現在の実装で動作します
 
 - 非同期Runと順序付きストリーミングEvent
-- OpenAI Responses、OpenAI Chat Completions、Anthropic Messages、ChatGPT認証のCodex Responses Provider
+- OpenAI Responses、OpenAI Chat Completions、OrcaRouter ResponsesとChat Completions、Anthropic Messages、ChatGPT認証のCodex Responses Provider
 - 1つのAgent graphで利用できる複数Provider profile
 - collect、select、consensusに対応する並行サブエージェント
 - 注入可能なProfile reductionを持つcontent-addressedなsubagent Result Packet
@@ -94,11 +94,13 @@ prompt、message本文、Tool引数と出力、metadata value、credential、env
 
 ## Model APIへの接続
 
-QEDはmodel SDKへ依存せず、4つのストリーミングHTTP API dialectを実装しています
+QEDはmodel SDKへ依存せず、6つのストリーミングHTTP API dialectを実装しています
 
 - `openai-responses`
 - `openai-chat`
 - `openai-codex`
+- `orcarouter-responses`
+- `orcarouter-chat`
 - `anthropic`
 
 model IDは常に明示します
@@ -110,6 +112,20 @@ go run ./cmd/qed run \
   --model "<model-id>" \
   "Reply with a short greeting"
 ```
+
+OrcaRouterは専用credentialと公式OpenAI互換endpointを使います
+provider prefix付きmodelまたは名前付きrouterを指定します
+
+```sh
+export ORCAROUTER_API_KEY="<token>"
+go run ./cmd/qed run \
+  --provider orcarouter-responses \
+  --model "orcarouter/auto" \
+  "Reply with a short greeting"
+```
+
+OrcaRouter AdapterはSession Affinityでrouted turnをまとめ、resolved model、request ID、`usage.cost_usd`を記録します
+raw QED Session IDまたはRun IDではなく安定したdigestを送信します
 
 ```sh
 export ANTHROPIC_API_KEY="<token>"
@@ -130,7 +146,7 @@ go run ./cmd/qed run \
   "hello"
 ```
 
-custom base URLへ既定のOpenAIまたはAnthropic credentialを送りません
+custom base URLへ既定のOpenAI、OrcaRouter、Anthropic credentialを送りません
 信頼でき、認証が必要なcustom endpointに限り`QED_API_KEY`を設定します
 
 Provider adapterの実装者は実APIを呼ばずに[`provider/contracttest`](docs/providers_ja.md)の再利用可能な決定的suiteを適用できます
@@ -584,6 +600,7 @@ Evidence referenceは元のauthorization scopeを維持し、それ自体はpare
 - `github.com/qed-runtime/qed/session`
 - `github.com/qed-runtime/qed/provider/openai`
 - `github.com/qed-runtime/qed/provider/openaicodex`
+- `github.com/qed-runtime/qed/provider/orcarouter`
 - `github.com/qed-runtime/qed/provider/anthropic`
 - `github.com/qed-runtime/qed/capability`
 - `github.com/qed-runtime/qed/evidence`

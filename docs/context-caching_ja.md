@@ -35,6 +35,9 @@ nilでは並行利用可能な`agent.DefaultContextCompiler`を使い、次を�
 - valid JSONであるTool Call argumentをcanonicalize
 - instruction本文、message本文、opaque Provider state byte列を保持
 
+Runtimeはcustom Compiler callごとにhost所有Run IDを復元し、Agent ID、Session ID、request metadataの変更を拒否します
+Provider Adapterはlocal scopeにidentityを利用できますが、明示的なprotocol要件なしにupstreamへ公開してはいけません
+
 custom Providerから見えるTool順はregistration順やExtension順ではなくcanonicalな名前順です
 Unicode、改行、末尾空白はuserまたはTool contentを変える可能性があるため変更しません
 
@@ -436,6 +439,7 @@ raw isolation valueは永続化も送信もしません
 | 公式OpenAI ResponsesまたはChat Completionsの`gpt-5.6*`か検出可能な後続GPT family | automatic cache、`prompt_cache_key`、explicit content breakpoint、`prompt_cache_options`、`30m` TTL |
 | 以前の公式OpenAI model | automatic cacheと`prompt_cache_key`、QED側retention overrideなし |
 | custom OpenAI-compatible endpoint | `cache_capabilities`宣言がなければ無効 |
+| OrcaRouter ResponsesまたはChat Completions | `cache_capabilities`宣言がなければ無効、Session Affinityとupstream implicit cacheは独立して動作 |
 | 公式Anthropic Messages | automaticまたはexplicit `cache_control`、model別minimum、`5m`と`1h` TTL |
 | custom Anthropic-compatible endpoint | `cache_capabilities`宣言がなければ無効 |
 | ChatGPT Codex backend | 観測可能なautomatic cacheのみ、新しいcache request fieldなし |

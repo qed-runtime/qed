@@ -36,6 +36,7 @@ import (
 	"github.com/qed-runtime/qed/provider/echo"
 	"github.com/qed-runtime/qed/provider/openai"
 	"github.com/qed-runtime/qed/provider/openaicodex"
+	"github.com/qed-runtime/qed/provider/orcarouter"
 	sessionstore "github.com/qed-runtime/qed/session"
 )
 
@@ -49,6 +50,8 @@ const (
 	protocolOpenAIResponses = "openai-responses"
 	protocolOpenAIChat      = "openai-chat"
 	protocolOpenAICodex     = "openai-codex"
+	protocolOrcaResponses   = "orcarouter-responses"
+	protocolOrcaChat        = "orcarouter-chat"
 	protocolAnthropic       = "anthropic"
 )
 
@@ -931,7 +934,8 @@ func buildProvider(profileID string, profile providerProfile, options LoadOption
 		return nil, errors.New("auth_profile must not have surrounding whitespace")
 	}
 	switch profile.Protocol {
-	case protocolEcho, protocolOpenAIResponses, protocolOpenAIChat, protocolOpenAICodex, protocolAnthropic:
+	case protocolEcho, protocolOpenAIResponses, protocolOpenAIChat, protocolOpenAICodex,
+		protocolOrcaResponses, protocolOrcaChat, protocolAnthropic:
 	default:
 		return nil, fmt.Errorf("unsupported protocol %q", profile.Protocol)
 	}
@@ -963,6 +967,33 @@ func buildProvider(profileID string, profile providerProfile, options LoadOption
 			return nil, err
 		}
 		return openai.New(openai.Config{
+			ProfileID:         profileID,
+			API:               api,
+			CredentialSource:  credentialSource,
+			BaseURL:           profile.BaseURL,
+			Model:             profile.Model,
+			MaxOutputTokens:   profile.MaxOutputTokens,
+			CacheCapabilities: profile.CacheCapabilities,
+		})
+	case protocolOrcaResponses, protocolOrcaChat:
+		if profile.AuthProfile != "" {
+			return nil, errors.New("auth_profile is only supported by openai-codex profiles")
+		}
+		if profile.Model == "" {
+			return nil, errors.New("model is required")
+		}
+		if profile.APIVersion != "" {
+			return nil, errors.New("api_version is only supported by anthropic profiles")
+		}
+		api := orcarouter.APIResponses
+		if profile.Protocol == protocolOrcaChat {
+			api = orcarouter.APIChatCompletions
+		}
+		credentialSource, err := configuredCredential(profileID, profile, options.LookupEnv)
+		if err != nil {
+			return nil, err
+		}
+		return orcarouter.New(orcarouter.Config{
 			ProfileID:         profileID,
 			API:               api,
 			CredentialSource:  credentialSource,

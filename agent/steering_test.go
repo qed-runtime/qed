@@ -320,6 +320,7 @@ func TestRuntimeBoundsAndValidatesPendingSteering(t *testing.T) {
 		{},
 		{Role: agent.RoleAssistant, Text: "assistant"},
 		{Role: agent.RoleUser},
+		{Role: agent.RoleUser, Text: "user", RequestID: "provider-request"},
 	}
 	for _, message := range invalid {
 		if err := steerWithin(t, handle, message); !errors.Is(err, agent.ErrInvalidSteeringMessage) {

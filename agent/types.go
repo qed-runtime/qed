@@ -47,6 +47,10 @@ type Message struct {
 	Usage *Usage `json:"usage,omitempty"`
 	// ResponseID identifies the Provider response when available
 	ResponseID string `json:"response_id,omitempty"`
+	// RequestID identifies the Provider request when available
+	//
+	// RequestID and ResponseID may identify different upstream objects
+	RequestID string `json:"request_id,omitempty"`
 	// Model identifies the model reported by the Provider when available
 	Model string `json:"model,omitempty"`
 	// ProviderState carries opaque in-memory continuation data between calls
@@ -116,7 +120,7 @@ type Usage struct {
 	CacheReadInputTokens int64 `json:"cache_read_input_tokens,omitempty"`
 	// CacheWriteInputTokens is input written to a Provider prompt cache
 	CacheWriteInputTokens int64 `json:"cache_write_input_tokens,omitempty"`
-	// CostMicros contains Provider-reported cost in millionths of the configured currency
+	// CostMicros contains Provider-reported cost in millionths of its billing currency
 	//
 	// Zero means that the Provider did not report cost
 	CostMicros int64 `json:"cost_micros,omitempty"`
@@ -271,6 +275,8 @@ type RunInfo struct {
 
 // ModelRequest contains the context and Tool definitions sent to a Provider
 type ModelRequest struct {
+	// RunID identifies the active Run that produced this Provider request
+	RunID string `json:"run_id,omitempty"`
 	// AgentID identifies the configured Agent when supplied by the caller
 	AgentID string `json:"agent_id,omitempty"`
 	// SessionID identifies the logical Session when supplied by the caller

@@ -575,7 +575,7 @@ func TestRuntimeExecutesToolAndContinues(t *testing.T) {
 	if len(requests) != 2 {
 		t.Fatalf("provider request count = %d, want 2", len(requests))
 	}
-	if requests[0].AgentID != "coding" || requests[0].SessionID != "session-1" ||
+	if requests[0].RunID != result.RunID || requests[0].AgentID != "coding" || requests[0].SessionID != "session-1" ||
 		requests[0].Metadata["source"] != "test" || requests[0].Instructions != "Use registered tools" {
 		t.Errorf("provider request identity or metadata = %#v", requests[0])
 	}
@@ -932,6 +932,42 @@ func TestRuntimeFailsBeforeProviderCallWhenContextCompilationFails(t *testing.T)
 	}
 	if len(events) != 3 || events[2].Type != agent.EventRunFailed {
 		t.Fatalf("Events = %#v", events)
+	}
+}
+
+func TestRuntimeRestoresRunIDAfterContextCompilation(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{responses: []providerResponse{{message: agent.Message{
+		Role: agent.RoleAssistant, Text: "done", StopReason: agent.StopReasonEndTurn,
+	}}}}
+	runtime, err := agent.NewRuntime(agent.Options{
+		Provider: provider,
+		ContextCompiler: contextCompilerFunc(func(
+			ctx context.Context,
+			request agent.ContextCompileRequest,
+		) (agent.CompiledContext, error) {
+			compiled, err := (agent.DefaultContextCompiler{}).Compile(ctx, request)
+			compiled.ModelRequest.RunID = "compiler-owned"
+			return compiled, err
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtime.Run(context.Background(), agent.RunRequest{
+		Input: []agent.Message{{Role: agent.RoleUser, Text: "start"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, runErr := collectRun(handle)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	requests := provider.Requests()
+	if len(requests) != 1 || requests[0].RunID != result.RunID || requests[0].RunID == "compiler-owned" {
+		t.Fatalf("Provider Run ID = %#v, terminal Run ID = %q", requests, result.RunID)
 	}
 }
 

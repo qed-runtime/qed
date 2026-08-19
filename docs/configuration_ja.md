@@ -164,7 +164,7 @@ Provider profileはprotocol、endpoint、model、credential source、Provider op
 
 | Field | 必須 | 意味 |
 | --- | --- | --- |
-| `protocol` | yes | `echo`、`openai-responses`、`openai-chat`、`openai-codex`、`anthropic` |
+| `protocol` | yes | `echo`、`openai-responses`、`openai-chat`、`openai-codex`、`orcarouter-responses`、`orcarouter-chat`、`anthropic` |
 | `base_url` | no | 信頼できるAPI base URL、公式endpointでは省略 |
 | `model` | model Provider | 正確なmodel identifier |
 | `token_env` | API key Providerの公式endpoint | credentialを保持するenvironment変数 |
@@ -179,10 +179,35 @@ Provider profileはprotocol、endpoint、model、credential source、Provider op
 決定的なconcurrency testではQED側の`rate_limit` policyを利用できます
 
 custom endpointは認証不要のlocal service向けに`token_env`を省略できます
-設定経路は`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`QED_API_KEY`へfallbackしません
+設定経路は`OPENAI_API_KEY`、`ORCAROUTER_API_KEY`、`ANTHROPIC_API_KEY`、`QED_API_KEY`へfallbackしません
 `token_env`がある場合はHTTP requestごとにcredentialを解決するため、embedding hostによるrotationが可能です
 
 Provider profile IDはProvider identityとopaque continuation stateに含まれ、別endpointまたは別profileへのstate再利用を防ぎます
+
+`orcarouter-responses`と`orcarouter-chat`の既定endpointは`https://api.orcarouter.ai/v1`です
+QED Session IDの安定したdigestをOrcaRouter Session Affinityへ送り、Sessionがない場合はRun IDを使います
+raw QED identifierは送信しません
+Adapterはcall単位のUSD costを要求し、resolved modelとOrcaRouter request IDをcompleted Messageへ変換します
+
+```json
+{
+  "version": 1,
+  "default_agent": "router-agent",
+  "providers": {
+    "router": {
+      "protocol": "orcarouter-responses",
+      "model": "orcarouter/auto",
+      "token_env": "ORCAROUTER_API_KEY"
+    }
+  },
+  "agents": {
+    "router-agent": {"provider": "router"}
+  }
+}
+```
+
+routed identifierはprompt cache contractが異なるmodelへ解決され得るため、`cache_capabilities`を宣言しない限りQED Cache Planは無効です
+これはOrcaRouter自身のSession Affinityやupstream implicit cacheを無効にしません
 
 `openai-codex`は別途保存したChatGPT OAuth profileを読み、固定のChatGPT Codex backendを使います
 `protocol`、`model`、`auth_profile`、任意の`pricing`と`rate_limit`を受け取り、`base_url`、`token_env`、`max_output_tokens`、`api_version`、`cache_capabilities`を拒否します

@@ -79,9 +79,27 @@ func TestUsageIgnoresOverflowingCacheDetails(t *testing.T) {
 	reported := usage(math.MaxInt64, 1, math.MaxInt64, &inputTokenDetails{
 		CachedTokens:     math.MaxInt64,
 		CacheWriteTokens: 1,
-	})
+	}, "")
 	if reported == nil || reported.InputTokenDetailsReported {
 		t.Fatalf("Usage = %#v", reported)
+	}
+}
+
+func TestUsageRoundsReportedUSDCostToMicros(t *testing.T) {
+	t.Parallel()
+
+	for value, want := range map[json.Number]int64{"0.0012345": 1235, "1e-6": 1} {
+		reported := usage(1, 1, 2, nil, value)
+		if reported == nil || reported.CostMicros != want {
+			t.Errorf("Usage for cost %q = %#v, want %d cost micros", value, reported, want)
+		}
+	}
+	for _, value := range []json.Number{
+		"-1", "999999999999999999999999999999", "1e999999", json.Number(strings.Repeat("9", 65)),
+	} {
+		if got := usage(1, 1, 2, nil, value); got == nil || got.CostMicros != 0 {
+			t.Errorf("Usage for cost %q = %#v, want zero cost micros", value, got)
+		}
 	}
 }
 

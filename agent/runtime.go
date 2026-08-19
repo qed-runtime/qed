@@ -1046,6 +1046,7 @@ func (runtime *Runtime) execute(
 		}
 
 		modelRequest := ModelRequest{
+			RunID:        runID,
 			AgentID:      request.AgentID,
 			SessionID:    request.SessionID,
 			Metadata:     cloneMetadata(request.Metadata),
@@ -1788,6 +1789,7 @@ func (runtime *Runtime) compileContext(
 		return CompiledContext{}, PrefixManifest{}, err
 	}
 	compiled.ModelRequest = cloneModelRequest(compiled.ModelRequest)
+	compiled.ModelRequest.RunID = request.RunID
 	compiled.Segments = cloneContextSegments(compiled.Segments)
 	compiled.Checkpoint = cloneContextCheckpointPointer(compiled.Checkpoint)
 	compiled.Compaction = cloneContextCompactionReport(compiled.Compaction)

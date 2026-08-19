@@ -1099,6 +1099,64 @@ func TestCustomBaseURLUsesOnlyExplicitCustomKey(t *testing.T) {
 	}
 }
 
+func TestOrcaRouterUsesDedicatedCredential(t *testing.T) {
+	t.Setenv("ORCAROUTER_API_KEY", "orca-key")
+	t.Setenv("QED_API_KEY", "custom-key")
+
+	for _, test := range []struct {
+		name    string
+		baseURL string
+		wantKey string
+	}{
+		{name: "official endpoint", wantKey: "orca-key"},
+		{name: "custom endpoint", baseURL: "https://trusted.example/v1", wantKey: "custom-key"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var received runtimeConfig
+			dependencies := defaultCommandDependencies()
+			dependencies.newRuntime = func(config runtimeConfig) (*agent.Runtime, error) {
+				received = config
+				return agent.NewRuntime(agent.Options{Provider: echo.New()})
+			}
+			arguments := []string{
+				"run", "--provider", providerOrcaResponses, "--model", "orcarouter/auto",
+			}
+			if test.baseURL != "" {
+				arguments = append(arguments, "--base-url", test.baseURL)
+			}
+			arguments = append(arguments, "hello")
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDependencies(
+				context.Background(), arguments, &stdout, &stderr, dependencies,
+			)
+			if exitCode != 0 {
+				t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+			}
+			if received.provider != providerOrcaResponses || received.model != "orcarouter/auto" ||
+				received.apiKey != test.wantKey {
+				t.Fatalf("runtime config = %#v, want key %q", received, test.wantKey)
+			}
+		})
+	}
+}
+
+func TestDefaultOrcaRouterEndpointRequiresAPIKey(t *testing.T) {
+	t.Setenv("ORCAROUTER_API_KEY", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run(
+		context.Background(),
+		[]string{"run", "--provider", providerOrcaChat, "--model", "orcarouter/auto", "hello"},
+		&stdout,
+		&stderr,
+	)
+	if exitCode != 1 || !strings.Contains(stderr.String(), "ORCAROUTER_API_KEY is required") {
+		t.Fatalf("exit/stderr = %d/%q", exitCode, stderr.String())
+	}
+}
+
 func TestDefaultOpenAIEndpointRequiresAPIKey(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 

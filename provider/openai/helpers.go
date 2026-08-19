@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/qed-runtime/qed/agent"
@@ -74,14 +76,17 @@ type inputTokenDetails struct {
 	CacheWriteTokens int64 `json:"cache_write_tokens"`
 }
 
-func usage(input, output, total int64, details *inputTokenDetails) *agent.Usage {
-	if input == 0 && output == 0 && total == 0 {
+func usage(input, output, total int64, details *inputTokenDetails, costUSD json.Number) *agent.Usage {
+	costMicros := usdCostMicros(costUSD)
+	if input == 0 && output == 0 && total == 0 && costMicros == 0 {
 		return nil
 	}
 	if total == 0 {
 		total = input + output
 	}
-	reported := &agent.Usage{InputTokens: input, OutputTokens: output, TotalTokens: total}
+	reported := &agent.Usage{
+		InputTokens: input, OutputTokens: output, TotalTokens: total, CostMicros: costMicros,
+	}
 	if details == nil {
 		return reported
 	}
@@ -95,6 +100,34 @@ func usage(input, output, total int64, details *inputTokenDetails) *agent.Usage 
 	reported.CacheReadInputTokens = details.CachedTokens
 	reported.CacheWriteInputTokens = details.CacheWriteTokens
 	return reported
+}
+
+func usdCostMicros(value json.Number) int64 {
+	text := value.String()
+	if text == "" || len(text) > 64 {
+		return 0
+	}
+	if _, exponentText, found := strings.Cut(strings.ToLower(text), "e"); found {
+		exponent, err := strconv.ParseInt(exponentText, 10, 8)
+		if err != nil || exponent < -18 || exponent > 18 {
+			return 0
+		}
+	}
+	cost, ok := new(big.Rat).SetString(text)
+	if !ok || cost.Sign() <= 0 {
+		return 0
+	}
+	cost.Mul(cost, big.NewRat(1_000_000, 1))
+	quotient, remainder := new(big.Int), new(big.Int)
+	quotient.QuoRem(cost.Num(), cost.Denom(), remainder)
+	doubledRemainder := new(big.Int).Lsh(remainder, 1)
+	if doubledRemainder.Cmp(cost.Denom()) >= 0 {
+		quotient.Add(quotient, big.NewInt(1))
+	}
+	if !quotient.IsInt64() {
+		return 0
+	}
+	return quotient.Int64()
 }
 
 func mapStopReason(raw string, hasToolCalls bool) agent.StopReason {

@@ -19,7 +19,7 @@ A Provider implementation must:
 - normalize Tool Calls, stop reasons, and Usage into `agent` types
 - for an HTTP-based Provider, return `*provider.HTTPError` for a non-success response
 
-Provider-specific response IDs, model IDs, raw stop reasons, and
+Provider-specific request IDs, response IDs, model IDs, raw stop reasons, and
 `ProviderState` remain adapter-owned fields. Runtime treats `ProviderState` as
 opaque and only sends it back to the same Provider identity
 
@@ -109,6 +109,36 @@ because upstream shared buckets cannot be inferred from endpoint and model
 strings alone. This behavior follows the current [OpenAI rate-limit guidance](https://developers.openai.com/api/docs/guides/rate-limits)
 and [Anthropic rate-limit guidance](https://platform.claude.com/docs/en/api/rate-limits)
 
+## OrcaRouter Adapter
+
+`provider/orcarouter` reuses the tested OpenAI Responses and Chat Completions
+wire codecs while owning OrcaRouter routing behavior. The public APIs are
+`APIResponses` and `APIChatCompletions`; the corresponding CLI and JSON protocol
+names are `orcarouter-responses` and `orcarouter-chat`
+
+The Adapter sets `X-OrcaRouter-Session-Id` on each call. A configured QED
+Session takes priority, while an ephemeral Run uses its Run ID so every Tool
+turn in that Run remains together. The header value is a domain-separated
+SHA-256 digest over Provider, configured model, Agent, and scope identities
+rather than the raw QED identifier. This is stable routing input, not a secret or authorization
+token
+
+It also sets `X-OrcaRouter-Include-Cost: true` and normalizes:
+
+- `X-Orca-Request-Id` to `agent.Message.RequestID` on success and `provider.HTTPError.RequestID` on HTTP errors
+- `X-Orca-Resolved-Model` to `agent.Message.Model` when present
+- `usage.cost_usd` to rounded integer `agent.Usage.CostMicros`
+
+These fields follow OrcaRouter's current [Session Affinity](https://docs.orcarouter.ai/routing/session-affinity),
+[response header](https://docs.orcarouter.ai/routing/response-headers), and
+[per-request cost](https://docs.orcarouter.ai/api-reference/chat/create-a-chat-completion#headers) contracts
+
+Routed identifiers may resolve to models with different prompt-cache request
+fields and reporting behavior. The Adapter therefore reports no QED cache
+capability by default. A host may declare `CacheCapabilities` only after
+verifying the selected model or router contract. OrcaRouter Session Affinity
+and upstream implicit caching remain independent of that QED Cache Plan
+
 ## Contract test kit
 
 `provider/contracttest` is a public reusable test package. Its complete `Run`
@@ -174,12 +204,13 @@ contracttest.RunText(t, contracttest.TextOptions{
 ```
 
 QED applies the complete suite to OpenAI Responses, OpenAI Chat Completions,
-Anthropic Messages, and ChatGPT Codex Responses. The Echo Provider applies the
+OrcaRouter Responses and Chat Completions, Anthropic Messages, and ChatGPT Codex Responses. The Echo Provider applies the
 text subset because it has no model transport, Tool generation, or token Usage
 
 The first-party applications are executable examples:
 
 - [OpenAI contract tests](../provider/openai/contract_test.go)
+- [OrcaRouter contract tests](../provider/orcarouter/contract_test.go)
 - [Anthropic contract tests](../provider/anthropic/contract_test.go)
 - [ChatGPT Codex contract tests](../provider/openaicodex/contract_test.go)
 - [Echo text contract test](../provider/echo/contract_test.go)

@@ -56,6 +56,7 @@ type responsesResponse struct {
 		OutputTokens       int64              `json:"output_tokens"`
 		TotalTokens        int64              `json:"total_tokens"`
 		InputTokensDetails *inputTokenDetails `json:"input_tokens_details"`
+		CostUSD            json.Number        `json:"cost_usd"`
 	} `json:"usage"`
 }
 
@@ -168,6 +169,7 @@ func (provider *Provider) messageFromResponsesResponse(response responsesRespons
 			response.Usage.OutputTokens,
 			response.Usage.TotalTokens,
 			response.Usage.InputTokensDetails,
+			response.Usage.CostUSD,
 		),
 		ResponseID: response.ID,
 		Model:      response.Model,

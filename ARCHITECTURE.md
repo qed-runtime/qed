@@ -163,8 +163,14 @@ a hashed Cache Family, optional TTL and breakpoint, and optional host-priced
 forecast. Provider adapters translate that Plan to their wire format and
 normalize reported cache categories in `agent.Usage`
 
-`provider/openai`, `provider/openaicodex`, and `provider/anthropic` translate
-the common model to streaming HTTP APIs. The Codex package is deliberately a
+`provider/openai`, `provider/orcarouter`, `provider/openaicodex`, and
+`provider/anthropic` translate the common model to streaming HTTP APIs. The
+OrcaRouter package composes the OpenAI codecs with routing-specific transport
+headers and response observation rather than forking the wire implementation.
+It derives an opaque affinity digest from the Provider, configured model,
+Agent, and Session or Run scope, then normalizes the routed model, request ID,
+and reported USD cost.
+The Codex package is deliberately a
 separate dialect because it uses ChatGPT OAuth, a fixed backend, and additional
 account-routing headers rather than an OpenAI API key. Provider-private
 continuation state remains opaque and can be persisted by a Session Store

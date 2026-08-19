@@ -39,6 +39,7 @@ import (
 	"github.com/qed-runtime/qed/provider/echo"
 	"github.com/qed-runtime/qed/provider/openai"
 	"github.com/qed-runtime/qed/provider/openaicodex"
+	"github.com/qed-runtime/qed/provider/orcarouter"
 )
 
 const (
@@ -84,6 +85,8 @@ const (
 	providerOpenAIResponses = "openai-responses"
 	providerOpenAIChat      = "openai-chat"
 	providerOpenAICodex     = "openai-codex"
+	providerOrcaResponses   = "orcarouter-responses"
+	providerOrcaChat        = "orcarouter-chat"
 	providerAnthropic       = "anthropic"
 )
 
@@ -241,6 +244,30 @@ func defaultCommandDependencies() commandDependencies {
 				configured, err := openaicodex.New(openaicodex.Config{
 					AuthorizationSource: source,
 					Model:               config.model,
+				})
+				if err != nil {
+					return nil, err
+				}
+				modelProvider = configured
+			case providerOrcaResponses:
+				configured, err := orcarouter.New(orcarouter.Config{
+					API:             orcarouter.APIResponses,
+					APIKey:          config.apiKey,
+					BaseURL:         config.baseURL,
+					Model:           config.model,
+					MaxOutputTokens: config.maxOutputTokens,
+				})
+				if err != nil {
+					return nil, err
+				}
+				modelProvider = configured
+			case providerOrcaChat:
+				configured, err := orcarouter.New(orcarouter.Config{
+					API:             orcarouter.APIChatCompletions,
+					APIKey:          config.apiKey,
+					BaseURL:         config.baseURL,
+					Model:           config.model,
+					MaxOutputTokens: config.maxOutputTokens,
 				})
 				if err != nil {
 					return nil, err
@@ -990,6 +1017,7 @@ func runAgentCommand(dependencies commandDependencies) *cli.Command {
 		Example("configured Agent", `qed run --config qed.json --agent coordinator --cd . "hello"`).
 		Example("interactive approval", `qed run --config qed.json --approval prompt "hello"`).
 		Example("OpenAI response", `qed run --provider openai-responses --model MODEL "hello"`).
+		Example("OrcaRouter response", `qed run --provider orcarouter-responses --model orcarouter/auto "hello"`).
 		Example("ChatGPT Codex response", `qed run --provider openai-codex --auth-profile personal --model MODEL "hello"`).
 		Example("event output", `qed exec --json "hello"`).
 		Handle(func(commandContext *cli.Context, invocation *cli.Invocation) (cli.Outcome, error) {
@@ -1976,6 +2004,8 @@ func withProviderOptions(command *cli.Command) *cli.Command {
 					providerOpenAIResponses,
 					providerOpenAIChat,
 					providerOpenAICodex,
+					providerOrcaResponses,
+					providerOrcaChat,
 					providerAnthropic,
 				)).
 				Default(providerEcho).
@@ -2200,6 +2230,8 @@ func runtimeConfiguration(
 	switch providerName {
 	case providerOpenAIResponses, providerOpenAIChat:
 		keyEnvironment = "OPENAI_API_KEY"
+	case providerOrcaResponses, providerOrcaChat:
+		keyEnvironment = "ORCAROUTER_API_KEY"
 	case providerAnthropic:
 		keyEnvironment = "ANTHROPIC_API_KEY"
 	}

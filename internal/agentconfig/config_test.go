@@ -686,6 +686,37 @@ func TestLoadAllowsUnauthenticatedCustomEndpoint(t *testing.T) {
 	}
 }
 
+func TestLoadBuildsOrcaRouterProviderProfiles(t *testing.T) {
+	t.Parallel()
+
+	for _, protocol := range []string{"orcarouter-responses", "orcarouter-chat"} {
+		t.Run(protocol, func(t *testing.T) {
+			t.Parallel()
+			path := writeConfig(t, fmt.Sprintf(`{
+				"version": 1,
+				"providers": {
+					"router": {
+						"protocol": %q,
+						"base_url": "https://router.invalid/v1",
+						"model": "orcarouter/auto"
+					}
+				},
+				"agents": {"main": {"provider": "router"}}
+			}`, protocol))
+			configuration, err := agentconfig.Load(path, agentconfig.LoadOptions{})
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if got, err := configuration.ResolveAgent("main"); err != nil || got != "main" {
+				t.Errorf("ResolveAgent() = %q, %v", got, err)
+			}
+			if err := configuration.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestLoadBuildsContextAndCacheConfiguration(t *testing.T) {
 	t.Parallel()
 

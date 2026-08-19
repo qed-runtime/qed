@@ -8,8 +8,8 @@ The project is an early prototype, but its main architectural boundaries are
 executable today
 
 - asynchronous Runs with ordered streaming Events
-- OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, and
-  ChatGPT-authenticated Codex Responses Providers
+- OpenAI Responses, OpenAI Chat Completions, OrcaRouter Responses and Chat
+  Completions, Anthropic Messages, and ChatGPT-authenticated Codex Responses Providers
 - multiple Provider profiles in one Agent graph
 - concurrent subagents with collect, select, and consensus strategies
 - content-addressed subagent Result Packets with injectable Profile reduction
@@ -112,11 +112,13 @@ and Extension configuration values
 
 ## Connect a model API
 
-QED implements four streaming HTTP API dialects without model SDK dependencies
+QED implements six streaming HTTP API dialects without model SDK dependencies
 
 - `openai-responses`
 - `openai-chat`
 - `openai-codex`
+- `orcarouter-responses`
+- `orcarouter-chat`
 - `anthropic`
 
 The model ID is always explicit
@@ -128,6 +130,21 @@ go run ./cmd/qed run \
   --model "<model-id>" \
   "Reply with a short greeting"
 ```
+
+OrcaRouter uses a dedicated credential and its official OpenAI-compatible
+endpoint. Use a provider-prefixed model or a named router
+
+```sh
+export ORCAROUTER_API_KEY="<token>"
+go run ./cmd/qed run \
+  --provider orcarouter-responses \
+  --model "orcarouter/auto" \
+  "Reply with a short greeting"
+```
+
+The OrcaRouter Adapter keeps routed turns together with Session Affinity,
+records the resolved model and request ID, and requests `usage.cost_usd`
+It sends a stable digest instead of the raw QED Session or Run ID
 
 ```sh
 export ANTHROPIC_API_KEY="<token>"
@@ -149,7 +166,7 @@ go run ./cmd/qed run \
   "hello"
 ```
 
-Custom base URLs never receive the default OpenAI or Anthropic credential. Set
+Custom base URLs never receive the default OpenAI, OrcaRouter, or Anthropic credential. Set
 `QED_API_KEY` only when the custom endpoint is trusted and requires a key
 
 Provider adapter implementers can apply the reusable deterministic suite in
@@ -666,6 +683,7 @@ not grant the parent access by themselves
 - `github.com/qed-runtime/qed/session`
 - `github.com/qed-runtime/qed/provider/openai`
 - `github.com/qed-runtime/qed/provider/openaicodex`
+- `github.com/qed-runtime/qed/provider/orcarouter`
 - `github.com/qed-runtime/qed/provider/anthropic`
 - `github.com/qed-runtime/qed/capability`
 - `github.com/qed-runtime/qed/evidence`

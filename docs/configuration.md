@@ -167,7 +167,7 @@ different endpoints of the same dialect
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `protocol` | yes | `echo`, `openai-responses`, `openai-chat`, `openai-codex`, or `anthropic` |
+| `protocol` | yes | `echo`, `openai-responses`, `openai-chat`, `openai-codex`, `orcarouter-responses`, `orcarouter-chat`, or `anthropic` |
 | `base_url` | no | Trusted API base URL; omit for the official endpoint |
 | `model` | model Providers | Exact model identifier |
 | `token_env` | API-key Providers at official endpoints | Environment variable containing the credential |
@@ -182,12 +182,39 @@ different endpoints of the same dialect
 QED-side `rate_limit` policy for deterministic concurrency tests
 
 A custom endpoint may omit `token_env` for an unauthenticated local service.
-Configuration never falls back to `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
-`QED_API_KEY`. When `token_env` is present, the credential is resolved for each
+Configuration never falls back to `OPENAI_API_KEY`, `ORCAROUTER_API_KEY`,
+`ANTHROPIC_API_KEY`, or `QED_API_KEY`. When `token_env` is present, the credential is resolved for each
 HTTP request, which permits rotation by an embedding host
 
 The Provider profile ID is part of Provider identity and opaque continuation
 state, preventing state from one endpoint/profile from being reused by another
+
+`orcarouter-responses` and `orcarouter-chat` default to
+`https://api.orcarouter.ai/v1`. They send a stable digest of the QED Session ID,
+or the Run ID when no Session exists, through OrcaRouter Session Affinity. Raw
+QED identifiers are not sent. The Adapter requests per-call USD cost and maps
+the resolved model and OrcaRouter request ID into the completed Message
+
+```json
+{
+  "version": 1,
+  "default_agent": "router-agent",
+  "providers": {
+    "router": {
+      "protocol": "orcarouter-responses",
+      "model": "orcarouter/auto",
+      "token_env": "ORCAROUTER_API_KEY"
+    }
+  },
+  "agents": {
+    "router-agent": {"provider": "router"}
+  }
+}
+```
+
+Routed identifiers can resolve to models with different prompt-cache contracts,
+so QED Cache Plans stay disabled unless `cache_capabilities` is declared. This
+does not disable OrcaRouter's own Session Affinity or upstream implicit caching
 
 `openai-codex` reads a separately stored ChatGPT OAuth profile and uses the
 fixed ChatGPT Codex backend. It accepts `protocol`, `model`, `auth_profile`, and
